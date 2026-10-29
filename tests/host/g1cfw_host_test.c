@@ -173,7 +173,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/26", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/27", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -528,7 +528,7 @@ int main(void)
     /* Touch gestures: the redirected stock helper hands codes to the stock
      * semaphore by default, reports them when asked, and can swallow them. */
     uint8_t in_state[] = { 0xF0, 0x31 };
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 14);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 15);
     host_touch_code = 2;
     last_reply_len = 0;
     cfw_touch_event();                      /* semaphore not initialised yet: nothing given, nothing sent */
@@ -548,7 +548,7 @@ int main(void)
     cfw_touch_event();
     CHECK(host_sem_gives == 2 && last_reply[3] == 0 && last_reply[4] == 4 && last_reply[5] == 4);
     CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x03 && last_reply[4] == 4 && last_reply[5] == 4 && last_reply[7] == 2);
-    uint8_t in_bad[] = { 0xF0, 0x30, 0x10 };
+    uint8_t in_bad[] = { 0xF0, 0x30, 0x20 };
     CHECK(send_packet(in_bad, sizeof in_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     uint8_t in_short[] = { 0xF0, 0x30 };
     CHECK(send_packet(in_short, sizeof in_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
@@ -584,6 +584,25 @@ int main(void)
     CHECK(last_reply[3] == 1 && last_reply[4] == 7 && host_enqueues == 2 && host_sem_gives == 1);
     CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x0C && last_reply[9] == 7 && last_reply[10] == 5 && last_reply[12] == 3);
     CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK);
+
+    /* Wear events switch the panel unless the host keeps it. */
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
+    panel_cb_calls = 0;
+    cfw_stock_event(6, 0, 0);               /* worn: panel comes on through its own callback */
+    CHECK(panel_cb_calls == 1 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
+    cfw_stock_event(6, 0, 0);               /* already on: no second callback */
+    CHECK(panel_cb_calls == 1);
+    cfw_stock_event(8, 0, 0);               /* placed in the case: panel off */
+    CHECK(panel_cb_calls == 2 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    cfw_stock_event(7, 0, 0);               /* taken off while already off: nothing */
+    CHECK(panel_cb_calls == 2);
+    uint8_t in_manual[] = { 0xF0, 0x30, 0x10 };
+    CHECK(send_packet(in_manual, sizeof in_manual) == 0 && last_reply[2] == CFW_OK);
+    cfw_stock_event(6, 0, 0);               /* host owns the panel: wear ignored */
+    CHECK(panel_cb_calls == 2);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 3);   /* the earlier taken-off event switched it off once */
+    CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK);
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
 
     /* View offsets: added to the stock origins at flush time. */
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_COL_OFFSET) = 0;

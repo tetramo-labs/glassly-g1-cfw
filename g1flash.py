@@ -470,17 +470,19 @@ async def run_cfw_command(client, args, checkpoint):
                         'notify_events': bool(body[0] & 4), 'swallow_events': bool(body[0] & 8),
                         'last_gesture': TOUCH_CODES.get(body[1], body[1]), 'gestures': struct.unpack_from('<H', body, 2)[0],
                         'gestures_passed': struct.unpack_from('<H', body, 4)[0],
+                        'auto_panel': not body[0] & 0x10,
                         'last_event': STOCK_EVENTS.get(body[6], body[6]), 'events': struct.unpack_from('<H', body, 7)[0],
-                        'events_sent': struct.unpack_from('<H', body, 9)[0]}
+                        'events_sent': struct.unpack_from('<H', body, 9)[0], 'panel_autos': body[11] if len(body) > 11 else None}
             if args.action == 'state':
                 result = input_state(await link.check(CFW_INPUT_STATE))
             elif args.action == 'control':
                 flags = ((0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
-                         | (0x04 if args.notify_events else 0) | (0x08 if args.swallow_events else 0))
+                         | (0x04 if args.notify_events else 0) | (0x08 if args.swallow_events else 0)
+                         | (0x10 if args.no_auto_panel else 0))
                 await link.check(CFW_INPUT_CONTROL, bytes([flags]))
                 result = input_state(await link.check(CFW_INPUT_STATE))
             else:
-                flags = 0x01 | 0x04 | (0x02 if args.swallow else 0) | (0x08 if args.swallow_events else 0)
+                flags = 0x01 | 0x04 | (0x02 if args.swallow else 0) | (0x08 if args.swallow_events else 0) | (0x10 if args.no_auto_panel else 0)
                 await link.check(CFW_INPUT_CONTROL, bytes([flags]))
                 events, started = [], asyncio.get_running_loop().time()
                 deadline = started + args.seconds
@@ -864,6 +866,7 @@ def arguments(argv=None):
             child.add_argument('--notify', action='store_true', help='control: send INPUT_EVENT for each gesture')
             child.add_argument('--notify-events', action='store_true', help='control: send INPUT_EVENT for each stock event (head, wear, case)')
             child.add_argument('--swallow-events', action='store_true', help='keep stock events from the phone path while set')
+            child.add_argument('--no-auto-panel', action='store_true', help='leave panel power to the host instead of following wear events')
             child.add_argument('--keep', action='store_true', help='watch: leave notify/swallow set after returning')
         if command == 'imu':
             child.add_argument('--samples', type=int, default=1, help='attitude samples to read (right temple holds the IMU)')

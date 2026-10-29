@@ -287,11 +287,20 @@ the glasses sense:
 
 - `30` INPUT_CONTROL `[flags]`: bit 0 report gestures, bit 1 keep gestures
   from the stock handler (no dashboard, mic or temple sync), bit 2 report
-  stock events, bit 3 keep stock events from the phone path. All off at
-  boot, so a bare host sees no unsolicited traffic. Reply body `[flags]`;
-  an unknown bit is `bad-record`.
+  stock events, bit 3 keep stock events from the phone path, bit 4 leave
+  panel power to the host. All off at boot, so a bare host sees no
+  unsolicited traffic and the panel follows wear. Reply body `[flags]`; an
+  unknown bit is `bad-record`.
 - `31` INPUT_STATE: reply `[flags][last_gesture][gestures:u16]
-  [gestures_passed:u16][last_event][events:u16][events_sent:u16]`.
+  [gestures_passed:u16][last_event][events:u16][events_sent:u16]
+  [panel_autos]`.
+
+**Panel follows wear (G1CFW/27).** With the stock refresh pipeline stubbed
+nothing asks for the panel when the glasses are put on, so unless bit 4 is
+set the CFW switches it from the wear events: on at `worn` (6) through the
+panel's own callback, off at `taken off` (7), `in case open` (8) and `case
+closed` (`0b`). The frame buffer persists across the switch, so the last
+scene reappears. PANEL (`05`) still works for manual control.
 - `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
   gesture, class 1 stock event, from the temple that produced it. The host
   tool (`g1flash.py touch watch`) sets bits 0 and 2, prints events for a

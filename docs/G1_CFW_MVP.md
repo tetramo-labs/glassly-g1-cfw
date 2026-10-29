@@ -676,6 +676,14 @@ speech-shaped levels with pauses. Note the panels did not power on when the
 glasses were worn: with the stock refresh pipeline stubbed nothing asks for
 the panel, so a host has to send PANEL force-on (mode 2) before drawing.
 
+### G1CFW/27: panel follows wear (2026-10-29)
+
+No new hooks: `cfw_stock_event` already sees the wear codes, so it calls
+the panel's on callback at 6 (worn) and the off callback at 7, 8 and `0b`,
+unless INPUT_CONTROL bit 4 hands panel power to the host. The on callback
+is the same one PANEL mode 2 uses, which worked while docked when the
+stock resume path refused.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

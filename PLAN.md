@@ -174,10 +174,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    PDM capture session; the LC3 stream arrives as stock `F1` notifications
    (`g1flash.py mic record`, decoded by `tools/lc3_decode.py`; verified
    with speech while worn). G1CFW/26 makes depth a content shift inside
-   the flush, since the panel's column space is exactly 640 wide. Next:
-   panel power on wear (today a host must force the panel on), wakeword
-   and screen-wake takeover, raw PCM or per-microphone selection if the
-   stock audio thread allows it.
+   the flush, since the panel's column space is exactly 640 wide.
+   G1CFW/27 switches the panel on the wear events (off when taken off or
+   cased). Next: wakeword and screen-wake takeover, raw PCM or
+   per-microphone selection if the stock audio thread allows it.
    Each needs its own trace through the 1.5.60 binary. Out of scope: the
    R1, the volume gate, the BLE keyboard bridge, the light sensor, and a
    buzzer or compass (the G1 has neither). The 1.6.3 decompilation at
