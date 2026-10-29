@@ -441,6 +441,17 @@ showed nothing allocated. The heap already holds the 64 KB frame buffer and
 the stock upload queue. G1CFW/14 retries in 8 KB steps down to 8 KB and
 reports the size it obtained.
 
+### Hardware result for G1CFW/14: assets and shapes (2026-10-29)
+
+Right temple: the stock heap granted a **16 KB** arena (48, 40, 32 and 24 KB
+were refused). A 16,000-byte 1bpp test-pattern asset uploaded in 4 stream
+messages, ASSET_DRAW blitted it, a 12-byte string asset rendered through
+ASSET_TEXT, ASSET_INFO showed 2 assets and 16,012 bytes used, and the 8-record
+`shapes --demo` drew (filled and outlined rectangles, circle and ring, two
+lines, filled and outlined triangles). STATS 0 errors. The arena is therefore
+one full frame; a larger store needs static RAM reclaimed from stubbed stock
+features rather than the heap.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
