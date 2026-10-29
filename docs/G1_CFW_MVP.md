@@ -614,6 +614,23 @@ IMU streaming reuses the animation tick: IMU_CONTROL posts the CFW refresh
 message if the tick is idle, and each tick sends one IMU_SAMPLE from the
 attitude words at `0x20007c40`, sleeps the period and re-posts.
 
+**Hardware result (2026-10-29).** Both temples installed in one pass. On the
+right temple `imu --stream --period-ms 50 --samples 40` delivered samples
+at the requested 20 Hz (39 received over 1.95 s; the first was lost in the
+host tool, which then gained a separate queue for unsolicited packets).
+
+### G1CFW/24: microphone control (2026-10-29)
+
+Trace (1.5.60): the phone's quick-note flow reaches `dmic_record_start`
+(`0x3e1f0`), which drains the audio msgq (`0x31570`), calls
+`startAudioStreamRecord` (`0x3164c`: msgq put of message 1 at
+`0x20003a30` + semaphore give) and sets UI task state. The audio thread
+captures and LC3-encodes; `ble_process_req_dispatch` sends queued chunks
+through `send_dmic_msg` (`0x1a56a`) as `[F1][seq][chunk]` via the context's
+synchronous notify. `stopAudioStreamRecord` (`0x316f4`) queues message 3.
+MIC_CONTROL calls the start/stop routines directly, skipping the UI task;
+no new hooks.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

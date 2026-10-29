@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 23u
+#define CFW_PROTOCOL 24u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -22,7 +22,7 @@ enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_
        CFW_OBJ_CONTROL = 0x24, CFW_OBJ_ANIM = 0x25, CFW_ANIM_STATE = 0x26,
        CFW_VIEW = 0x14,
        CFW_INPUT_CONTROL = 0x30, CFW_INPUT_STATE = 0x31, CFW_INPUT_EVENT = 0x32,
-       CFW_IMU_CONTROL = 0x33, CFW_IMU_SAMPLE = 0x34 };
+       CFW_IMU_CONTROL = 0x33, CFW_IMU_SAMPLE = 0x34, CFW_MIC_CONTROL = 0x40 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
@@ -1598,6 +1598,65 @@ static void cfw_imu_control(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_IMU_CONTROL, CFW_OK, body, sizeof body);
 }
 
+/* --- microphone: start/stop the stock capture + LC3 + F1 stream ------------
+ * [op]: 1 start, 0 stop, 2 query. The stock audio thread streams
+ * [F1][seq][200 bytes LC3] notifications to the connected central until
+ * stopped; nothing stops it on disconnect, so the host must send 0 (or the
+ * glasses reboot). Reply body [recording][starts:u16][stops:u16][last_rc]. */
+typedef struct {
+    uint32_t magic;
+    uint8_t  recording;
+    int8_t   last_rc;
+    uint16_t starts;
+    uint16_t stops;
+    uint16_t pad;
+} cfw_mic;
+#define CFW_MIC_MAGIC 0x3143494du  /* "MIC1" */
+
+static cfw_mic *cfw_mic_state(void)
+{
+    cfw_mic *m = (cfw_mic *)((uint8_t *)cfw_imu_state() + sizeof(cfw_imu));
+    if (m->magic != CFW_MIC_MAGIC) {
+        uint8_t *p = (uint8_t *)m;
+        for (uint32_t i = 0; i < sizeof *m; i++) {
+            p[i] = 0;
+        }
+        m->magic = CFW_MIC_MAGIC;
+    }
+    return m;
+}
+
+static void cfw_mic_control(const uint8_t *p, uint32_t n)
+{
+    cfw_mic *m = cfw_mic_state();
+    if (n != 1 || p[0] > 2) {
+        cfw_reply(CFW_MIC_CONTROL, n != 1 ? CFW_BAD_LENGTH : CFW_BAD_RECORD, 0, 0);
+        return;
+    }
+    uint8_t status = CFW_OK;
+    if (p[0] == 1) {
+        int rc = FW_AUDIO_START();
+        m->last_rc = (int8_t)rc;
+        m->starts++;
+        if (rc == 0) {
+            m->recording = 1;
+        } else {
+            status = CFW_NO_MEMORY;   /* the stock msgq refused the start */
+        }
+    } else if (p[0] == 0) {
+        int rc = FW_AUDIO_STOP();
+        m->last_rc = (int8_t)rc;
+        m->stops++;
+        m->recording = 0;
+        if (rc != 0) {
+            status = CFW_NO_MEMORY;
+        }
+    }
+    uint8_t body[6] = { m->recording, (uint8_t)m->starts, (uint8_t)(m->starts >> 8),
+                        (uint8_t)m->stops, (uint8_t)(m->stops >> 8), (uint8_t)m->last_rc };
+    cfw_reply(CFW_MIC_CONTROL, status, body, sizeof body);
+}
+
 /* Called on the display thread in place of the stock refresh handler. */
 int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode)
 {
@@ -1943,6 +2002,9 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_IMU_CONTROL:
         cfw_imu_control(data + 2, len - 2);
+        break;
+    case CFW_MIC_CONTROL:
+        cfw_mic_control(data + 2, len - 2);
         break;
     default:
         cfw_reply(data[1], CFW_BAD_COMMAND, 0, 0);

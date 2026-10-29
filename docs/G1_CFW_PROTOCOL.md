@@ -233,6 +233,19 @@ attitude words (hundredths of a degree: roll-like, drifting yaw, pitch).
 - `34` IMU_SAMPLE: unsolicited `F0 34 00 [seq:u16][word0:i32][word1:i32]
   [pitch:i32]`.
 
+## `40` MIC_CONTROL: `[op]` (G1CFW/24 and later)
+
+`op` 1 starts the stock microphone capture (`startAudioStreamRecord`), 0
+stops it (`stopAudioStreamRecord`), 2 queries. While recording, the stock
+audio thread LC3-encodes the 16 kHz mono capture and the BLE dispatcher
+sends it to the connected central as stock `[F1][seq][200-byte chunk]`
+notifications, exactly as it does for the phone's quick-note flow. Nothing
+stops the stream on disconnect; the host must send `op` 0 (or the glasses
+must reboot). Reply body `[recording][starts:u16][stops:u16][last_rc]`;
+status `no-memory` when the stock msgq refused the request.
+`g1flash.py mic record --seconds N --out file.lc3` starts, captures, stops
+and writes the raw concatenated chunks.
+
 ## Input events (`30`-`32`, G1CFW/21 and later)
 
 Two stock paths are redirected into the CFW so the host can observe what

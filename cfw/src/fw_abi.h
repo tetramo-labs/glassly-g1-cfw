@@ -213,3 +213,15 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #ifndef FW_IMU_ATTITUDE
 #define FW_IMU_ATTITUDE ((volatile int32_t *)0x20007c40u)
 #endif
+
+/* Microphone (1.5.60). startAudioStreamRecord (0x3164c) queues message 1
+ * and stopAudioStreamRecord (0x316f4) message 3 to the stock audio thread's
+ * msgq and give its semaphore; the thread captures PDM audio, LC3-encodes
+ * it and enqueues 200-byte chunks that ble_process_req_dispatch sends as
+ * [F1][seq][chunk] notifications (send_dmic_msg, 0x1a56a). Stock reaches
+ * start only through the quick-note UI task (dmic_record_start, 0x3e1f0). */
+typedef int (*fw_audio_fn)(void);
+#ifndef FW_AUDIO_START
+#define FW_AUDIO_START ((fw_audio_fn)0x0003164d)
+#define FW_AUDIO_STOP  ((fw_audio_fn)0x000316f5)
+#endif

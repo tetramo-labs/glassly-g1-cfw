@@ -133,6 +133,9 @@ CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, 
 CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM, CFW_ANIM_STATE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
 CFW_INPUT_CONTROL, CFW_INPUT_STATE, CFW_INPUT_EVENT = 0x30, 0x31, 0x32
 CFW_VIEW, CFW_IMU_CONTROL, CFW_IMU_SAMPLE = 0x14, 0x33, 0x34
+CFW_MIC_CONTROL = 0x40
+UNSOLICITED = {0x32, 0x34}   # INPUT_EVENT, IMU_SAMPLE: never a reply to a request
+STOCK_AUDIO_SID = 0xF1
 DEPTH_SHIFT = {1: 22, 2: 8, 3: 0, 4: -4, 5: -8, 6: -10, 7: -12, 8: -14, 9: -16}  # stock cal_panel_canvas_coord, non-master sign
 IMU_ATTITUDE_ADDR = 0x20007c40  # three int32 words, hundredths of a degree (1.5.60; 1.6.3 DAT_20008484/88/8c)
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
@@ -153,11 +156,20 @@ class CfwLink:
         self.client = client
         self.rx = client.services.get_characteristic(NUS_RX)
         self.replies = asyncio.Queue()
+        self.audio = asyncio.Queue()   # stock [F1][seq][LC3 chunk] notifications
+        self.events = asyncio.Queue()  # unsolicited F0 packets (INPUT_EVENT, IMU_SAMPLE)
+
+    def on_notify(self, _sender, data):
+        data = bytes(data)
+        if data[:1] == b'\xf0':
+            (self.events if len(data) >= 2 and data[1] in UNSOLICITED else self.replies).put_nowait(data)
+        elif data[:1] == bytes([STOCK_AUDIO_SID]):
+            self.audio.put_nowait(data)
 
     async def __aenter__(self):
         if not self.rx or not self.client.services.get_characteristic(NUS_TX):
             raise FirmwareError('G1 Nordic UART service absent')
-        await self.client.start_notify(NUS_TX, lambda _s, d: self.replies.put_nowait(bytes(d)) if d[:1] == b'\xf0' else None)
+        await self.client.start_notify(NUS_TX, self.on_notify)
         return self
 
     async def __aexit__(self, *_):
@@ -478,7 +490,7 @@ async def run_cfw_command(client, args, checkpoint):
                     if remaining <= 0:
                         break
                     try:
-                        reply = await asyncio.wait_for(link.replies.get(), remaining)
+                        reply = await asyncio.wait_for(link.events.get(), remaining)
                     except asyncio.TimeoutError:
                         break
                     if len(reply) >= 7 and reply[1] == CFW_INPUT_EVENT:
@@ -513,6 +525,42 @@ async def run_cfw_command(client, args, checkpoint):
                 body = await link.check(CFW_VIEW, bytes([op]) + struct.pack('<hh', dx, dy))
                 result = view_state(body)
                 result['flushed'] = not args.no_flush
+        elif args.command == 'mic':
+            def mic_state(body):
+                return {'recording': bool(body[0]), 'starts': struct.unpack_from('<H', body, 1)[0],
+                        'stops': struct.unpack_from('<H', body, 3)[0], 'last_rc': struct.unpack_from('<b', body, 5)[0]}
+            if args.action == 'state':
+                result = mic_state(await link.check(CFW_MIC_CONTROL, bytes([2])))
+            elif args.action == 'stop':
+                result = mic_state(await link.check(CFW_MIC_CONTROL, bytes([0])))
+            else:
+                result = mic_state(await link.check(CFW_MIC_CONTROL, bytes([1])))
+                chunks, seqs, started = [], [], asyncio.get_running_loop().time()
+                deadline = started + args.seconds
+                try:
+                    while True:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            break
+                        try:
+                            packet = await asyncio.wait_for(link.audio.get(), remaining)
+                        except asyncio.TimeoutError:
+                            break
+                        seqs.append(packet[1])
+                        chunks.append(packet[2:])
+                        if len(chunks) == 1:
+                            print(f'first audio packet after {asyncio.get_running_loop().time() - started:.2f} s, {len(packet)} bytes', file=sys.stderr, flush=True)
+                finally:
+                    result.update({'stopped': mic_state(await link.check(CFW_MIC_CONTROL, bytes([0])))})
+                elapsed = asyncio.get_running_loop().time() - started
+                lost = sum(1 for a, b in zip(seqs, seqs[1:]) if (b - a) & 0xFF != 1)
+                payload = b''.join(chunks)
+                if args.out:
+                    args.out.write_bytes(payload)
+                result.update({'seconds': round(elapsed, 2), 'packets': len(chunks), 'bytes': len(payload),
+                               'chunk_bytes': sorted({len(c) for c in chunks}), 'sequence_gaps': lost,
+                               'packets_per_second': round(len(chunks) / elapsed, 1) if elapsed else None,
+                               'out': str(args.out) if args.out else None})
         elif args.command == 'imu' and args.stream:
             period = args.period_ms
             body = await link.check(CFW_IMU_CONTROL, bytes([period]) + struct.pack('<H', args.samples))
@@ -523,7 +571,7 @@ async def run_cfw_command(client, args, checkpoint):
                 if remaining <= 0:
                     break
                 try:
-                    reply = await asyncio.wait_for(link.replies.get(), remaining)
+                    reply = await asyncio.wait_for(link.events.get(), remaining)
                 except asyncio.TimeoutError:
                     break
                 if len(reply) >= 17 and reply[1] == CFW_IMU_SAMPLE:
@@ -532,10 +580,10 @@ async def run_cfw_command(client, args, checkpoint):
                               'word0': a / 100, 'word1': b / 100, 'pitch': pitch / 100}
                     samples.append(sample)
                     print(json.dumps(sample), file=sys.stderr, flush=True)
-            elapsed = asyncio.get_running_loop().time() - started
             await link.check(CFW_IMU_CONTROL, bytes([period, 0, 0]))
-            result = {'period_ms': period, 'requested': args.samples, 'received': len(samples), 'seconds': round(elapsed, 2),
-                      'rate_hz': round(len(samples) / elapsed, 1) if elapsed else None, 'samples': samples}
+            span = (samples[-1]['t'] - samples[0]['t']) if len(samples) > 1 else 0
+            result = {'period_ms': period, 'requested': args.samples, 'received': len(samples), 'seconds': round(span, 2),
+                      'rate_hz': round((len(samples) - 1) / span, 1) if span else None, 'samples': samples}
         elif args.command == 'imu':
             # Attitude words kept by the IMU fusion thread on the master (right) temple,
             # in hundredths of a degree; the third is the pitch the head-up detector uses.
@@ -660,7 +708,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'mic'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -727,7 +775,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'mic', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -814,6 +862,10 @@ def arguments(argv=None):
             child.add_argument('--interval', type=float, default=0.5, help='seconds between samples')
             child.add_argument('--stream', action='store_true', help='have the glasses push samples (G1CFW/23+) instead of polling PEEK')
             child.add_argument('--period-ms', type=int, default=50, help='stream: ms between samples (10-250)')
+        if command == 'mic':
+            child.add_argument('action', choices=('record', 'stop', 'state'))
+            child.add_argument('--seconds', type=float, default=5, help='record: how long to capture the stock LC3 stream (1-60)')
+            child.add_argument('--out', type=Path, help='record: write the concatenated LC3 chunks here')
         if command == 'view':
             child.add_argument('--height', type=int, choices=range(0, 9), help='stock height gear 0-8 (row origin (8-gear)*35)')
             child.add_argument('--depth', type=int, choices=range(1, 10), help='stock depth gear 1-9 (opposite column shift per temple)')
@@ -839,6 +891,8 @@ def arguments(argv=None):
         parser.error('--chunk-bytes must be between 1 and 480')
     if getattr(args, 'rle', False):
         args.stream = True
+    if getattr(args, 'command', None) == 'mic' and args.action == 'record' and not 1 <= args.seconds <= 60:
+        parser.error('--seconds must be between 1 and 60')
     if getattr(args, 'command', None) == 'imu':
         if args.stream and not (10 <= args.period_ms <= 250 and 1 <= args.samples <= 65534 and args.samples * args.period_ms <= 75000):
             parser.error('imu --stream needs a 10-250 ms period and at most 75 s of samples')
