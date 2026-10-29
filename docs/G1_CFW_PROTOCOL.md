@@ -222,9 +222,12 @@ the glasses sense:
   ESB band) and never reach the helper, so they are not reported.
 - **Stock events** (G1CFW/22). Everything the stock firmware reports to the
   phone as an `F5` notification passes through one poster function, now
-  `cfw_stock_event`: 2 head up, 3 head down (IMU fusion thread), 6 worn,
-  7 taken off outside the case, 8 placed in the open case, `0b` case closed
-  (work-mode checker), plus key and dashboard events the stock UI emits.
+  `cfw_stock_event`: 2 head up, 3 head down (IMU fusion thread); 6 worn,
+  7 taken off outside the case, 8 placed in the open case, 9 charging
+  state, `0a` battery percent, `0b` case closed, `0e` case charging state,
+  `0f` case battery (work-mode checker); `11` sent once per connection
+  after the bind check; plus key and dashboard events the stock UI emits
+  (`13`-`16`, `18`, `1e`, `20`, 0).
   The CFW re-implements the poster (direct `[F5][code][CB]` packet when the
   link is ready, otherwise the BLE context's event semaphore), so the stock
   phone path is unchanged unless swallowed.

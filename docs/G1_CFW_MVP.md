@@ -564,6 +564,21 @@ attitude words (`0x20007c40..0x20007c4c`, from the 1.5.60 `get_imu_info`
 literal pool) read as zero while docked; the fusion thread sleeps in work
 modes 1 and 8, so they need a worn test.
 
+**Hardware result (both temples, 2026-10-29).** G1CFW/22 installed on the
+left (over /21) and right (over /21, after the Mac's stale bond for the
+right temple was forgotten in System Settings; the stale record had made
+every connection fail with CoreBluetooth error 14 "Peer removed pairing
+information") in one upload pass each. `touch watch` on the left temple
+while docked with the lid open reported, right after connecting, `11`
+(bind check), 8 in-case-open, `0a` battery, 9 charging, `0e` case charging
+and `0f` case battery. With the user holding the glasses out of the case
+and then wearing them: `11`, 6 worn, `0a`, 9, then on docking 8, `0e`,
+`0f`. Counters persisted across watches (events 17, all forwarded to the
+stock path). No head-up/down event was produced during a short look up and
+down; the stock detector needs a sustained pitch past its thresholds in an
+eligible screen state, so that test is still open. The IMU attitude words
+read zero while docked.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

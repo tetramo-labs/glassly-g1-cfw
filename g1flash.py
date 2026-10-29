@@ -133,7 +133,8 @@ CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, 
 CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM, CFW_ANIM_STATE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
 CFW_INPUT_CONTROL, CFW_INPUT_STATE, CFW_INPUT_EVENT = 0x30, 0x31, 0x32
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
-STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 0x0b: 'in-case-closed'}
+STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 9: 'charging',
+                10: 'battery', 0x0b: 'in-case-closed', 0x0e: 'case-charging', 0x0f: 'case-battery', 0x11: 'bind-finished'}
 EVENT_CLASSES = {0: ('touch', TOUCH_CODES), 1: ('stock', STOCK_EVENTS)}
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
