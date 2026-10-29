@@ -538,7 +538,9 @@ synchronous Nordic UART notify the stock `#t` reply uses.
 
 ## References and remaining work
 
-- Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
+- Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
+  https://github.com/JohnRThomas/even_realities_decomp/tree/repro163, the
+  `src/app` sources in this repo come from it).
 - Local g2flash inspected at `1a6db4fd75de202a96599cc8f9f12fa721e7c3ce`.
 - [MCUboot image format](https://docs.mcuboot.com/design.html#image-format).
 - [Zephyr SMP framing](https://docs.zephyrproject.org/latest/services/device_mgmt/smp_protocol.html)

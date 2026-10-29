@@ -164,8 +164,13 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 8. **Inputs and sensors in scope:** touchpad gestures (G1CFW/21: every
    gesture code passes through the CFW; the host can watch them and keep
    them from the stock handler), then head-up/IMU events, wear detection,
-   buzzer, compass, microphone streaming and control, wakeword and
-   screen-wake takeover. Each needs its own trace through the 1.5.60 binary.
+   microphone streaming and control, wakeword and screen-wake takeover.
+   Each needs its own trace through the 1.5.60 binary. Out of scope: the
+   R1, the volume gate, the BLE keyboard bridge, the light sensor, and a
+   buzzer or compass (the G1 has neither). The 1.6.3 decompilation at
+   https://github.com/JohnRThomas/even_realities_decomp/tree/repro163 is a
+   reference for function names and control flow; addresses come from the
+   1.5.60 binary.
 9. **Phone path.** G1CFW/20 removes the stock central policy (any central
    may connect and stay connected; no pairing). Verified: the Mac pinged the
    left temple while the glasses were worn, out of the case, which unblocks
