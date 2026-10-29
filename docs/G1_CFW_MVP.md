@@ -637,6 +637,16 @@ word at `0x20007d14` is 0, queues them for the BLE dispatcher, which sends
 byte to 1 to end the session (from `exit_mic_mode`); `0x30ecc` sets 0 or 2.
 G1CFW/25's MIC_CONTROL drives those three state items directly; no hooks.
 
+**Hardware result (2026-10-29).** Both temples installed in one pass. On the
+left temple, docked, `mic record --seconds 4` got its first `F1` packet
+0.12 s after the start and then 39 packets of 200 bytes with no sequence
+gaps (9.6 packets/s); stop returned the mode byte to 1. Decoding with
+liblc3: 20-byte frames at 10 ms give 3.90 s of audio for the 4 s capture
+with no decoder errors, so the stock stream is 16 kHz LC3 at 16 kbit/s,
+ten frames per chunk; 40-byte frames decode without errors too but yield
+half the duration, so they are wrong. The docked capture is loud noise
+(peak at full scale), to be judged against a spoken capture while worn.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

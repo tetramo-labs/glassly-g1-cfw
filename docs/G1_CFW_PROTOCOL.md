@@ -249,7 +249,8 @@ stream, 1 stopped, 2 capture without sending; `armed` non-zero while the
 main thread owns a session). `g1flash.py mic record --seconds N --out
 file.lc3` starts, captures, stops and writes the raw concatenated chunks;
 `tools/lc3_decode.py file.lc3` turns the capture into a WAV through liblc3
-(`brew install liblc3`), assuming 10 ms frames of 40 bytes at 16 kHz.
+(`brew install liblc3`): each 200-byte chunk is ten 10 ms LC3 frames of
+20 bytes (16 kbit/s) at 16 kHz, so one chunk arrives every 100 ms.
 
 ## Input events (`30`-`32`, G1CFW/21 and later)
 

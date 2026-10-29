@@ -2,8 +2,8 @@
 """Decode a raw LC3 capture from `g1flash.py mic record` to WAV via liblc3 (brew install liblc3).
 
 The stock G1 stream is 16 kHz mono; each F1 notification carries 200 bytes
-that `--frame-bytes` splits into fixed-size frames (default 40 bytes = 10 ms
-at 32 kbit/s). Pass --selftest to encode a tone with the same library and
+that `--frame-bytes` splits into fixed-size frames (default 20 bytes = 10 ms
+at 16 kbit/s, which is what the stock stream carries). Pass --selftest to encode a tone with the same library and
 check the round trip without any glasses."""
 import argparse
 import ctypes
@@ -90,7 +90,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('capture', nargs='?', type=Path)
     parser.add_argument('--out', type=Path)
-    parser.add_argument('--frame-bytes', type=int, default=40)
+    parser.add_argument('--frame-bytes', type=int, default=20)
     parser.add_argument('--frame-us', type=int, default=10000)
     parser.add_argument('--rate', type=int, default=16000)
     parser.add_argument('--selftest', action='store_true')
