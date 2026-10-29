@@ -130,7 +130,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/10", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/11", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -306,6 +306,23 @@ int main(void)
     tpk[0] = 0xF0; tpk[1] = 0x10; tpk[2] = 40; tpk[3] = 0x03; tpk[4] = sizeof tmsg; tpk[5] = 0; tpk[6] = (uint8_t)crc; tpk[7] = (uint8_t)(crc >> 8);
     memcpy(tpk + 8, tmsg, sizeof tmsg);
     CHECK(send_packet(tpk, sizeof tpk) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 1 && utf_calls == 3);
+
+    /* COPY: scroll a 4x3 block up by one row (overlapping), then sideways, then flush. */
+    memset(frame, 0, 200 * 320);
+    for (int y = 0; y < 3; y++) { frame[(10 + y) * 320 + 5] = (uint8_t)(0x11 * (y + 1)); frame[(10 + y) * 320 + 6] = (uint8_t)(0xA0 + y); }
+    uint8_t up[] = { 0xF0, 0x07, 0x00, 10, 0, 10, 0, 4, 0, 3, 0, 10, 0, 9, 0 };   /* src (10,10) 4x3 -> dst (10,9) */
+    CHECK(send_packet(up, sizeof up) == 0 && last_reply[2] == CFW_OK);
+    CHECK(frame[9 * 320 + 5] == 0x11 && frame[10 * 320 + 5] == 0x22 && frame[11 * 320 + 5] == 0x33 && frame[12 * 320 + 5] == 0x33);
+    uint8_t down[] = { 0xF0, 0x07, 0x00, 10, 0, 9, 0, 4, 0, 3, 0, 10, 0, 11, 0 };  /* src (10,9) 4x3 -> dst (10,11): overlap downward */
+    CHECK(send_packet(down, sizeof down) == 0 && last_reply[2] == CFW_OK);
+    CHECK(frame[11 * 320 + 5] == 0x11 && frame[12 * 320 + 5] == 0x22 && frame[13 * 320 + 5] == 0x33 && frame[13 * 320 + 6] == 0xA2);
+    uint8_t right[] = { 0xF0, 0x07, 0x02, 10, 0, 11, 0, 4, 0, 1, 0, 12, 0, 11, 0 }; /* same row, shift right by 2 px, flush */
+    reflash_calls = 0;
+    CHECK(send_packet(right, sizeof right) == 0 && last_reply[2] == CFW_OK && frame[11 * 320 + 6] == 0x11 && frame[11 * 320 + 7] == 0xA0 && frame[11 * 320 + 5] == 0x11);
+    CHECK(reflash_calls == 1 && last_rect[2] == 12 && last_rect[3] == 11 && last_rect[4] == 16 && last_rect[5] == 11);
+    uint8_t copy_bad[] = { 0xF0, 0x07, 0x00, 10, 0, 10, 0, 4, 0, 3, 0, 0x7E, 0x02, 9, 0 }; /* dst x 638 + 4 > 640 */
+    CHECK(send_packet(copy_bad, sizeof copy_bad) == 0 && last_reply[2] == CFW_BAD_RECT);
+    CHECK(send_packet(up, 12) == 0 && last_reply[2] == CFW_BAD_LENGTH);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

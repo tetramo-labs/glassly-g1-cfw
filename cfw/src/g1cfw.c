@@ -12,10 +12,10 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 10u
+#define CFW_PROTOCOL 11u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
-       CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_STREAM = 0x10, CFW_STATS = 0x11 };
+       CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_STREAM = 0x10, CFW_STATS = 0x11 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A };
@@ -380,6 +380,52 @@ static uint8_t cfw_text(const uint8_t *p, uint32_t n)
     return (flags & CFW_FLAG_FLUSH) ? cfw_flush(panel, &box) : CFW_OK;
 }
 
+/* [flags][src rect][dst x:u16][dst y:u16]: copy a rectangle within the frame
+ * (overlap-safe, so it can scroll). flags bit 1 pushes the destination. */
+static uint8_t cfw_copy(const uint8_t *p, uint32_t n)
+{
+    cfw_rect src, dst;
+    if (n < 13) {
+        return CFW_BAD_LENGTH;
+    }
+    if (!cfw_parse_rect(p + 1, &src)) {
+        return CFW_BAD_RECT;
+    }
+    dst = src;
+    dst.x0 = rd16(p + 9);
+    dst.y0 = rd16(p + 11);
+    if (dst.x0 & 1u || dst.x0 + dst.w > FW_FRAME_WIDTH || dst.y0 + dst.h > FW_FRAME_HEIGHT) {
+        return CFW_BAD_RECT;
+    }
+    uint8_t *panel = cfw_panel();
+    uint32_t bytes = src.w / 2;
+    /* Walk rows in the direction that keeps the source ahead of the write. */
+    if (dst.y0 > src.y0) {
+        for (uint32_t y = src.h; y-- > 0;) {
+            const uint8_t *s = cfw_row(panel, src.y0 + y, src.x0);
+            uint8_t *d = cfw_row(panel, dst.y0 + y, dst.x0);
+            for (uint32_t i = 0; i < bytes; i++) {
+                d[i] = s[i];
+            }
+        }
+    } else {
+        for (uint32_t y = 0; y < src.h; y++) {
+            const uint8_t *s = cfw_row(panel, src.y0 + y, src.x0);
+            uint8_t *d = cfw_row(panel, dst.y0 + y, dst.x0);
+            if (dst.y0 == src.y0 && dst.x0 > src.x0) {
+                for (uint32_t i = bytes; i-- > 0;) {
+                    d[i] = s[i];
+                }
+            } else {
+                for (uint32_t i = 0; i < bytes; i++) {
+                    d[i] = s[i];
+                }
+            }
+        }
+    }
+    return (p[0] & CFW_FLAG_FLUSH) ? cfw_flush(panel, &dst) : CFW_OK;
+}
+
 /* Run one command record (same bodies as the packet commands). */
 static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 {
@@ -388,6 +434,7 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
     case CFW_FILL:  return cfw_fill(p, n);
     case CFW_FLUSH: return cfw_flush_cmd(p, n);
     case CFW_TEXT:  return cfw_text(p, n);
+    case CFW_COPY:  return cfw_copy(p, n);
     default:        return CFW_BAD_COMMAND;
     }
 }
@@ -558,6 +605,9 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_TEXT:
         cfw_reply(CFW_TEXT, cfw_text(data + 2, len - 2), 0, 0);
+        break;
+    case CFW_COPY:
+        cfw_reply(CFW_COPY, cfw_copy(data + 2, len - 2), 0, 0);
         break;
     case CFW_PANEL:
         cfw_panel_cmd(data + 2, len - 2);

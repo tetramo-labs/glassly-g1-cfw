@@ -39,7 +39,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (10 for this document) and the version is the stock base
+protocol revision (11 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -104,6 +104,13 @@ must stay within 200 rows (so `y1 <= 173` for font 0). Text is 1-240 bytes;
 `\n` moves to the next line. Glyphs are only on or off; there is no grey
 level. TEXT is also a valid stream record.
 
+## `07` COPY: `[flags][src rect][dst x:u16][dst y:u16]`
+
+Copies a rectangle to another position in the frame buffer. Overlapping
+source and destination are handled, so it can scroll a region by any offset.
+Destination x must be even and the rectangle must fit. `flags` bit 1 pushes
+the destination rectangle afterwards. COPY is also a valid stream record.
+
 ## `10` STREAM: `[seq][flags][data]`
 
 Multi-packet messages with one reply per message, so the phone can write
@@ -116,7 +123,7 @@ get no reply. The last packet is answered `F0 10 <status> <seq> <records done>`
 after the message runs.
 
 A message is a list of records `[cmd:u8][len:u16][payload]` using the BLIT,
-FILL, FLUSH and TEXT payloads above, so one message can carry a clear, several
+FILL, FLUSH, TEXT and COPY payloads above, so one message can carry a clear, several
 compressed bands and a single flush. The first failing record stops the
 message; `records done` says how many ran.
 

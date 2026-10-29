@@ -128,7 +128,7 @@ async def query_ping(client, timeout=8):
 
 
 CFW_SID = 0xF0
-CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_STREAM, CFW_STATS = 0, 1, 2, 3, 4, 5, 6, 0x10, 0x11
+CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY, CFW_STREAM, CFW_STATS = 0, 1, 2, 3, 4, 5, 6, 7, 0x10, 0x11
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font'}
 CFW_MSG_MAX = 4096
@@ -326,6 +326,11 @@ async def run_cfw_command(client, args, checkpoint):
             payload = bytes([args.font, flags]) + struct.pack('<HHHH', x0, y0, x1, y1) + bytes([args.lines]) + args.text.encode('utf-8')
             await link.check(CFW_TEXT, payload)
             result = {'text': args.text, 'font': args.font, 'box': args.box, 'lines': args.lines, 'flushed': not args.no_flush}
+        elif args.command == 'copy':
+            x, y, w, h = args.rect
+            flags = 0 if args.no_flush else 0x02
+            await link.check(CFW_COPY, bytes([flags]) + rect_bytes(x, y, w, h) + struct.pack('<HH', args.to[0], args.to[1]))
+            result = {'copied': args.rect, 'to': args.to, 'flushed': not args.no_flush}
         elif args.command == 'stats':
             body = await link.check(CFW_STATS)
             result = {'messages': struct.unpack_from('<H', body, 0)[0], 'errors': struct.unpack_from('<H', body, 2)[0],
@@ -436,7 +441,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -499,7 +504,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -540,7 +545,10 @@ def arguments(argv=None):
                                help='x0,y0,x1,y1 (even x; y1 must leave room for a glyph cell)')
             child.add_argument('--lines', type=int, default=1)
             child.add_argument('--clear', action='store_true', help='Clear the box before drawing')
-        if command in ('fill', 'draw', 'text'):
+        if command == 'copy':
+            child.add_argument('--rect', type=lambda v: tuple(int(x) for x in v.split(',')), required=True, help='source x,y,w,h')
+            child.add_argument('--to', type=lambda v: tuple(int(x) for x in v.split(',')), required=True, help='destination x,y')
+        if command in ('fill', 'draw', 'text', 'copy'):
             child.add_argument('--no-flush', action='store_true', help='Write the frame buffer only; do not push to the panel')
         if command == 'draw':
             child.add_argument('--stream', action='store_true', help='Send as pipelined multi-packet messages (G1CFW/9+)')
