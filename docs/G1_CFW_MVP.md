@@ -719,6 +719,31 @@ stock-event path from /27 stays as a second, connected-only source; both
 check the powered flag first, so they never fight. Host test: the detour is
 `#ifdef __thumb__`, `cfw_work_mode` is called directly.
 
+**Hardware result (both temples, 2026-10-29).** G1CFW/28 installed over
+/27 on both temples in one pass each while worn. After the reboot the
+detour was live (INPUT_STATE: 2 mode changes, boot then normal standby,
+mode byte 3) but the panels were off again: `draw` answered `panel-off`
+and the state byte at +0xfea read 1 (suspended). The stock display-off
+path (`0x2a2f8`: page byte to 0, then `global_system_suspend` at
+`0x2d78c`, which sleeps 300 ms and calls the panel's suspend callback) had
+run with the mode already 3, so no mode change announced it. A mode-change
+hook alone is not enough; the stock also switches the panel on its own.
+
+### G1CFW/29: reconcile and refuse (2026-10-29)
+
+Two more entry detours in the same style. `check_work_mode` (`0x28fa4`,
+`push.w {r4-r8, sb, sl, lr}` displaced, r0-r2 preserved across the call)
+runs every 200 ms on the low-speed thread, so `cfw_work_mode_tick`
+reconciles panel power with the mode byte on every pass: whatever turned
+the panel off while worn, it is back within 200 ms with the frame buffer
+pushed again. `global_system_suspend` (`0x2d78c`, `push {r3, r4, r5, lr}`
+and `ldrb.w r3, [r0, #0xfea]` displaced) is gated by `cfw_suspend_gate`:
+while the CFW manages the panel the detour returns 0 to the caller without
+suspending, so the display-off path no longer blanks a worn pair and the
+paired `global_system_resume` stays a no-op. INPUT_STATE gained the two
+counters (checker passes, suspends refused) as low bytes; the reply is
+capped at 20 bytes, so the three counters are single bytes.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

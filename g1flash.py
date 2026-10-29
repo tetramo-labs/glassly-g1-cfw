@@ -477,7 +477,9 @@ async def run_cfw_command(client, args, checkpoint):
                         'events_sent': struct.unpack_from('<H', body, 9)[0], 'panel_autos': body[11] if len(body) > 11 else None,
                         'work_mode': WORK_MODES.get(body[12], body[12]) if len(body) > 15 else None,
                         'last_mode_request': WORK_MODES.get(body[13], body[13]) if len(body) > 15 else None,
-                        'mode_changes': struct.unpack_from('<H', body, 14)[0] if len(body) > 15 else None}
+                        'mode_changes': body[14] if len(body) > 16 else None,
+                        'checks': body[15] if len(body) > 16 else None,
+                        'suspends_skipped': body[16] if len(body) > 16 else None}
             if args.action == 'state':
                 result = input_state(await link.check(CFW_INPUT_STATE))
             elif args.action == 'control':

@@ -173,7 +173,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/28", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/29", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -528,7 +528,7 @@ int main(void)
     /* Touch gestures: the redirected stock helper hands codes to the stock
      * semaphore by default, reports them when asked, and can swallow them. */
     uint8_t in_state[] = { 0xF0, 0x31 };
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 19);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 20);
     host_touch_code = 2;
     last_reply_len = 0;
     cfw_touch_event();                      /* semaphore not initialised yet: nothing given, nothing sent */
@@ -620,6 +620,25 @@ int main(void)
     CHECK(panel_cb_calls == 2);
     state[FW_STATE_WORK_MODE] = 4;
     CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 5 && last_reply[15] == 4 && last_reply[16] == 9 && last_reply[17] == 4 && last_reply[18] == 0);
+
+    /* The 200 ms checker pass reconciles the panel with the current mode
+     * (the stock display-off path switches it without a mode change). */
+    state[FW_STATE_WORK_MODE] = 3;
+    pushed_row[7] = 0;
+    cfw_work_mode_tick();                   /* worn, panel found off: back on, frame pushed */
+    CHECK(panel_cb_calls == 3 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5);
+    cfw_work_mode_tick();                   /* steady: nothing */
+    CHECK(panel_cb_calls == 3);
+    state[FW_STATE_WORK_MODE] = 5;
+    cfw_work_mode_tick();                   /* charging in the case: off */
+    CHECK(panel_cb_calls == 4 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    CHECK(cfw_suspend_gate(state) == 1);    /* stock suspend refused while the CFW manages the panel */
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 7 && last_reply[17] == 4 && last_reply[18] == 3 && last_reply[19] == 1);
+    CHECK(send_packet(in_manual, sizeof in_manual) == 0 && last_reply[2] == CFW_OK);
+    state[FW_STATE_WORK_MODE] = 3;
+    cfw_work_mode_tick();                   /* host owns the panel: no switch */
+    CHECK(panel_cb_calls == 4 && cfw_suspend_gate(state) == 0);
+    CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK);
     host_frame[7] = 0;
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
 

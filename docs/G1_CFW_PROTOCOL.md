@@ -293,9 +293,10 @@ the glasses sense:
   unknown bit is `bad-record`.
 - `31` INPUT_STATE: reply `[flags][last_gesture][gestures:u16]
   [gestures_passed:u16][last_event][events:u16][events_sent:u16]
-  [panel_autos][work_mode][last_mode][mode_changes:u16]` (the last four
-  since G1CFW/28: the stock work mode now, the last mode asked of
-  `change_work_mode`, and how many times it was entered).
+  [panel_autos][work_mode][last_mode][mode_changes][checks][suspends_skipped]`
+  (since G1CFW/28-29: the stock work mode now, the last mode asked of
+  `change_work_mode`, and the low bytes of three counters: mode changes,
+  200 ms checker passes, stock display suspends refused).
 
 **Panel follows wear (G1CFW/27, reworked in /28).** With the stock refresh
 pipeline stubbed nothing asks for the panel when the glasses are put on, so
@@ -308,8 +309,14 @@ wear state machine resets when nothing is). The stock work-mode switch
 (`change_work_mode`, detoured at its entry) runs whether or not one is:
 modes 2 `normal-run` and 3 `normal-standby` mean worn and switch on, 4
 `normal-low-power` (taken off), 5 and 6 (charging in the case) and 8 (deep
-sleep) switch off; 0, 1, 7 and 9 are left alone. PANEL (`05`) still works
-for manual control.
+sleep) switch off; 0, 1, 7 and 9 are left alone. G1CFW/29 adds the two
+pieces that make this hold: the stock work-mode checker, which runs every
+200 ms, reconciles panel power with the current mode on each pass (the
+stock display-off path switches the panel without a mode change), and the
+stock system suspend is refused outright while the CFW manages the panel,
+so nothing blanks a worn pair but the host. With bit 4 set both stand
+down and the stock suspend works again. PANEL (`05`) still works for
+manual control.
 - `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
   gesture, class 1 stock event, from the temple that produced it. The host
   tool (`g1flash.py touch watch`) sets bits 0 and 2, prints events for a

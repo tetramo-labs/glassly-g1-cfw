@@ -229,6 +229,20 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #define FW_STATE_WORK_MODE 0x1
 #define FW_CHANGE_WORK_MODE_RESUME_LO 0x6ee5
 #define FW_CHANGE_WORK_MODE_RESUME_HI 0x0001
+/* check_work_mode (1.5.60 0x28fa4) entry: push.w {r4-r8, sb, sl, lr} is
+ * displaced, the detour resumes at 0x28fa8 (mov r4, r0) with r0-r2 intact. */
+#define FW_CHECK_WORK_MODE_RESUME_LO 0x8fa9
+#define FW_CHECK_WORK_MODE_RESUME_HI 0x0002
+/* global_system_suspend (1.5.60 0x2d78c): push {r3, r4, r5, lr} and
+ * ldrb.w r3, [r0, #0xfea] are displaced (the detour covers 4 of their 6
+ * bytes; the orphaned half-word at 0x2d790 is never executed), resume at
+ * 0x2d792 (mov r4, r0). It sets the state byte at +0xfea to 2, sleeps
+ * about 300 ms, calls the panel's suspend callback (+0x04) and leaves 1;
+ * callers include the display-off path (0x2a2f8) that runs with the
+ * glasses worn and no stock page, which is what blanked the lenses after
+ * boot under G1CFW/28. */
+#define FW_SYSTEM_SUSPEND_RESUME_LO 0x7793
+#define FW_SYSTEM_SUSPEND_RESUME_HI 0x0002
 
 /* IMU attitude (1.5.60): three int32 words in hundredths of a degree kept by
  * imu_fusion_thread on the master temple (1.6.3 DAT_20008484/88/8c). The

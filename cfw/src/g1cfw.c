@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 28u
+#define CFW_PROTOCOL 29u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1443,8 +1443,10 @@ typedef struct {
     uint8_t  last_mode;     /* last work mode asked of change_work_mode */
     uint8_t  reserved;
     uint16_t mode_changes;  /* change_work_mode entries seen since boot */
+    uint16_t checks;        /* check_work_mode passes seen (one per 200 ms) */
+    uint16_t suspends_skipped; /* stock display suspends the CFW refused */
 } cfw_input;
-#define CFW_INPUT_MAGIC 0x34504e49u  /* "INP4" */
+#define CFW_INPUT_MAGIC 0x35504e49u  /* "INP5" */
 #define CFW_INPUT_NOTIFY        0x01u
 #define CFW_INPUT_SWALLOW       0x02u
 #define CFW_INPUT_NOTIFY_EVENT  0x04u
@@ -1560,17 +1562,18 @@ static void cfw_input_control(const uint8_t *p, uint32_t n)
 }
 
 /* Reply body: [flags][last_code][count:u16][stock_passed:u16][last_event][events:u16][events_sent:u16]
- * [panel_autos][work_mode][last_mode][mode_changes:u16]. */
+ * [panel_autos][work_mode][last_mode][mode_changes][checks][suspends_skipped] (low bytes of
+ * the three counters: replies are capped at 20 bytes). */
 static void cfw_input_report(void)
 {
     cfw_input *in = cfw_input_state();
     uint8_t *state = FW_GET_STATE();
-    uint8_t body[16] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
+    uint8_t body[17] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
                          (uint8_t)in->stock_passed, (uint8_t)(in->stock_passed >> 8), in->last_event,
                          (uint8_t)in->events, (uint8_t)(in->events >> 8),
                          (uint8_t)in->events_sent, (uint8_t)(in->events_sent >> 8), in->panel_autos,
                          state[FW_STATE_WORK_MODE], in->last_mode,
-                         (uint8_t)in->mode_changes, (uint8_t)(in->mode_changes >> 8) };
+                         (uint8_t)in->mode_changes, (uint8_t)in->checks, (uint8_t)in->suspends_skipped };
     cfw_reply(CFW_INPUT_STATE, CFW_OK, body, sizeof body);
 }
 
@@ -1581,20 +1584,53 @@ static void cfw_input_report(void)
  * panel in step with wearing: on for 2 (normal run) and 3 (normal standby,
  * worn without a stock page), off for 4 (taken off), 5 and 6 (in the case)
  * and 8 (deep sleep). 0, 1, 7 and 9 are left to the stock body. */
-int cfw_work_mode(uint32_t mode)
+static void cfw_panel_for_mode(cfw_input *in, uint32_t mode)
 {
-    cfw_input *in = cfw_input_state();
-    in->mode_changes++;
-    in->last_mode = (uint8_t)mode;
     if (in->flags & CFW_INPUT_NO_AUTO_PANEL) {
-        return 0;
+        return;
     }
     if (mode == 2 || mode == 3) {
         cfw_auto_panel(in, 1);
     } else if ((mode >= 4 && mode <= 6) || mode == 8) {
         cfw_auto_panel(in, 0);
     }
+}
+
+int cfw_work_mode(uint32_t mode)
+{
+    cfw_input *in = cfw_input_state();
+    in->mode_changes++;
+    in->last_mode = (uint8_t)mode;
+    cfw_panel_for_mode(in, mode);
     return 0;
+}
+
+/* Runs at the entry of check_work_mode, once per 200 ms pass of the
+ * low-speed thread, and reconciles panel power with the current mode: the
+ * stock firmware also switches the panel without a mode change (its
+ * display-off path suspends it in normal standby), and this puts it back. */
+int cfw_work_mode_tick(void)
+{
+    cfw_input *in = cfw_input_state();
+    in->checks++;
+    cfw_panel_for_mode(in, FW_GET_STATE()[FW_STATE_WORK_MODE]);
+    return 0;
+}
+
+/* Runs at the entry of global_system_suspend (fw_abi.h). While the CFW
+ * manages the panel the stock suspend is refused outright (returns 1, the
+ * detour then returns 0 to the caller): the stock display-off path would
+ * otherwise cut the panel in normal standby, and the resume that pairs
+ * with it is a no-op when nothing was suspended. */
+int cfw_suspend_gate(uint8_t *state)
+{
+    (void)state;
+    cfw_input *in = cfw_input_state();
+    if (in->flags & CFW_INPUT_NO_AUTO_PANEL) {
+        return 0;
+    }
+    in->suspends_skipped++;
+    return 1;
 }
 
 #ifdef __thumb__
@@ -1612,6 +1648,39 @@ __attribute__((naked)) void cfw_work_mode_entry(void)
         "mov r0, r4\n\t"
         "movw r12, #" CFW_STR(FW_CHANGE_WORK_MODE_RESUME_LO) "\n\t"
         "movt r12, #" CFW_STR(FW_CHANGE_WORK_MODE_RESUME_HI) "\n\t"
+        "bx r12\n\t");
+}
+
+/* Detour target for check_work_mode: repeats the displaced push.w, keeps
+ * the three register arguments across the call, resumes at the mov r4, r0. */
+__attribute__((naked)) void cfw_work_mode_tick_entry(void)
+{
+    __asm__ volatile(
+        "push.w {r4, r5, r6, r7, r8, r9, r10, lr}\n\t"
+        "push {r0, r1, r2, r3}\n\t"
+        "bl cfw_work_mode_tick\n\t"
+        "pop {r0, r1, r2, r3}\n\t"
+        "movw r12, #" CFW_STR(FW_CHECK_WORK_MODE_RESUME_LO) "\n\t"
+        "movt r12, #" CFW_STR(FW_CHECK_WORK_MODE_RESUME_HI) "\n\t"
+        "bx r12\n\t");
+}
+
+/* Detour target for global_system_suspend: repeats the displaced push and
+ * byte load, returns 0 when the gate refuses, else resumes at mov r4, r0. */
+__attribute__((naked)) void cfw_suspend_entry(void)
+{
+    __asm__ volatile(
+        "push {r3, r4, r5, lr}\n\t"
+        "mov r4, r0\n\t"
+        "bl cfw_suspend_gate\n\t"
+        "cbz r0, 1f\n\t"
+        "movs r0, #0\n\t"
+        "pop {r3, r4, r5, pc}\n\t"
+        "1:\n\t"
+        "mov r0, r4\n\t"
+        "ldrb.w r3, [r0, #" CFW_STR(FW_STATE_POWER_OFFSET) "]\n\t"
+        "movw r12, #" CFW_STR(FW_SYSTEM_SUSPEND_RESUME_LO) "\n\t"
+        "movt r12, #" CFW_STR(FW_SYSTEM_SUSPEND_RESUME_HI) "\n\t"
         "bx r12\n\t");
 }
 #endif
