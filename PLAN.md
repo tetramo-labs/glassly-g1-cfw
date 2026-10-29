@@ -164,9 +164,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 8. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.
-9. **Phone path.** The Mac only connects while docked (30 s windows). Real use
-   needs a bonded client speaking `0xF0`, or a CFW change to the pairing policy
-   now that stock behaviour is disposable.
+9. **Phone path.** G1CFW/20 removes the stock central policy (any central
+   may connect and stay connected; no pairing). The Mac can now drive the
+   glasses while worn, which unblocks the sensor work. A phone client for
+   `0xF0` is still wanted for daily use.
 
 ## Known limits and handoff
 

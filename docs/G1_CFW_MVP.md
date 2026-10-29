@@ -499,6 +499,19 @@ Left temple: 24.3 fps at 30 ms, 48.7 at 10 ms, 83-87 at 1 ms. About 12 ms per
 frame remains at the floor: the SPI push of the dirty rows, the driver's 1 ms
 wait, and the display-thread round trip.
 
+### G1CFW/20: open link policy (2026-10-29)
+
+Two raw instruction patches remove the stock central policy: at `0x18c8e`
+in `ancs_connected` the `cbz` that only accepts the bonded phone's address
+becomes an unconditional branch to the accept path, and at `0x2c4be` the
+`bt_conn_disconnect` that drops an unbonded central after 30 s becomes two
+NOPs. Consequence: **any BLE central within range can connect to the glasses
+and drive the private protocol without pairing**. That is intended for this
+development firmware and is the only way to use the glasses outside the dock
+from the Mac; restore any older profile to get the stock policy back.
+`g1flash.py ping --hold 45` holds a connection past the old 30 s limit to
+verify it.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
