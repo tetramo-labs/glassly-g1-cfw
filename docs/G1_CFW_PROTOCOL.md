@@ -233,18 +233,21 @@ attitude words (hundredths of a degree: roll-like, drifting yaw, pitch).
 - `34` IMU_SAMPLE: unsolicited `F0 34 00 [seq:u16][word0:i32][word1:i32]
   [pitch:i32]`.
 
-## `40` MIC_CONTROL: `[op]` (G1CFW/24 and later)
+## `40` MIC_CONTROL: `[op]` (G1CFW/25 and later)
 
-`op` 1 starts the stock microphone capture (`startAudioStreamRecord`), 0
-stops it (`stopAudioStreamRecord`), 2 queries. While recording, the stock
-audio thread LC3-encodes the 16 kHz mono capture and the BLE dispatcher
-sends it to the connected central as stock `[F1][seq][200-byte chunk]`
-notifications, exactly as it does for the phone's quick-note flow. Nothing
-stops the stream on disconnect; the host must send `op` 0 (or the glasses
-must reboot). Reply body `[recording][starts:u16][stops:u16][last_rc]`;
-status `no-memory` when the stock msgq refused the request.
-`g1flash.py mic record --seconds N --out file.lc3` starts, captures, stops
-and writes the raw concatenated chunks.
+`op` 1 starts a capture session, 0 stops it, 2 queries. Start does what the
+phone's stock open-mic command (`0E 01`) does without its screen-state
+checks: it routes encoded chunks to BLE rather than the quick-note flash
+recorder, sets the capture mode to "stream" and asks the main thread for a
+PDM session. The session reads 16 kHz mono blocks, LC3-encodes them and
+the BLE dispatcher sends them to the connected central as stock
+`[F1][seq][200-byte chunk]` notifications. Stop sets the mode byte that
+makes the session loop exit after its next block. Nothing stops the stream
+on disconnect; the host must send `op` 0 (or the glasses must reboot).
+Reply body `[recording][starts:u16][stops:u16][mode][armed]` (`mode` 0
+stream, 1 stopped, 2 capture without sending; `armed` non-zero while the
+main thread owns a session). `g1flash.py mic record --seconds N --out
+file.lc3` starts, captures, stops and writes the raw concatenated chunks;
 `tools/lc3_decode.py file.lc3` turns the capture into a WAV through liblc3
 (`brew install liblc3`), assuming 10 ms frames of 40 bytes at 16 kHz.
 

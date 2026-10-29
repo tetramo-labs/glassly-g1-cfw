@@ -170,8 +170,8 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    readable live through PEEK (`g1flash.py imu`) and, from G1CFW/23,
    streamed by the glasses (`imu --stream`). G1CFW/23 also adds VIEW: the
    stock height/depth gears as a CFW offset on the panel origins
-   (`g1flash.py view`). G1CFW/24 adds MIC_CONTROL: start/stop the stock
-   LC3 capture; the stream arrives as stock `F1` notifications
+   (`g1flash.py view`). G1CFW/25 adds MIC_CONTROL: arm/stop the stock
+   PDM capture session; the LC3 stream arrives as stock `F1` notifications
    (`g1flash.py mic record`). Next: wakeword and screen-wake takeover, raw
    PCM or per-microphone selection if the stock audio thread allows it.
    Each needs its own trace through the 1.5.60 binary. Out of scope: the

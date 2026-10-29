@@ -528,7 +528,8 @@ async def run_cfw_command(client, args, checkpoint):
         elif args.command == 'mic':
             def mic_state(body):
                 return {'recording': bool(body[0]), 'starts': struct.unpack_from('<H', body, 1)[0],
-                        'stops': struct.unpack_from('<H', body, 3)[0], 'last_rc': struct.unpack_from('<b', body, 5)[0]}
+                        'stops': struct.unpack_from('<H', body, 3)[0],
+                        'mode': {0: 'stream', 1: 'stopped', 2: 'capture-only'}.get(body[5], body[5]), 'session_armed': bool(body[6])}
             if args.action == 'state':
                 result = mic_state(await link.check(CFW_MIC_CONTROL, bytes([2])))
             elif args.action == 'stop':

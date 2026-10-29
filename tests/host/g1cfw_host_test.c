@@ -48,11 +48,9 @@ static int host_enqueue(const void *data, uint32_t len);
 #define FW_ENQUEUE_BT_DATA host_enqueue
 static int32_t host_imu[3];
 #define FW_IMU_ATTITUDE host_imu
-static int host_audio_starts, host_audio_stops, host_audio_rc;
-static int host_audio_start(void) { host_audio_starts++; return host_audio_rc; }
-static int host_audio_stop(void) { host_audio_stops++; return host_audio_rc; }
-#define FW_AUDIO_START host_audio_start
-#define FW_AUDIO_STOP host_audio_stop
+static uint8_t host_mic_mode = 1; static uint32_t host_mic_to_flash = 1;
+#define FW_MIC_MODE (&host_mic_mode)
+#define FW_MIC_TO_FLASH (&host_mic_to_flash)
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -171,7 +169,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/24", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/25", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -638,18 +636,21 @@ int main(void)
     CHECK(send_packet(imu_fast, sizeof imu_fast) == 0 && last_reply[2] == CFW_BAD_RECORD);
     CHECK((uint8_t *)cfw_imu_state() + sizeof(cfw_imu) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
 
-    /* Microphone control calls the stock start/stop and tracks the state. */
+    /* Microphone control arms the stock capture session and drives its mode byte. */
+    host_sem_gives = 0;
     uint8_t mic_q[] = { 0xF0, 0x40, 0x02 };
-    CHECK(send_packet(mic_q, sizeof mic_q) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 9);
+    CHECK(send_packet(mic_q, sizeof mic_q) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 10 && last_reply[8] == 1 && last_reply[9] == 0);
     uint8_t mic_on[] = { 0xF0, 0x40, 0x01 };
-    CHECK(send_packet(mic_on, sizeof mic_on) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1 && host_audio_starts == 1 && last_reply[4] == 1);
+    CHECK(send_packet(mic_on, sizeof mic_on) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 1);
+    CHECK(host_mic_mode == 0 && host_mic_to_flash == 0 && (state[0x1065] & 4) && host_sem_gives == 1 && host_last_sem == state + 0x68);
+    CHECK(last_reply[8] == 0 && last_reply[9] == 4);
+    CHECK(send_packet(mic_on, sizeof mic_on) == 0 && host_sem_gives == 1 && last_reply[4] == 2);   /* already armed: no second give */
     uint8_t mic_off[] = { 0xF0, 0x40, 0x00 };
-    CHECK(send_packet(mic_off, sizeof mic_off) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && host_audio_stops == 1 && last_reply[6] == 1);
-    host_audio_rc = -1;
-    CHECK(send_packet(mic_on, sizeof mic_on) == 0 && last_reply[2] == CFW_NO_MEMORY && last_reply[3] == 0 && (int8_t)last_reply[8] == -1);
-    host_audio_rc = 0;
+    CHECK(send_packet(mic_off, sizeof mic_off) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && host_mic_mode == 1 && last_reply[6] == 1);
+    state[0x1065] &= (uint8_t)~4;   /* the main thread clears the bit when the session ends */
+    CHECK(send_packet(mic_on, sizeof mic_on) == 0 && host_sem_gives == 2 && host_mic_mode == 0);
     uint8_t mic_bad[] = { 0xF0, 0x40, 0x03 };
-    CHECK(send_packet(mic_bad, sizeof mic_bad) == 0 && last_reply[2] == CFW_BAD_RECORD && host_audio_starts == 2);
+    CHECK(send_packet(mic_bad, sizeof mic_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     CHECK((uint8_t *)cfw_mic_state() + sizeof(cfw_mic) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
 
     guards_intact();

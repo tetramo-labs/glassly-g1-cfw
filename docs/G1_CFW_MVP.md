@@ -619,17 +619,23 @@ right temple `imu --stream --period-ms 50 --samples 40` delivered samples
 at the requested 20 Hz (39 received over 1.95 s; the first was lost in the
 host tool, which then gained a separate queue for unsolicited packets).
 
-### G1CFW/24: microphone control (2026-10-29)
+### G1CFW/24-25: microphone control (2026-10-29)
 
-Trace (1.5.60): the phone's quick-note flow reaches `dmic_record_start`
-(`0x3e1f0`), which drains the audio msgq (`0x31570`), calls
-`startAudioStreamRecord` (`0x3164c`: msgq put of message 1 at
-`0x20003a30` + semaphore give) and sets UI task state. The audio thread
-captures and LC3-encodes; `ble_process_req_dispatch` sends queued chunks
-through `send_dmic_msg` (`0x1a56a`) as `[F1][seq][chunk]` via the context's
-synchronous notify. `stopAudioStreamRecord` (`0x316f4`) queues message 3.
-MIC_CONTROL calls the start/stop routines directly, skipping the UI task;
-no new hooks.
+G1CFW/24 called `startAudioStreamRecord` (`0x3164c`): the start was
+accepted but no `F1` packet followed, because that routine only tells the
+quick-note *storage* thread to open a recording file. The 1.6.3 decomp of
+`do_pdm_transfer` and `main.c` gave the real mechanism, confirmed in
+1.5.60: the main thread (`0x17470`, the map calls it `component_init`)
+waits on the semaphore at state+0x68 and runs a capture session
+(`dmic_stream_start`, `0x30f68`) when bit 2 of the byte at state+0x1065 is
+set; the phone's `0E 01` handler sets that bit (1.6.3 `FUN_0008040c`) and
+`dmic_record_start` (`0x3e1f0`) does the same for quick notes. The session
+configures the PDM peripheral, reads blocks, LC3-encodes them
+(`app_codec_lc3_test`) and, while the byte at `0x20003036` is 0 and the
+word at `0x20007d14` is 0, queues them for the BLE dispatcher, which sends
+`[F1][seq][200 bytes]` (`send_dmic_msg`, `0x1a56a`). `0x30ea8` sets the
+byte to 1 to end the session (from `exit_mic_mode`); `0x30ecc` sets 0 or 2.
+G1CFW/25's MIC_CONTROL drives those three state items directly; no hooks.
 
 ## References and remaining work
 

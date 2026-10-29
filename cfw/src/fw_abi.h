@@ -214,14 +214,19 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #define FW_IMU_ATTITUDE ((volatile int32_t *)0x20007c40u)
 #endif
 
-/* Microphone (1.5.60). startAudioStreamRecord (0x3164c) queues message 1
- * and stopAudioStreamRecord (0x316f4) message 3 to the stock audio thread's
- * msgq and give its semaphore; the thread captures PDM audio, LC3-encodes
- * it and enqueues 200-byte chunks that ble_process_req_dispatch sends as
- * [F1][seq][chunk] notifications (send_dmic_msg, 0x1a56a). Stock reaches
- * start only through the quick-note UI task (dmic_record_start, 0x3e1f0). */
-typedef int (*fw_audio_fn)(void);
-#ifndef FW_AUDIO_START
-#define FW_AUDIO_START ((fw_audio_fn)0x0003164d)
-#define FW_AUDIO_STOP  ((fw_audio_fn)0x000316f5)
+/* Microphone (1.5.60). Capture is a session of do_pdm_transfer run by the
+ * main thread: the phone's 0x0E 01 handler sets bit 2 of the byte at
+ * state+0x1065 and gives the main semaphore at state+0x68 (dmic_record_start,
+ * 0x3e1f0, does the same for quick notes); the session configures the PDM
+ * device, reads 16 kHz blocks, LC3-encodes them (app_codec_lc3_test) and,
+ * while the byte at 0x20003036 is 0, queues them for the BLE dispatcher,
+ * which sends [F1][seq][200 bytes] (send_dmic_msg, 0x1a56a). That byte is
+ * 1 to end the session (0x30ea8, from exit_mic_mode) and 2 to capture
+ * without sending (0x30ecc). The word at 0x20007d14 non-zero diverts the
+ * chunks to the quick-note flash recorder instead of BLE. */
+#define FW_STATE_MIC_ARM    0x1065   /* uint8_t: bit 2 asks the main thread for a capture session */
+#define FW_STATE_MAIN_SEM   0x68     /* struct k_sem the main thread waits on */
+#ifndef FW_MIC_MODE
+#define FW_MIC_MODE ((volatile uint8_t *)0x20003036u)        /* 0 stream, 1 stop, 2 capture only */
+#define FW_MIC_TO_FLASH ((volatile uint32_t *)0x20007d14u)   /* non-zero: quick-note recorder owns the chunks */
 #endif

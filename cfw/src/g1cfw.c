@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 24u
+#define CFW_PROTOCOL 25u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1598,20 +1598,21 @@ static void cfw_imu_control(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_IMU_CONTROL, CFW_OK, body, sizeof body);
 }
 
-/* --- microphone: start/stop the stock capture + LC3 + F1 stream ------------
- * [op]: 1 start, 0 stop, 2 query. The stock audio thread streams
+/* --- microphone: the stock PDM -> LC3 -> F1 capture session ----------------
+ * [op]: 1 start, 0 stop, 2 query. Start arms a capture session on the main
+ * thread the way the phone's open-mic command does; the session streams
  * [F1][seq][200 bytes LC3] notifications to the connected central until
- * stopped; nothing stops it on disconnect, so the host must send 0 (or the
- * glasses reboot). Reply body [recording][starts:u16][stops:u16][last_rc]. */
+ * stopped. Nothing stops it on disconnect, so the host must send 0 (or the
+ * glasses reboot). Reply body [recording][starts:u16][stops:u16][mode][armed]. */
 typedef struct {
     uint32_t magic;
     uint8_t  recording;
-    int8_t   last_rc;
+    uint8_t  pad0;
     uint16_t starts;
     uint16_t stops;
     uint16_t pad;
 } cfw_mic;
-#define CFW_MIC_MAGIC 0x3143494du  /* "MIC1" */
+#define CFW_MIC_MAGIC 0x3243494du  /* "MIC2" */
 
 static cfw_mic *cfw_mic_state(void)
 {
@@ -1629,32 +1630,29 @@ static cfw_mic *cfw_mic_state(void)
 static void cfw_mic_control(const uint8_t *p, uint32_t n)
 {
     cfw_mic *m = cfw_mic_state();
+    uint8_t *state = FW_GET_STATE();
     if (n != 1 || p[0] > 2) {
         cfw_reply(CFW_MIC_CONTROL, n != 1 ? CFW_BAD_LENGTH : CFW_BAD_RECORD, 0, 0);
         return;
     }
-    uint8_t status = CFW_OK;
     if (p[0] == 1) {
-        int rc = FW_AUDIO_START();
-        m->last_rc = (int8_t)rc;
-        m->starts++;
-        if (rc == 0) {
-            m->recording = 1;
-        } else {
-            status = CFW_NO_MEMORY;   /* the stock msgq refused the start */
+        *FW_MIC_TO_FLASH = 0;      /* chunks go to BLE, not the quick-note recorder */
+        *FW_MIC_MODE = 0;          /* stream while capturing */
+        if (!(state[FW_STATE_MIC_ARM] & 4)) {
+            state[FW_STATE_MIC_ARM] |= 4;
+            FW_K_SEM_GIVE(state + FW_STATE_MAIN_SEM);
         }
+        m->starts++;
+        m->recording = 1;
     } else if (p[0] == 0) {
-        int rc = FW_AUDIO_STOP();
-        m->last_rc = (int8_t)rc;
+        *FW_MIC_MODE = 1;          /* the session loop exits on its next block */
         m->stops++;
         m->recording = 0;
-        if (rc != 0) {
-            status = CFW_NO_MEMORY;
-        }
     }
-    uint8_t body[6] = { m->recording, (uint8_t)m->starts, (uint8_t)(m->starts >> 8),
-                        (uint8_t)m->stops, (uint8_t)(m->stops >> 8), (uint8_t)m->last_rc };
-    cfw_reply(CFW_MIC_CONTROL, status, body, sizeof body);
+    uint8_t body[7] = { m->recording, (uint8_t)m->starts, (uint8_t)(m->starts >> 8),
+                        (uint8_t)m->stops, (uint8_t)(m->stops >> 8), *FW_MIC_MODE,
+                        (uint8_t)(state[FW_STATE_MIC_ARM] & 4) };
+    cfw_reply(CFW_MIC_CONTROL, CFW_OK, body, sizeof body);
 }
 
 /* Called on the display thread in place of the stock refresh handler. */
