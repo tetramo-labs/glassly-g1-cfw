@@ -514,6 +514,12 @@ verify it: on the left temple it answered `G1CFW/20` before and after a 45 s
 hold on one connection, 0 errors. The right temple is still on G1CFW/19
 pending the user's decision on the open policy.
 
+**Worn test passed.** With the glasses out of the case, lid closed, and on
+the user's head, the Mac connected to the left temple on the first attempt
+and PING answered `G1CFW/20` before and after a 20 s hold on one connection.
+The dock is no longer required for anything except installing over a
+pre-G1CFW/20 image (the right temple, until it is upgraded).
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).

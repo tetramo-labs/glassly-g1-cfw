@@ -165,8 +165,9 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.
 9. **Phone path.** G1CFW/20 removes the stock central policy (any central
-   may connect and stay connected; no pairing). The Mac can now drive the
-   glasses while worn, which unblocks the sensor work. A phone client for
+   may connect and stay connected; no pairing). Verified: the Mac pinged the
+   left temple while the glasses were worn, out of the case, which unblocks
+   the sensor work. A phone client for
    `0xF0` is still wanted for daily use.
 
 ## Known limits and handoff
