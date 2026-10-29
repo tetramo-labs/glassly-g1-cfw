@@ -233,6 +233,18 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
  * displaced, the detour resumes at 0x28fa8 (mov r4, r0) with r0-r2 intact. */
 #define FW_CHECK_WORK_MODE_RESUME_LO 0x8fa9
 #define FW_CHECK_WORK_MODE_RESUME_HI 0x0002
+/* The wear sensor is the radio link between the temples: the network core
+ * reports its ESB statistics over IPC about every six seconds and the
+ * fourth word (1.5.60 0x20006b88; 1.6.3 DAT_20006bc8) is what
+ * check_work_mode classifies, >= 0x33 worn and < 0x28 not worn. The IPC
+ * handler (local_ipc_service_recv, case 7) overwrites that word with 0x46
+ * (worn) when the wear-detection user setting at state+0x109d (1.6.3
+ * state+0x10d4, byte 10 of the 0x2c-byte user record at flash 0x134000;
+ * 1 after clear_user_settings) is 0, so with the setting off the glasses
+ * never leave normal standby. The CFW turns the setting on in its 200 ms
+ * pass while it manages the panel. */
+#define FW_STATE_WEAR_DETECT 0x109d
+#define FW_WEAR_WORD_ADDR 0x20006b88
 /* global_system_suspend (1.5.60 0x2d78c): push {r3, r4, r5, lr} and
  * ldrb.w r3, [r0, #0xfea] are displaced (the detour covers 4 of their 6
  * bytes; the orphaned half-word at 0x2d790 is never executed), resume at

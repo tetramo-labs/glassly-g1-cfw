@@ -744,6 +744,31 @@ paired `global_system_resume` stays a no-op. INPUT_STATE gained the two
 counters (checker passes, suspends refused) as low bytes; the reply is
 capped at 20 bytes, so the three counters are single bytes.
 
+**Hardware result.** Both temples boot G1CFW/29 with the panel up while
+worn: one refused suspend each (the stock display-off path), the test
+pattern flushes with no `panel-off`. Taking the glasses off still did not
+darken them. The wear word at `0x20006b88` sat at exactly 70 for a full
+minute of 0.4 s samples with no jitter, while the three words after it
+(ESB packet counters) advanced in steps about every six seconds. The word
+is written by `local_ipc_service_recv` case 7 (`IPC_RESP_CPUNET_ESB_PACKAGES`)
+from the network core and forced to `0x46` when the byte at state+0x109d
+is 0; that byte is the wear-detection user setting (1.6.3 state+0x10d4,
+byte 10 of the 0x2c-byte record at flash `0x134000`, 1 after
+`clear_user_settings`, 0 on both of these temples). So the stock firmware
+never saw a take-off either: the stock event trace earlier in the day went
+`worn` straight to `in case open`.
+
+### G1CFW/30: wear detection on (2026-10-29)
+
+`cfw_work_mode_tick` writes 1 to the wear-detection setting byte on every
+200 ms pass while the CFW manages the panel (INPUT_CONTROL bit 4 clear).
+The next ESB statistics message then carries the real link value and
+`check_work_mode` can move the mode to 4 when the glasses come off.
+No new reply fields: `g1flash.py touch state` peeks the wear word and the
+setting byte itself (`wear_word`, `wear_detect`), and `peek` gained
+`--samples/--interval` and repeatable `--addr` for traces like the one
+above.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

@@ -137,6 +137,9 @@ CFW_MIC_CONTROL = 0x40
 UNSOLICITED = {0x32, 0x34}   # INPUT_EVENT, IMU_SAMPLE: never a reply to a request
 STOCK_AUDIO_SID = 0xF1
 DEPTH_SHIFT = {1: 22, 2: 8, 3: 0, 4: -4, 5: -8, 6: -10, 7: -12, 8: -14, 9: -16}  # stock cal_panel_canvas_coord, non-master sign
+STATE_ADDR = 0x200566e8          # GlassesState (1.5.60; pointer literal at 0x16d44 -> 0x20006b9c)
+WEAR_DETECT_OFFSET = 0x109d      # wear-detection user setting byte (1.6.3 state+0x10d4); 0 forces the wear word to 0x46
+WEAR_WORD_ADDR = 0x20006b88      # radio-link wear word the 200 ms checker classifies: >= 0x33 worn, < 0x28 not worn
 IMU_ATTITUDE_ADDR = 0x20007c40  # three int32 words, hundredths of a degree (1.5.60; 1.6.3 DAT_20008484/88/8c)
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
 STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 9: 'charging',
@@ -457,15 +460,27 @@ async def run_cfw_command(client, args, checkpoint):
                 await link.check(CFW_OBJ_CONTROL, payload)
                 result = {'dropped': 'all' if args.id is None else args.id}
         elif args.command == 'peek':
-            chunks, addr, remaining = [], args.addr, args.len
-            while remaining > 0:
-                body = await link.check(CFW_PEEK, struct.pack('<IB', addr, min(16, remaining)))
-                chunks.append(body)
-                addr += len(body)
-                remaining -= len(body)
-            data = b''.join(chunks)
-            result = {'addr': hex(args.addr), 'len': len(data), 'hex': data.hex(),
-                      'nonzero': sum(1 for b in data if b), 'ascii': ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)}
+            samples = []
+            for i in range(args.samples):
+                if i:
+                    await asyncio.sleep(args.interval)
+                reads = []
+                for start in args.addr:
+                    chunks, addr, remaining = [], start, args.len
+                    while remaining > 0:
+                        body = await link.check(CFW_PEEK, struct.pack('<IB', addr, min(16, remaining)))
+                        chunks.append(body)
+                        addr += len(body)
+                        remaining -= len(body)
+                    data = b''.join(chunks)
+                    reads.append({'addr': hex(start), 'len': len(data), 'hex': data.hex(),
+                                  'nonzero': sum(1 for b in data if b), 'ascii': ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)})
+                sample = reads[0] if len(reads) == 1 else {'reads': reads}
+                if args.samples > 1:
+                    sample = {'t': round(i * args.interval, 2), **sample}
+                    print(json.dumps(sample), file=sys.stderr, flush=True)
+                samples.append(sample)
+            result = samples[0] if args.samples == 1 else {'samples': samples}
         elif args.command == 'touch':
             def input_state(body):
                 return {'notify_gestures': bool(body[0] & 1), 'swallow_gestures': bool(body[0] & 2),
@@ -482,6 +497,11 @@ async def run_cfw_command(client, args, checkpoint):
                         'suspends_skipped': body[16] if len(body) > 16 else None}
             if args.action == 'state':
                 result = input_state(await link.check(CFW_INPUT_STATE))
+                # The wear word and its setting live in stock RAM; read them alongside.
+                word = await link.check(CFW_PEEK, struct.pack('<IB', WEAR_WORD_ADDR, 4))
+                detect = await link.check(CFW_PEEK, struct.pack('<IB', STATE_ADDR + WEAR_DETECT_OFFSET, 1))
+                result['wear_word'] = struct.unpack('<I', word)[0]
+                result['wear_detect'] = bool(detect[0])
             elif args.action == 'control':
                 flags = ((0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
                          | (0x04 if args.notify_events else 0) | (0x08 if args.swallow_events else 0)
@@ -891,8 +911,11 @@ def arguments(argv=None):
             child.add_argument('--dy', type=int, help='row offset added to the stock origin')
             child.add_argument('--no-flush', action='store_true', help='set the offsets without pushing the frame')
         if command == 'peek':
-            child.add_argument('--addr', type=lambda v: int(v, 0), required=True)
+            child.add_argument('--addr', type=lambda v: int(v, 0), action='append', required=True,
+                               help='start address; repeat to read several ranges per sample')
             child.add_argument('--len', type=int, default=64, help='bytes to read (16 per request)')
+            child.add_argument('--samples', type=int, default=1, help='read the range this many times over one connection')
+            child.add_argument('--interval', type=float, default=0.5, help='seconds between samples')
         if command == 'shapes':
             child.add_argument('--demo', action='store_true', help='Draw a built-in shapes demo')
             child.add_argument('--shape', action='append', default=[],

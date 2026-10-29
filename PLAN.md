@@ -180,7 +180,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    work mode instead (entry detours on `change_work_mode`,
    `check_work_mode` and `global_system_suspend`): on when worn, off when
    taken off, cased or asleep, and the stock display-off suspend is
-   refused while the CFW manages the panel. Next: wakeword and
+   refused while the CFW manages the panel. The wear sensor is the radio
+   link between the temples, and its word is forced to "worn" while the
+   wear-detection user setting is off; G1CFW/30 keeps that setting on
+   (the setting was off on both temples here). Next: wakeword and
    screen-wake takeover, raw PCM or per-microphone selection if the stock
    audio thread allows it.
    Each needs its own trace through the 1.5.60 binary. Out of scope: the

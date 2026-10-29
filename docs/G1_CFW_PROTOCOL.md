@@ -314,9 +314,17 @@ pieces that make this hold: the stock work-mode checker, which runs every
 200 ms, reconciles panel power with the current mode on each pass (the
 stock display-off path switches the panel without a mode change), and the
 stock system suspend is refused outright while the CFW manages the panel,
-so nothing blanks a worn pair but the host. With bit 4 set both stand
-down and the stock suspend works again. PANEL (`05`) still works for
-manual control.
+so nothing blanks a worn pair but the host. G1CFW/30 adds the piece that
+makes the wear sensor itself report: the sensor is the radio link between
+the temples (the network core reports its ESB statistics over IPC about
+every six seconds; the checker classifies the fourth word, `>= 0x33` worn,
+`< 0x28` not worn), and the IPC handler overwrites that word with `0x46`
+(worn) whenever the wear-detection user setting is off, so a pair with the
+setting off never leaves normal standby. The 200 ms pass turns the setting
+on while the CFW manages the panel. `g1flash.py touch state` reads the
+live word and the setting alongside INPUT_STATE through PEEK. With bit 4
+set everything stands down and the stock suspend works again. PANEL
+(`05`) still works for manual control.
 - `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
   gesture, class 1 stock event, from the temple that produced it. The host
   tool (`g1flash.py touch watch`) sets bits 0 and 2, prints events for a

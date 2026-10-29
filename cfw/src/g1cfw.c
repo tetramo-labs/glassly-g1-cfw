@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 29u
+#define CFW_PROTOCOL 30u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1606,14 +1606,22 @@ int cfw_work_mode(uint32_t mode)
 }
 
 /* Runs at the entry of check_work_mode, once per 200 ms pass of the
- * low-speed thread, and reconciles panel power with the current mode: the
- * stock firmware also switches the panel without a mode change (its
- * display-off path suspends it in normal standby), and this puts it back. */
+ * low-speed thread, keeps the wear-detection setting on and reconciles
+ * panel power with the current mode: the stock firmware also switches the
+ * panel without a mode change (its display-off path suspends it in normal
+ * standby), and this puts it back. */
 int cfw_work_mode_tick(void)
 {
     cfw_input *in = cfw_input_state();
+    uint8_t *state = FW_GET_STATE();
     in->checks++;
-    cfw_panel_for_mode(in, FW_GET_STATE()[FW_STATE_WORK_MODE]);
+    if (!(in->flags & CFW_INPUT_NO_AUTO_PANEL)) {
+        /* With the wear-detection setting off the IPC handler reports
+         * "worn" regardless of the radio link (fw_abi.h): the panel can
+         * only follow the wearer while it is on. */
+        state[FW_STATE_WEAR_DETECT] = 1;
+    }
+    cfw_panel_for_mode(in, state[FW_STATE_WORK_MODE]);
     return 0;
 }
 
