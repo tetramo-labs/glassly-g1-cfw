@@ -1,0 +1,83 @@
+{
+  "name": "G1CFW/3 display commands without panel power control; stock CDN package labelled 1.5.6",
+  "stock_url": "https://cdn.evenreal.co/firmware/3adb8ebbd35c2343409d6d0c9fe6cbb9.zip",
+  "package_sha256": "40f5839def1c00da3e0ffea9274dc0e04f249596d31787bd0c497be363cf6f8f",
+  "app_sha256": "1eba87bfb1df261d197ca42e0850cc4ff7e668a9e94e02a8be46369b3bfaf483",
+  "network_sha256": "523efcef45a657de827dce2120b5ab1314779e8c51767bee82654559614c2a1d",
+  "stock_image_hash": "f4cdaeac1cdecad243aaf1ec64fa778120e8b4f7e2eacf1b25411bcdeb0870f4",
+  "output_sha256": "0f265d03914e9791092e442b63c0af81105aa5b829786ef45edf52ee4c56a090",
+  "output_image_hash": "29bfdb5a395e9c397b52db7018d3a61a2b2952e0b68ba61b6364b6cd2b4792ef",
+  "key_hash": "fc5701dc6135e1323847bdc40f04d2e5bee5833b23c29f93593d00018cfa9994",
+  "upgrade_from_image_hashes": [
+    "92c6dfcbced739d4a89b023a0dc2e1907bbcc6cebe78908a0892416acdecf32f",
+    "c8c5683b675f474157d08aee2fdf64d0a7abac59c0f43f371aa43e9ab8e3e2cb"
+  ],
+  "max_image_bytes": 978944,
+  "patches": [
+    {
+      "offset": 613625,
+      "old": "6e6574206275696c642074696d653a",
+      "new": "47314346572f33206e65742062743a",
+      "description": "Read-only #t reply: identify G1CFW/3"
+    },
+    {
+      "offset": 95118,
+      "old": "ebf7cbfd",
+      "new": "d7f0cff8",
+      "description": "BLE receive entry: bl cfw_rx at 0xfa530 instead of spec_ble_command_hook"
+    },
+    {
+      "offset": 12,
+      "old": "2de30e00",
+      "new": "0ce70e00",
+      "description": "MCUboot header: image size includes the appended blob"
+    }
+  ],
+  "append": "0000002de9f04f8db00d46044661b12078f02809d1012d0fd1f0208df82000ff208df8210001206fe14ef62972204629460db0bde8f04f10476078012850dd022875d0032878d0042840f0988046f63d50c0f201008047d0f8b01ed0f8b42ed0f8c83ed0f8b80e002b18bf01238df81800000a8df81900080a8df81b00080c8df81c00080e8df81d00a0208df81e00c8208df81f00f0208df81620120a8df8200004208df81430ff238df817208df81a108df82100002005a908aa8df815308df822000b5c171801300c28fb70f9d148f60d00c0f201008047c26808a80f211de178b301284ad1a81e4ff0010909284ff00100c0f0048194f80280e01c08a900f012f9002800f08d80dde90a67f01dc1085feac870039008bf7108a5f10b00049101fb07f1884280f08a800120e7e0a81e0a282ad201207be0a81e082859d201206ae0f0208df8200000208df821008df8220040f27221c0f20001794408aa0b5c171801300b28fb70f9d148f60d00c0f201008047c26808a80e21cfe0f0218df8210002208df82010bee0e01c08a900f0caf800283dd046f63d50c0f201008047ddf82ce0bef1000f1ed0e17a0a9b01f00f0141ea0112dde908154fea530c490805eb850501eb85160025022b07d3d0f8b01e8f196146013907f8012bfbd10135754506f5a076f0d1a17889071bd400201ee0a01c08a900f096f860b146f63d50c0f20100804700f66c3008a900f0c0f802e003200ce00320f0218df8201003210ae003206be000f66c3008a900f0b0f8f0218df8201002218df8211064e046f63d50c0f201008047b8f10f0f4ff00f01cdf8048088bf4fea1811002f029041d004f10b02dde908044fea5608400804eb84040d0100eb841e4ff0000b4ff0060c029b3846d3f8b04e039b53b9022e20d37444002700bfd35de3550137b845fad117e0b6b174444ff000094fead907d75d2cea090a27fa0af707f001035b420b40bf0709f1020948bf2b43b14504f8013bebd3049b0bf1010b1a44074683450ef5a07ecdd10199890701d4002005e0029808a900f66c3000f04bf84ff00109f0218df820108df821908df8220048f60d00c0f201008047c26808a80321904700200db0bde8f08fb0b590f800c043784cea032ec1f800e08278c37842ea03224a600379447953ea04248c608579c07945ea0020c86043ea0c014ff0010323ea010104eb0e0318bf01240028024418bf012020400840b3f5207f4ff000034ff0000198bf01231840c92a38bf01210840b0bd70b582b0d0f85c230424b2b1d0f848c3d0f84ce30a6888684b68c9681044451e581801384af22d260190c0f20406604671460095b04704ea5074204602b070bd47314346572f330001053c000000",
+  "signature": "200f13f5ddd98b7ac8691581ffa8ce002a05bf9b7b19a568ec6815796fae829e25920426eea795d0dcb013b9d09a033d3e52b2314180377c0c64cb5d580408bd0c029175b51e7e5cc88783266c7aa62cccda0e971982d5b743d128937016fc021f76694a2bae0978c86323753a24941160d4f33692a5c9f4afdd0da452ff65edce33299938619b775d8e338c72f1bf08abe6b22bdfe73998f5d16d69ccdfd3ea8c3779b721b94e3c437cc7ee3bd31977446738a6ce46c01ecce3a753c8385b55253b4dc9c99f0cd3051c852092a716e39a58c4d09a9290c43f10349a7b1a899347f1e76ecfd30d993a2ecf141f3eff8c4014cfba2f77972ce15a4c3cecfa3b0e",
+  "blob": {
+    "source": "cfw/src/g1cfw.c",
+    "source_sha256": "532681841f13649db5bd9ffdb986d2e3e796b3a9c0b4db01be2ac3eb1e9721b5",
+    "address": 1025328,
+    "entry": 1025328,
+    "bytes": 988,
+    "rodata_bytes": 14,
+    "functions": [
+      {
+        "name": "cfw_flush",
+        "offset": 910,
+        "size": 64
+      },
+      {
+        "name": "cfw_parse_rect",
+        "offset": 804,
+        "size": 106
+      },
+      {
+        "name": "cfw_rx",
+        "offset": 0,
+        "size": 804
+      }
+    ],
+    "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "cflags": [
+      "--target=thumbv8m.main-none-eabi",
+      "-mthumb",
+      "-mcpu=cortex-m33",
+      "-mfloat-abi=soft",
+      "-Os",
+      "-ffreestanding",
+      "-fno-jump-tables",
+      "-fomit-frame-pointer",
+      "-fno-builtin",
+      "-mno-unaligned-access",
+      "-fno-unwind-tables",
+      "-fno-asynchronous-unwind-tables",
+      "-fno-stack-protector",
+      "-fropi",
+      "-Wall",
+      "-Wextra",
+      "-Werror"
+    ]
+  }
+}

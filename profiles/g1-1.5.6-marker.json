@@ -1,0 +1,21 @@
+{
+  "name": "G1CFW/1 diagnostic marker; stock CDN package labelled 1.5.6",
+  "stock_url": "https://cdn.evenreal.co/firmware/3adb8ebbd35c2343409d6d0c9fe6cbb9.zip",
+  "package_sha256": "40f5839def1c00da3e0ffea9274dc0e04f249596d31787bd0c497be363cf6f8f",
+  "app_sha256": "1eba87bfb1df261d197ca42e0850cc4ff7e668a9e94e02a8be46369b3bfaf483",
+  "network_sha256": "523efcef45a657de827dce2120b5ab1314779e8c51767bee82654559614c2a1d",
+  "stock_image_hash": "f4cdaeac1cdecad243aaf1ec64fa778120e8b4f7e2eacf1b25411bcdeb0870f4",
+  "output_sha256": "8719c710f78f9c4967f83a47e4617f9f9b3b10b69da0100c53a55616737f3177",
+  "output_image_hash": "92c6dfcbced739d4a89b023a0dc2e1907bbcc6cebe78908a0892416acdecf32f",
+  "key_hash": "fc5701dc6135e1323847bdc40f04d2e5bee5833b23c29f93593d00018cfa9994",
+  "patches": [
+    {
+      "offset": 613625,
+      "old": "6e6574206275696c642074696d653a",
+      "new": "47314346572f31206e65742062743a",
+      "description": "Read-only #t reply: identify G1CFW/1; preserve format and size"
+    }
+  ],
+  "signature": "8b9ace1b32e68f53e081132e358a6df92e5cd138e76b648135ccb0f93412ec4f2742686827f55b121aeef29d4b255bbe4a31cadcfd0b1f552046cd29d19fe3351919faef772b6d871e772f44577866fc86420362a0c0fc9af531d8b1950e4e8ebbfa97ac68174df486e38d17b36f8a44980ab3e8acacf4105545ee18bd00f18c437eb555a5e4bcc08a135c5c85c37451d61771845cc5770a114d9097a6e6dbe53772b2b73d938a7ee57a24ac1252c445e5f3dd7c12c4650dce90265f81a53519f64d387bdd7b5f3543cb561ae7ee0ba791d5714b7a057372dd9122c90f65df4b231188b7440f55b71a8e119920d800d4c9ee4ebaacff1027e05f55670c116900",
+  "max_image_bytes": 978944
+}

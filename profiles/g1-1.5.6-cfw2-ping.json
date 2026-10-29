@@ -1,0 +1,72 @@
+{
+  "name": "G1CFW/2 ping-only injected handler (first code-injection test); stock CDN package labelled 1.5.6",
+  "stock_url": "https://cdn.evenreal.co/firmware/3adb8ebbd35c2343409d6d0c9fe6cbb9.zip",
+  "package_sha256": "40f5839def1c00da3e0ffea9274dc0e04f249596d31787bd0c497be363cf6f8f",
+  "app_sha256": "1eba87bfb1df261d197ca42e0850cc4ff7e668a9e94e02a8be46369b3bfaf483",
+  "network_sha256": "523efcef45a657de827dce2120b5ab1314779e8c51767bee82654559614c2a1d",
+  "stock_image_hash": "f4cdaeac1cdecad243aaf1ec64fa778120e8b4f7e2eacf1b25411bcdeb0870f4",
+  "output_sha256": "4b473d2a61a2eda16aae353437dfe360138118eb7c5f4bed8adcf190f6b45508",
+  "output_image_hash": "c8c5683b675f474157d08aee2fdf64d0a7abac59c0f43f371aa43e9ab8e3e2cb",
+  "key_hash": "fc5701dc6135e1323847bdc40f04d2e5bee5833b23c29f93593d00018cfa9994",
+  "upgrade_from_image_hashes": [
+    "92c6dfcbced739d4a89b023a0dc2e1907bbcc6cebe78908a0892416acdecf32f"
+  ],
+  "max_image_bytes": 978944,
+  "patches": [
+    {
+      "offset": 613625,
+      "old": "6e6574206275696c642074696d653a",
+      "new": "47314346572f32206e65742062743a",
+      "description": "Read-only #t reply: identify G1CFW/2"
+    },
+    {
+      "offset": 95118,
+      "old": "ebf7cbfd",
+      "new": "d7f0cff8",
+      "description": "BLE receive entry: bl cfw_rx at 0xfa530 instead of spec_ble_command_hook"
+    },
+    {
+      "offset": 12,
+      "old": "2de30e00",
+      "new": "c4e30e00",
+      "description": "MCUboot header: image size includes the appended blob"
+    }
+  ],
+  "append": "00000091b10278f02a0fd180b586b048f60d0c0129c0f2010c0ad1f0208df80400ff208df8050001200ae04ef629721047407878b1f0218df8050002208df804108df80600e047c26801a803219047002006b080bdf0208df8040000208df805008df8060040f21a0ec0f2000efe4401ab00bf1ef800101a1801300b28d170f8d1e047c26801a80e21e0e747314346572f320001053c00",
+  "signature": "66215a0c1a81c0a085fe0d412b0ee79e5744cef0846d6ed837c9295f0340512d336314c44444e117a0d135946aa0d9ad2a1a9c00febb1ba9e090e9c26fdeda8365d17c2a160bc8cb3597f7e1f4e0bd4c0e92b6e7e01d67bf9d975a15456837aa39dc393a664e9af5d3e11c3ead23418eebaafbb9723a38d9a5db9a1628be707b38e806eb7ab89bb6b60be64bdfd146b04e63c80451cd657d84be7a11099ae44cacededc1b4b2f3d8f9b714b03e68e51af6fb9ac9281486456d5363c43e5b437cfd8f270e7c5722065c815a5142340773a0f619c164f882f5b7b12fdd0c903189a72c5ef95298a6f3a752838a13a23a7ca0c63e1f313498fcd5c7b83ab0061258",
+  "blob": {
+    "source": "cfw/src/g1cfw.c",
+    "source_sha256": "fd523912dae9c994ac1bd6b7fce8e6fd896389fc67a8d1a2ef9f0f8be549874b",
+    "address": 1025328,
+    "entry": 1025328,
+    "bytes": 148,
+    "rodata_bytes": 12,
+    "functions": [
+      {
+        "name": "cfw_rx",
+        "offset": 0,
+        "size": 136
+      }
+    ],
+    "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+    "cflags": [
+      "--target=thumbv8m.main-none-eabi",
+      "-mthumb",
+      "-mcpu=cortex-m33",
+      "-mfloat-abi=soft",
+      "-Os",
+      "-ffreestanding",
+      "-fno-jump-tables",
+      "-fomit-frame-pointer",
+      "-fno-builtin",
+      "-mno-unaligned-access",
+      "-fno-unwind-tables",
+      "-fno-asynchronous-unwind-tables",
+      "-fno-stack-protector",
+      "-fropi",
+      "-Wall",
+      "-Wextra",
+      "-Werror"
+    ]
+  }
+}

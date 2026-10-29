@@ -2,6 +2,10 @@
 
 An attempt to recreate the FW for ER G1 glasses. This project uses the NRF DFu as a base to start getting the code to compile because the glasses are known to update with that method.
 
+## Minimal stock-based CFW
+
+A signed diagnostic-marker MVP and G1-specific BLE tooling are now under active development. See [the build, evidence, and hardware workflow](docs/G1_CFW_MVP.md). **Offline verified; not flashed or hardware-tested.** The development-kit build below is not a replacement firmware for production glasses.
+
 ## Progress
 
 ### App Core
