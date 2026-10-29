@@ -129,7 +129,7 @@ async def query_ping(client, timeout=8):
 
 CFW_SID = 0xF0
 CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY = 0, 1, 2, 3, 4, 5, 6, 7
-CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS = 8, 9, 10, 11, 12, 13, 0x10, 0x11
+CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS, CFW_PEEK = 8, 9, 10, 11, 12, 13, 0x10, 0x11, 0x12
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
               12: 'no-asset', 13: 'bad-asset'}
@@ -387,6 +387,16 @@ async def run_cfw_command(client, args, checkpoint):
             payload = bytes([0 if args.no_flush else 0x02, len(recs)]) + b''.join(recs)
             await link.check(CFW_SHAPES, payload)
             result = {'shapes': len(recs), 'flushed': not args.no_flush}
+        elif args.command == 'peek':
+            chunks, addr, remaining = [], args.addr, args.len
+            while remaining > 0:
+                body = await link.check(CFW_PEEK, struct.pack('<IB', addr, min(16, remaining)))
+                chunks.append(body)
+                addr += len(body)
+                remaining -= len(body)
+            data = b''.join(chunks)
+            result = {'addr': hex(args.addr), 'len': len(data), 'hex': data.hex(),
+                      'nonzero': sum(1 for b in data if b), 'ascii': ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)}
         elif args.command == 'stats':
             body = await link.check(CFW_STATS)
             result = {'messages': struct.unpack_from('<H', body, 0)[0], 'errors': struct.unpack_from('<H', body, 2)[0],
@@ -497,7 +507,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -560,7 +570,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -615,6 +625,9 @@ def arguments(argv=None):
             child.add_argument('--box', type=lambda v: tuple(int(x) for x in v.split(',')), default=(32, 32, 608, 59))
             child.add_argument('--lines', type=int, default=1)
             child.add_argument('--clear', action='store_true', help='text: clear the box first')
+        if command == 'peek':
+            child.add_argument('--addr', type=lambda v: int(v, 0), required=True)
+            child.add_argument('--len', type=int, default=64, help='bytes to read (16 per request)')
         if command == 'shapes':
             child.add_argument('--demo', action='store_true', help='Draw a built-in shapes demo')
             child.add_argument('--shape', action='append', default=[],

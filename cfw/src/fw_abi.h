@@ -134,3 +134,9 @@ typedef void *(*fw_malloc_fn)(uint32_t size);
 #define FW_ADDR_OF(ptr) ((uint32_t)(uintptr_t)(ptr))
 #define FW_PTR_OF(addr) ((uint8_t *)(uintptr_t)(addr))
 #endif
+
+/* Diagnostics: map a 32-bit address to a readable pointer (identity on the
+ * target; the host test substitutes its own memory). */
+#ifndef FW_PEEK_PTR
+#define FW_PEEK_PTR(addr) ((const uint8_t *)(uintptr_t)(addr))
+#endif

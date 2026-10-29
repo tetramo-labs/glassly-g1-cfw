@@ -42,7 +42,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (14 for this document) and the version is the stock base
+protocol revision (15 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -168,6 +168,11 @@ message; `records done` says how many ran.
 
 Reply body: `[messages:u16][errors:u16][stock_swallowed:u16][last_status]
 [message_active][message_bytes:u16][message_max>>8][ram>>8]`.
+
+## `12` PEEK: `[addr:u32][len]`
+
+Diagnostic: reply body is `len` (at most 16) bytes read from `addr`. Used to
+inspect candidate RAM before reclaiming it.
 
 ## Stock commands the CFW swallows
 

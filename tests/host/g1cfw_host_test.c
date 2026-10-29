@@ -27,6 +27,8 @@ static int host_manual_flush(void);
 #define FW_GUI_MANUAL_FLUSH host_manual_flush
 static void *host_malloc(uint32_t size);
 #define FW_MALLOC host_malloc
+static uint8_t host_peek_mem[64];
+#define FW_PEEK_PTR(addr) (host_peek_mem + ((addr) & 63))
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -139,7 +141,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/14", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/15", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -402,6 +404,12 @@ int main(void)
     uint8_t shapes_bad[] = { 0xF0, 0x0D, 0x00, 1, 9, 0, 0, 0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0 };
     CHECK(send_packet(shapes_bad, sizeof shapes_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     CHECK(send_packet(shapes, 10) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+
+    /* PEEK returns up to 16 bytes. */
+    for (int i = 0; i < 64; i++) host_peek_mem[i] = (uint8_t)i;
+    uint8_t peek[] = { 0xF0, 0x12, 0x08, 0, 0, 0x20, 32 };
+    CHECK(send_packet(peek, sizeof peek) == 0 && last_reply[2] == CFW_OK && last_reply_len == 19 && last_reply[3] == 8 && last_reply[18] == 23);
+    CHECK(send_packet(peek, 6) == 0 && last_reply[2] == CFW_BAD_LENGTH);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

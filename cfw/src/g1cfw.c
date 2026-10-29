@@ -12,12 +12,12 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 14u
+#define CFW_PROTOCOL 15u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
        CFW_ASSET_DRAW = 0x09, CFW_ASSET_TEXT = 0x0A, CFW_ASSET_CLEAR = 0x0B, CFW_ASSET_INFO = 0x0C,
-       CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11 };
+       CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11, CFW_PEEK = 0x12 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
@@ -999,6 +999,19 @@ static void cfw_stats(void)
     cfw_reply(CFW_STATS, CFW_OK, body, sizeof body);
 }
 
+/* [addr:u32][len]: read up to 16 bytes of memory (diagnostics for RAM
+ * reclaim decisions). Reply body: the bytes. */
+static void cfw_peek(const uint8_t *p, uint32_t n)
+{
+    if (n < 5) {
+        cfw_reply(CFW_PEEK, CFW_BAD_LENGTH, 0, 0);
+        return;
+    }
+    uint32_t addr = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+    uint32_t len = p[4] > 16 ? 16 : p[4];
+    cfw_reply(CFW_PEEK, CFW_OK, FW_PEEK_PTR(addr), len);
+}
+
 static void cfw_ping(void)
 {
     uint8_t id[16];
@@ -1071,6 +1084,9 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_STATS:
         cfw_stats();
+        break;
+    case CFW_PEEK:
+        cfw_peek(data + 2, len - 2);
         break;
     default:
         cfw_reply(data[1], CFW_BAD_COMMAND, 0, 0);
