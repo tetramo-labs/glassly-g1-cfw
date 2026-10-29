@@ -417,6 +417,16 @@ back to back were not dropped by the stock receive path at this rate. The
 right temple then took G1CFW/9 the same way and drew the RLE frame in 0.65 s
 with 0 errors. Both temples are on G1CFW/9 (image hash `db29379a…4fdfb6`).
 
+### Hardware result for G1CFW/10: text (2026-10-28)
+
+Both temples took G1CFW/10 (image hash `5917e8e9…8491c4`). `text "Hello G1
+left"` in font 0 at (300,10)-(636,37) and `"12:47"` in font 1 at
+(300,60)-(636,100) returned ok on the left temple, `"Hello G1 right"` on the
+right, drawn over the RLE test pattern; STATS showed 0 errors. The left
+temple's first activation attempt missed its scan window after the staging
+disconnect, so the install loop now retries activation. Legibility of the
+glyphs is for the user to confirm by eye.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
