@@ -510,7 +510,9 @@ and drive the private protocol without pairing**. That is intended for this
 development firmware and is the only way to use the glasses outside the dock
 from the Mac; restore any older profile to get the stock policy back.
 `g1flash.py ping --hold 45` holds a connection past the old 30 s limit to
-verify it.
+verify it: on the left temple it answered `G1CFW/20` before and after a 45 s
+hold on one connection, 0 errors. The right temple is still on G1CFW/19
+pending the user's decision on the open policy.
 
 ## References and remaining work
 
