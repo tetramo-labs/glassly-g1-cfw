@@ -536,6 +536,16 @@ adds INPUT_CONTROL/INPUT_STATE/INPUT_EVENT (docs/G1_CFW_PROTOCOL.md). The
 CFW sends the event notification from the touch thread through the same
 synchronous Nordic UART notify the stock `#t` reply uses.
 
+**Hardware result (left temple, docked, 2026-10-29).** Installed over
+G1CFW/20 in one connection (stage 3 min, no drops), confirmed on reboot.
+`g1flash.py touch watch --seconds 70` received 13 INPUT_EVENTs while the
+user tapped: singles, a double, a triple, long-press start/end and one
+long-press timeout, each within a second of the touch. Some deliberate taps
+arrived as a `single` followed about half a second later by `long-start`;
+that is the stock classifier's own output (it is unchanged), not a CFW
+artefact. Stock handling stayed on (`swallow` off), so the dashboard reacted
+as before.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
