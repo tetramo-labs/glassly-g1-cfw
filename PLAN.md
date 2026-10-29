@@ -155,10 +155,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    16-byte records. Not yet: rounded rectangles, arcs/sectors, beziers, image
    and text records inside a shape list. The **retained object cache**
    (G1CFW/16: PUT/SHOW/HIDE/STATE/CONTROL, 96 descriptors in reclaimed RAM at
-   `0x2001bf24`) is in; animation is not. Firmware-side animation needs a
-   thread-context tick: the stock image has no delayable-work users, so the
-   plan is to drive it from the display thread by posting the stock refresh
-   message and hooking the stubbed `display_reflash_handler`.
+   `0x2001bf24`) and **animation** (G1CFW/17: eased glides stepped on the
+   display thread via the hooked refresh handler, `k_msleep` and the stock
+   refresh post) are in. Not yet: per-frame dirty rects instead of full-frame
+   pushes, tween of size/level, journal deltas, request-id replay protection.
 8. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.

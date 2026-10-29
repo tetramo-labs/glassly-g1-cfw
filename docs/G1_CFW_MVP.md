@@ -459,6 +459,17 @@ clear and flush, and STATE reported revision 4 with 3 objects shown; 0 errors.
 G1CFW/15's PEEK had shown the reclaimed navigation-map RAM at `0x2001bf24`
 and the dashboard scratch at `0x20013b84` all zero after boot.
 
+### Hardware result for G1CFW/17: animation (2026-10-29)
+
+The stubbed `display_reflash_handler` now branches into `cfw_display_tick`.
+`obj anim --period 30 --move 4:600,80:40:1` glided a 40x40 square across the
+test pattern on the left temple: STATE's revision rose from 3 to 43, i.e. the
+display thread rendered all 40 frames by itself, re-posting the stock refresh
+message after each 30 ms sleep; a second ANIM with two glides (ease-out and
+linear) took it to 83. The right temple ran the first glide the same way.
+STATS 0 errors on both. Frame cost is a full-frame compose and push per tick,
+so 30 ms periods are a request, not a guarantee.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
