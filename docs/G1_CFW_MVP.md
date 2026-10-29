@@ -452,6 +452,13 @@ lines, filled and outlined triangles); the user confirmed the shapes look right 
 one full frame; a larger store needs static RAM reclaimed from stubbed stock
 features rather than the heap.
 
+### Hardware result for G1CFW/16: retained objects (2026-10-29)
+
+Both temples: image, rect and text objects were defined, SHOWn in order with a
+clear and flush, and STATE reported revision 4 with 3 objects shown; 0 errors.
+G1CFW/15's PEEK had shown the reclaimed navigation-map RAM at `0x2001bf24`
+and the dashboard scratch at `0x20013b84` all zero after boot.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
