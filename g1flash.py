@@ -521,10 +521,17 @@ async def run_cfw_command(client, args, checkpoint):
                 if args.depth is not None:
                     # The master (right) temple shifts the opposite way, as the stock UI does.
                     dx = DEPTH_SHIFT[args.depth] * (-1 if args.side == 'R' else 1)
+                blanked = False
+                if not args.no_flush and (dx, dy) != (current['dx'], current['dy']):
+                    # The panel keeps what was pushed; blank the frame at the old position first,
+                    # then move and push. The caller redraws its scene afterwards.
+                    await link.check(CFW_FILL, bytes([0x02]) + rect_bytes(0, 0, FRAME_W, FRAME_H) + b'\x00')
+                    blanked = True
                 op = 0 | (0 if args.no_flush else 2)
                 body = await link.check(CFW_VIEW, bytes([op]) + struct.pack('<hh', dx, dy))
                 result = view_state(body)
-                result['flushed'] = not args.no_flush
+                result.update({'flushed': not args.no_flush, 'blanked_old_position': blanked,
+                               'note': 'frame cleared; redraw your scene' if blanked else None})
         elif args.command == 'mic':
             def mic_state(body):
                 return {'recording': bool(body[0]), 'starts': struct.unpack_from('<H', body, 1)[0],

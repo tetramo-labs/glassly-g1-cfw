@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 25u
+#define CFW_PROTOCOL 26u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -232,17 +232,71 @@ static uint8_t *cfw_row(uint8_t *panel, uint32_t y, uint32_t x)
  * ((8 - gear) * 35 rows; both temples read 210 = gear 2) and the depth gear
  * as an opposite horizontal shift of the two lenses' content (pos_x table in
  * cal_panel_canvas_coord: gears 1..9 -> 22, 8, 0, -4, -8, -10, -12, -14, -16,
- * negated on the master temple). The CFW owns the frame, so both become an
- * offset added to the stock origins when a rect is pushed. Kept in the
- * second RAM region after the input state. */
+ * negated on the master temple). The panel's column space is exactly 640
+ * wide (a column origin clips one edge and wraps the other), so `dy` moves
+ * the row origin while `dx` shifts the content: every push temporarily
+ * shifts the affected frame rows by dx, blanks the strip the canvas no
+ * longer covers, pushes, and restores the rows. Drawing stays in canvas
+ * coordinates. State lives in the second RAM region after the input state;
+ * the per-row edge bytes saved during a shifted push live in the third. */
 typedef struct {
     uint32_t magic;
-    int16_t  dx, dy;           /* added to the panel column / row origin */
+    int16_t  dx, dy;           /* dx: even, |dx| <= CFW_VIEW_DX_MAX content shift; dy: row origin offset */
     uint16_t flushes;          /* pushes since boot */
     uint16_t pad;
 } cfw_view;
-#define CFW_VIEW_MAGIC 0x31574556u  /* "VEW1" */
+#define CFW_VIEW_MAGIC 0x32574556u  /* "VEW2" */
+#define CFW_VIEW_DX_MAX 24           /* 2 * 12 saved bytes per row fit the third region */
+#define CFW_VIEW_DY_MAX 480
 static cfw_view *cfw_view_state(void);
+
+/* Shift the rows of `r` by dx inside the frame and return the panel span to
+ * push; `undo` reverses it. Saved edge bytes: 2 * |dx| / 2 per row. */
+static void cfw_view_shift(uint8_t *frame, const cfw_rect *r, int dx, int *px0, int *px1, int undo)
+{
+    int shift = dx / 2;
+    int a = shift < 0 ? -shift : shift;
+    int x0 = (int)r->x0, x1 = (int)(r->x0 + r->w);
+    int p0 = x0 == 0 ? 0 : x0 + dx, p1 = x1 == FW_FRAME_WIDTH ? FW_FRAME_WIDTH : x1 + dx;
+    if (p0 < 0) p0 = 0;
+    if (p1 > FW_FRAME_WIDTH) p1 = FW_FRAME_WIDTH;
+    *px0 = p0;
+    *px1 = p1;
+    if (p1 <= p0) {
+        return;
+    }
+    int b0 = p0 / 2, b1 = p1 / 2;
+    int src_lo = b0 - shift, src_hi = b1 - shift;
+    if (src_lo < 0) src_lo = 0;
+    if (src_hi > FW_FRAME_STRIDE) src_hi = FW_FRAME_STRIDE;
+    int n = src_hi - src_lo, d_lo = src_lo + shift;
+    uint8_t *save = FW_CFW_RAM3;
+    for (uint32_t y = 0; y < r->h; y++) {
+        uint8_t *row = frame + (r->y0 + y) * FW_FRAME_STRIDE;
+        uint8_t *keep = save + y * 2 * a;
+        uint32_t k = 0;
+        if (!undo) {
+            for (int j = b0; j < b1; j++) {          /* bytes the inverse move cannot restore */
+                if (j < src_lo || j >= src_hi) keep[k++] = row[j];
+            }
+            if (n > 0) {
+                if (shift > 0) { for (int i = n; i-- > 0;) row[d_lo + i] = row[src_lo + i]; }
+                else           { for (int i = 0; i < n; i++) row[d_lo + i] = row[src_lo + i]; }
+            }
+            for (int j = b0; j < b1; j++) {
+                if (j < d_lo || j >= d_lo + n) row[j] = 0;   /* strip the canvas no longer covers */
+            }
+        } else {
+            if (n > 0) {
+                if (shift > 0) { for (int i = 0; i < n; i++) row[src_lo + i] = row[d_lo + i]; }
+                else           { for (int i = n; i-- > 0;) row[src_lo + i] = row[d_lo + i]; }
+            }
+            for (int j = b0; j < b1; j++) {
+                if (j < src_lo || j >= src_hi) row[j] = keep[k++];
+            }
+        }
+    }
+}
 
 static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
 {
@@ -251,14 +305,25 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
     }
     cfw_view *v = cfw_view_state();
     v->flushes++;
-    int col = *(int *)(panel + FW_PANEL_COL_OFFSET) + v->dx;
+    int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
     int row = *(int *)(panel + FW_PANEL_ROW_OFFSET) + v->dy;
     /* The stock routine sends (x1 - x0) / 2 bytes per row, so x1 is exclusive
      * in pixels even though y1 is inclusive. Passing x0 + w - 1 would drop the
      * last pixel pair of every row (the stock full-frame caller passes 0x27f
      * and loses columns 638-639); 640 is accepted by its clamp. */
-    return FW_REFLASH_FB(col, row, (int)r->x0, (int)r->y0, (int)(r->x0 + r->w),
-                         (int)(r->y0 + r->h - 1)) < 0 ? CFW_PANEL_OFF : CFW_OK;
+    if (v->dx == 0) {
+        return FW_REFLASH_FB(col, row, (int)r->x0, (int)r->y0, (int)(r->x0 + r->w),
+                             (int)(r->y0 + r->h - 1)) < 0 ? CFW_PANEL_OFF : CFW_OK;
+    }
+    uint8_t *frame = FW_FRAME_OF(panel);
+    int px0, px1;
+    cfw_view_shift(frame, r, v->dx, &px0, &px1, 0);
+    int rc = 0;
+    if (px1 > px0) {
+        rc = FW_REFLASH_FB(col, row, px0, (int)r->y0, px1, (int)(r->y0 + r->h - 1));
+    }
+    cfw_view_shift(frame, r, v->dx, &px0, &px1, 1);
+    return rc < 0 ? CFW_PANEL_OFF : CFW_OK;
 }
 
 /* [flags][rect] header plus a separate pixel buffer (packet or asset). */
@@ -1500,7 +1565,7 @@ static void cfw_view_cmd(const uint8_t *p, uint32_t n)
     }
     if ((p[0] & 1) == 0) {
         int dx = rd16s(p + 1), dy = rd16s(p + 3);
-        if (dx < -320 || dx > 320 || dy < -480 || dy > 480) {
+        if ((dx & 1) || dx < -CFW_VIEW_DX_MAX || dx > CFW_VIEW_DX_MAX || dy < -CFW_VIEW_DY_MAX || dy > CFW_VIEW_DY_MAX) {
             cfw_reply(CFW_VIEW, CFW_BAD_RECT, 0, 0);
             return;
         }

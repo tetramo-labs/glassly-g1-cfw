@@ -31,6 +31,8 @@ static uint8_t host_peek_mem[64];
 #define FW_PEEK_PTR(addr) (host_peek_mem + ((addr) & 63))
 static uint8_t host_ram2[0x140c + 64];
 #define FW_CFW_RAM2 (host_ram2 + 32)
+static uint8_t host_ram3[32 + 0x13a4 + 32];
+#define FW_CFW_RAM3 (host_ram3 + 32)
 static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3);
 static int host_msleep(int ms);
 #define FW_DISPLAY_POST host_display_post
@@ -86,11 +88,13 @@ static int host_send(const void *data, uint32_t len)
 static uint8_t *host_get_ctx(void) { return ctx; }
 static int host_hook(const void *data, uint32_t len) { (void)data; (void)len; hook_calls++; return 1; }
 static uint8_t *host_get_state(void) { return state; }
+static uint8_t pushed_row[320];   /* frame row 0 as it looked during the push */
 static int host_reflash(int col, int row, int x0, int y0, int x1, int y1)
 {
     reflash_calls++;
     int r[6] = { col, row, x0, y0, x1, y1 };
     memcpy(last_rect, r, sizeof r);
+    if (host_frame) memcpy(pushed_row, host_frame, sizeof pushed_row);
     return 0;
 }
 
@@ -169,7 +173,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/25", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/26", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -593,7 +597,7 @@ int main(void)
     reflash_calls = 0;
     uint8_t view_set[] = { 0xF0, 0x14, 0x02, 0xF8, 0xFF, 0x23, 0x00 };   /* dx -8, dy +35, push */
     CHECK(send_packet(view_set, sizeof view_set) == 0 && last_reply[2] == CFW_OK);
-    CHECK(reflash_calls == 1 && last_rect[0] == -8 && last_rect[1] == 245 && last_rect[4] == 640 && last_rect[5] == 199);
+    CHECK(reflash_calls == 1 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(last_reply[3] == 0xF8 && last_reply[4] == 0xFF && last_reply[5] == 0x23 && last_reply[9] == 210);
     uint8_t view_far[] = { 0xF0, 0x14, 0x00, 0x00, 0x00, 0xE8, 0x03 };   /* dy 1000: out of range, no change */
     CHECK(send_packet(view_far, sizeof view_far) == 0 && last_reply[2] == CFW_BAD_RECT);
@@ -604,6 +608,35 @@ int main(void)
     CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
     uint8_t flush_all[] = { 0xF0, 0x03, 0, 0, 0, 0, 0x80, 0x02, 0xC8, 0x00 };
     CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK && last_rect[0] == 0 && last_rect[1] == 210);
+
+    /* Depth shift: content moves inside the frame during the push and comes back. */
+    memset(frame, 0, 200 * 320);
+    frame[0 * 320 + 50] = 0xF0;       /* canvas pixel (100, 0) */
+    frame[3 * 320 + 319] = 0x0F;      /* canvas pixel (639, 3) at the right edge */
+    frame[5 * 320 + 0] = 0xF0;        /* canvas pixel (0, 5) at the left edge */
+    uint8_t snapshot[200 * 320];
+    memcpy(snapshot, frame, sizeof snapshot);
+    uint8_t view_dx[] = { 0xF0, 0x14, 0x00, 8, 0, 0, 0 };     /* dx +8 (right lens, near gear) */
+    CHECK(send_packet(view_dx, sizeof view_dx) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK);
+    CHECK(last_rect[0] == 0 && last_rect[2] == 0 && last_rect[4] == 640);
+    CHECK(pushed_row[54] == 0xF0 && pushed_row[50] == 0 && pushed_row[0] == 0 && pushed_row[3] == 0);
+    CHECK(memcmp(frame, snapshot, sizeof snapshot) == 0);
+    uint8_t flush_band[] = { 0xF0, 0x03, 0x60, 0x00, 0x03, 0x00, 0x40, 0x00, 0x01, 0x00 };   /* rect 96,3 64x1: interior */
+    CHECK(send_packet(flush_band, sizeof flush_band) == 0 && last_reply[2] == CFW_OK);
+    CHECK(last_rect[2] == 104 && last_rect[4] == 168 && last_rect[3] == 3 && last_rect[5] == 3);
+    CHECK(memcmp(frame, snapshot, sizeof snapshot) == 0);
+    uint8_t view_dxn[] = { 0xF0, 0x14, 0x00, 0xF4, 0xFF, 0, 0 };   /* dx -12 (left lens, far gear) */
+    CHECK(send_packet(view_dxn, sizeof view_dxn) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK && last_rect[2] == 0 && last_rect[4] == 640);
+    CHECK(pushed_row[44] == 0xF0 && pushed_row[50] == 0);
+    CHECK(memcmp(frame, snapshot, sizeof snapshot) == 0);
+    uint8_t view_odd[] = { 0xF0, 0x14, 0x00, 7, 0, 0, 0 };
+    CHECK(send_packet(view_odd, sizeof view_odd) == 0 && last_reply[2] == CFW_BAD_RECT);
+    uint8_t view_big[] = { 0xF0, 0x14, 0x00, 26, 0, 0, 0 };
+    CHECK(send_packet(view_big, sizeof view_big) == 0 && last_reply[2] == CFW_BAD_RECT);
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK);
+    for (int i = 0; i < 32; i++) { CHECK(host_ram3[i] == 0); CHECK(host_ram3[sizeof host_ram3 - 1 - i] == 0); }
 
     /* IMU streaming rides the display-thread tick. */
     host_imu[0] = 16623; host_imu[1] = -32906; host_imu[2] = 1325;

@@ -207,18 +207,26 @@ Reply body: `[messages:u16][errors:u16][stock_swallowed:u16][last_status]
 Diagnostic: reply body is `len` (at most 16) bytes read from `addr`. Used to
 inspect candidate RAM before reclaiming it.
 
-## `14` VIEW: `[op][dx:i16][dy:i16]` (G1CFW/23 and later)
+## `14` VIEW: `[op][dx:i16][dy:i16]` (G1CFW/23 and later; dx as content shift from G1CFW/26)
 
 Where the 640x200 frame lands on the panel. The stock UI turns the phone's
 height gear into the panel row origin ((8 - gear) * 35 rows; both temples
 boot at 210, gear 2) and the depth gear into an opposite horizontal shift of
 the two lenses' content (gears 1..9 shift 22, 8, 0, -4, -8, -10, -12, -14,
--16 columns, negated on the master temple). The CFW keeps the stock origins
-and adds an offset at every push. `op` bit 0 = query only; bit 1 = push the
-whole frame after setting. Offsets are limited to +/-320 columns and
-+/-480 rows. Reply body `[dx:i16][dy:i16][stock_col:i16][stock_row:i16]
-[height_gear][depth_gear]`. `g1flash.py view --height H --depth D` maps the
-stock gears onto the offset per temple; `--dx/--dy` set it directly.
+-16 columns, negated on the master temple). `dy` is added to the stock row
+origin at every push. `dx` cannot move the column origin: the panel's
+column space is exactly 640 wide, so a shifted origin clips one edge and
+wraps the other (seen on hardware with G1CFW/23). Instead each push shifts
+the affected frame rows by `dx` in place, blanks the strip the canvas no
+longer covers, pushes, and restores the rows, so drawing stays in canvas
+coordinates and content near the far edge is cropped. `dx` must be even
+and within +/-24 (the stock table tops out at 22); `dy` within +/-480.
+`op` bit 0 = query only; bit 1 = push the whole frame after setting. Reply
+body `[dx:i16][dy:i16][stock_col:i16][stock_row:i16][height_gear]
+[depth_gear]`. Moving `dy` leaves the old rows lit, so `g1flash.py view`
+blanks the frame before a change and the caller redraws; `--height H
+--depth D` map the stock gears per temple, `--dx/--dy` set the offset
+directly.
 
 ## IMU streaming (`33`-`34`, G1CFW/23 and later)
 

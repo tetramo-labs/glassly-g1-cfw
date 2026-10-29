@@ -647,6 +647,20 @@ ten frames per chunk; 40-byte frames decode without errors too but yield
 half the duration, so they are wrong. The docked capture is loud noise
 (peak at full scale), to be judged against a spoken capture while worn.
 
+### G1CFW/26: depth as a content shift (2026-10-29)
+
+Worn test of G1CFW/23's VIEW: height gear 6 moved the pattern up on both
+lenses and they still fused (the tool now blanks the frame before a move,
+because the panel keeps the old rows); depth gear 7 as a column-origin
+offset fused into one image at a greater distance but cut off the left
+lens's left edge and wrapped the right lens's right edge onto its left
+side, so the panel's column space is exactly 640 wide. G1CFW/26 keeps the
+column origin and shifts the content inside `cfw_flush`: per row it saves
+the up to 2 * |dx| / 2 bytes the inverse move cannot restore (third CFW
+RAM region, `0x20013b84`, 200 x 24 bytes), moves the span, zeroes the
+uncovered strip, pushes the clipped panel span and restores the row. Host
+test covers both signs, an interior dirty rect and frame restoration.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

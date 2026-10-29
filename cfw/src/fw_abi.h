@@ -154,6 +154,15 @@ typedef void *(*fw_malloc_fn)(uint32_t size);
 #define FW_CFW_RAM2 ((uint8_t *)FW_CFW_RAM2_BASE)
 #endif
 
+/* Third CFW RAM region: DashBoard_Reflash / navigation scratch referenced
+ * only by the stubbed UI block (tools/g1ram.py). Holds the per-row edge
+ * bytes the depth shift saves during a push. */
+#define FW_CFW_RAM3_BASE 0x20013b84u
+#define FW_CFW_RAM3_SIZE 0x13a4u
+#ifndef FW_CFW_RAM3
+#define FW_CFW_RAM3 ((uint8_t *)FW_CFW_RAM3_BASE)
+#endif
+
 /* Display-thread tick for animation. 0x80ed8 posts a stock refresh message
  * for `screen` to the display queue (display_reflash + k_yield); the display
  * thread then calls display_reflash_handler(state, screen, p3, mode), which the
