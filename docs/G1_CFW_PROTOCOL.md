@@ -207,6 +207,28 @@ Reply body: `[messages:u16][errors:u16][stock_swallowed:u16][last_status]
 Diagnostic: reply body is `len` (at most 16) bytes read from `addr`. Used to
 inspect candidate RAM before reclaiming it.
 
+## Touch input (`30`-`32`, G1CFW/21 and later)
+
+Each temple's capacitive touch chip wakes the stock `touch_key_thread`, which
+classifies the press history into a gesture code and hands it to the stock
+key-event thread through a small helper. The profile redirects that helper
+into the CFW, so every gesture passes through `cfw_touch_event` on the touch
+thread. Codes: 1 single tap, 2 double, 3 triple, 4 long-press start (stock
+turns the mic on), 5 long-press end, 6 long-press timeout. Five, six, ten,
+eleven and fifteen taps act inside the stock thread (reboot, force bind, user
+data reset, ESB band) and never reach the helper, so they are not reported.
+
+- `30` INPUT_CONTROL `[flags]`: bit 0 reports each gesture to the host as an
+  INPUT_EVENT; bit 1 keeps gestures from the stock handler (no dashboard,
+  mic or temple sync). Both default to off at boot, so a bare host sees no
+  unsolicited traffic. Reply body `[flags]`; an unknown bit is `bad-record`.
+- `31` INPUT_STATE: reply `[flags][last_code][count:u16][stock_passed:u16]`.
+- `32` INPUT_EVENT: unsolicited `F0 32 00 [code][count:u16]`, one per gesture,
+  from the temple that was touched. The host tool (`g1flash.py touch watch`)
+  sets bit 0, prints events for a while and clears the flags on exit.
+
+The flags are per temple and live in RAM until reboot.
+
 ## Link policy (G1CFW/20 and later)
 
 The stock firmware accepts only the bonded phone's address while out of the

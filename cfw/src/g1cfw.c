@@ -12,14 +12,15 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 20u
+#define CFW_PROTOCOL 21u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
        CFW_ASSET_DRAW = 0x09, CFW_ASSET_TEXT = 0x0A, CFW_ASSET_CLEAR = 0x0B, CFW_ASSET_INFO = 0x0C,
        CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11, CFW_PEEK = 0x12,
        CFW_OBJ_PUT = 0x20, CFW_OBJ_SHOW = 0x21, CFW_OBJ_HIDE = 0x22, CFW_OBJ_STATE = 0x23,
-       CFW_OBJ_CONTROL = 0x24, CFW_OBJ_ANIM = 0x25, CFW_ANIM_STATE = 0x26 };
+       CFW_OBJ_CONTROL = 0x24, CFW_OBJ_ANIM = 0x25, CFW_ANIM_STATE = 0x26,
+       CFW_INPUT_CONTROL = 0x30, CFW_INPUT_STATE = 0x31, CFW_INPUT_EVENT = 0x32 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
@@ -1363,6 +1364,77 @@ int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode
     return 0;
 }
 
+/* --- touch input: gesture codes from touch_key_thread ---------------------
+ * The stock helper that hands a gesture to key_event_thread is redirected
+ * here, so every classified touch passes through the CFW. By default the
+ * gesture still reaches the stock handler (dashboard, mic, sync to the other
+ * temple). INPUT_CONTROL bit 0 reports each gesture to the host as an
+ * unsolicited INPUT_EVENT; bit 1 keeps it from the stock handler. The state
+ * lives in the second RAM region after the animation table. */
+typedef struct {
+    uint32_t magic;
+    uint8_t  flags;         /* bit 0 notify host, bit 1 swallow stock */
+    uint8_t  last_code;
+    uint16_t count;         /* gestures seen since boot */
+    uint16_t stock_passed;  /* gestures handed to key_event_thread */
+    uint16_t pad;
+} cfw_input;
+#define CFW_INPUT_MAGIC 0x31504e49u  /* "INP1" */
+#define CFW_INPUT_NOTIFY  0x01u
+#define CFW_INPUT_SWALLOW 0x02u
+
+static cfw_input *cfw_input_state(void)
+{
+    cfw_input *in = (cfw_input *)(FW_CFW_RAM2 + sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_anims));
+    if (in->magic != CFW_INPUT_MAGIC) {
+        uint8_t *p = (uint8_t *)in;
+        for (uint32_t i = 0; i < sizeof *in; i++) {
+            p[i] = 0;
+        }
+        in->magic = CFW_INPUT_MAGIC;
+    }
+    return in;
+}
+
+/* Runs on touch_key_thread in place of the stock signal helper. */
+int cfw_touch_event(void)
+{
+    cfw_input *in = cfw_input_state();
+    uint8_t code = (uint8_t)*FW_TOUCH_EVENT;
+    in->count++;
+    in->last_code = code;
+    if (in->flags & CFW_INPUT_NOTIFY) {
+        uint8_t body[3] = { code, (uint8_t)in->count, (uint8_t)(in->count >> 8) };
+        cfw_reply(CFW_INPUT_EVENT, CFW_OK, body, sizeof body);
+    }
+    if (!(in->flags & CFW_INPUT_SWALLOW) && *FW_KEY_EVENT_SEM_READY) {
+        in->stock_passed++;
+        FW_K_SEM_GIVE(FW_KEY_EVENT_SEM);
+    }
+    return 0;
+}
+
+/* [flags] -> reply body [flags]. */
+static void cfw_input_control(const uint8_t *p, uint32_t n)
+{
+    cfw_input *in = cfw_input_state();
+    if (n != 1 || (p[0] & ~(CFW_INPUT_NOTIFY | CFW_INPUT_SWALLOW))) {
+        cfw_reply(CFW_INPUT_CONTROL, n != 1 ? CFW_BAD_LENGTH : CFW_BAD_RECORD, 0, 0);
+        return;
+    }
+    in->flags = p[0];
+    cfw_reply(CFW_INPUT_CONTROL, CFW_OK, &in->flags, 1);
+}
+
+/* Reply body: [flags][last_code][count:u16][stock_passed:u16]. */
+static void cfw_input_report(void)
+{
+    cfw_input *in = cfw_input_state();
+    uint8_t body[6] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
+                        (uint8_t)in->stock_passed, (uint8_t)(in->stock_passed >> 8) };
+    cfw_reply(CFW_INPUT_STATE, CFW_OK, body, sizeof body);
+}
+
 /* Reply body: [active][period_ms][ticks:u32][full_pushes:u32]. */
 static void cfw_anim_state(void)
 {
@@ -1659,6 +1731,12 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_PEEK:
         cfw_peek(data + 2, len - 2);
+        break;
+    case CFW_INPUT_CONTROL:
+        cfw_input_control(data + 2, len - 2);
+        break;
+    case CFW_INPUT_STATE:
+        cfw_input_report();
         break;
     default:
         cfw_reply(data[1], CFW_BAD_COMMAND, 0, 0);

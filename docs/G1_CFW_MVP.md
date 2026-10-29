@@ -520,6 +520,22 @@ and PING answered `G1CFW/20` before and after a 20 s hold on one connection.
 The dock is no longer required for anything except installing over a
 pre-G1CFW/20 image (the right temple, until it is upgraded).
 
+### G1CFW/21: touch gestures (2026-10-29)
+
+Trace (1.5.60, `tools/g1dis.py`): the aw9320x IRQ sets the byte at
+`0x2001a22e` (1 press, 2 release) and gives the semaphore at state+0xb0;
+`touch_key_thread` (`0x2ba60`, 1.6.3 decomp `src/app/touch_key_thread.c`)
+times the presses, stores a gesture code in the word at `0x20007cb4` and
+calls the helper at `0x2ba48`, whose only callers are the three signal sites
+in that thread. The helper gives `__key_event_sem` (`0x20007cb8`, via the
+`k_sem_give` trampoline at `0x7ff68`) once the ready byte at `0x2001920c` is
+set by `__init_key_event_sem`. `key_event_thread` (`0x2af30`) then acts on
+the code. The profile's `input` group replaces the helper's first
+instruction with `b.w cfw_touch_event`; the blob re-implements the give and
+adds INPUT_CONTROL/INPUT_STATE/INPUT_EVENT (docs/G1_CFW_PROTOCOL.md). The
+CFW sends the event notification from the touch thread through the same
+synchronous Nordic UART notify the stock `#t` reply uses.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).

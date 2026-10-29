@@ -50,6 +50,8 @@ STUBS = {
 HOOKS = {
     'display': [
         (0x4bee0, 'cfw_display_tick', 'display_reflash_handler: display-thread tick for CFW animation'),
+    ],    'input': [
+        (0x2ba48, 'cfw_touch_event', 'touch_key_thread signal helper: every gesture code passes through the CFW'),
     ],
 }
 BW_TEMPLATE = bytes.fromhex('00f0009000')[:4]  # b.w placeholder; thumb_branch keeps the B.W opcode bits

@@ -165,3 +165,21 @@ typedef int (*fw_msleep_fn)(int ms);
 #define FW_K_MSLEEP ((fw_msleep_fn)0x0007ff99)
 #endif
 #define FW_SCREEN_CFW 0x10
+
+/* Touch input (1.5.60). The aw9320x capacitive IRQ wakes touch_key_thread
+ * (0x2ba60), which classifies the press history into a gesture code, stores
+ * it in the key-event word and calls the 14-byte helper at 0x2ba48, which
+ * gives the key-event semaphore when it has been initialised. The profile
+ * redirects that helper to cfw_touch_event. Codes: 1 single, 2 double,
+ * 3 triple, 4 long-press start (stock turns the mic on), 5 long-press end,
+ * 6 long-press timeout. 5/6/10/11/15 taps act inside the thread (reboot,
+ * force bind, user-data reset, ESB band) and never reach the helper. */
+#ifndef FW_TOUCH_EVENT
+#define FW_TOUCH_EVENT ((volatile uint32_t *)0x20007cb4u)   /* gesture code (1.6.3: DAT_200084f8) */
+#define FW_KEY_EVENT_SEM ((void *)0x20007cb8u)              /* struct k_sem __key_event_sem */
+#define FW_KEY_EVENT_SEM_READY ((volatile uint8_t *)0x2001920cu)  /* set once k_sem_init succeeded */
+#endif
+typedef void (*fw_sem_give_fn)(void *sem);
+#ifndef FW_K_SEM_GIVE
+#define FW_K_SEM_GIVE ((fw_sem_give_fn)0x0007ff69)   /* 0x7ff68: k_sem_give trampoline */
+#endif

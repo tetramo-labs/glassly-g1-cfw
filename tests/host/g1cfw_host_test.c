@@ -35,6 +35,13 @@ static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3);
 static int host_msleep(int ms);
 #define FW_DISPLAY_POST host_display_post
 #define FW_K_MSLEEP host_msleep
+static uint32_t host_touch_code; static uint8_t host_key_sem_ready; static int host_sem_gives; static void *host_last_sem;
+static uint8_t host_key_sem[16];
+static void host_sem_give(void *sem);
+#define FW_TOUCH_EVENT (&host_touch_code)
+#define FW_KEY_EVENT_SEM ((void *)host_key_sem)
+#define FW_KEY_EVENT_SEM_READY (&host_key_sem_ready)
+#define FW_K_SEM_GIVE host_sem_give
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -108,6 +115,7 @@ static int malloc_calls; static uint32_t malloc_size;
 /* Refuse 48 KB and 40 KB like the real heap did; grant the 32 KB retry. */
 static void *host_malloc(uint32_t size) { malloc_calls++; malloc_size = size; return size > 32 * 1024 ? NULL : host_arena + 32; }
 
+static void host_sem_give(void *sem) { host_sem_gives++; host_last_sem = sem; }
 static int post_calls, sleep_calls, last_sleep; static uint8_t last_screen;
 static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3) { (void)p2; (void)p3; post_calls++; last_screen = screen; return 0; }
 static int host_msleep(int ms) { sleep_calls++; last_sleep = ms; return 0; }
@@ -151,7 +159,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/20", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/21", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -502,6 +510,38 @@ int main(void)
     cfw_display_tick(state, 0x10, 0, 2);
     CHECK(last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[5] == 8 && last_reply[9] == 1);
+
+    /* Touch gestures: the redirected stock helper hands codes to the stock
+     * semaphore by default, reports them when asked, and can swallow them. */
+    uint8_t in_state[] = { 0xF0, 0x31 };
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 9);
+    host_touch_code = 2;
+    last_reply_len = 0;
+    cfw_touch_event();                      /* semaphore not initialised yet: nothing given, nothing sent */
+    CHECK(host_sem_gives == 0 && last_reply_len == 0);
+    host_key_sem_ready = 1;
+    cfw_touch_event();
+    CHECK(host_sem_gives == 1 && host_last_sem == (void *)host_key_sem && last_reply_len == 0);
+    uint8_t in_notify[] = { 0xF0, 0x30, 0x01 };
+    CHECK(send_packet(in_notify, sizeof in_notify) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0x01);
+    host_touch_code = 1;
+    cfw_touch_event();
+    CHECK(last_reply_len == 6 && last_reply[1] == 0x32 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 3 && last_reply[5] == 0);
+    CHECK(host_sem_gives == 2);
+    uint8_t in_grab[] = { 0xF0, 0x30, 0x03 };
+    CHECK(send_packet(in_grab, sizeof in_grab) == 0 && last_reply[2] == CFW_OK);
+    host_touch_code = 4;
+    cfw_touch_event();
+    CHECK(host_sem_gives == 2 && last_reply[3] == 4 && last_reply[4] == 4);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x03 && last_reply[4] == 4 && last_reply[5] == 4 && last_reply[7] == 2);
+    uint8_t in_bad[] = { 0xF0, 0x30, 0x04 };
+    CHECK(send_packet(in_bad, sizeof in_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    uint8_t in_short[] = { 0xF0, 0x30 };
+    CHECK(send_packet(in_short, sizeof in_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x03);   /* rejected controls change nothing */
+    uint8_t in_release[] = { 0xF0, 0x30, 0x00 };
+    CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0);
+    CHECK((uint8_t *)cfw_input_state() + sizeof(cfw_input) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

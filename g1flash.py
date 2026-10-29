@@ -131,6 +131,8 @@ CFW_SID = 0xF0
 CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY = 0, 1, 2, 3, 4, 5, 6, 7
 CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS, CFW_PEEK = 8, 9, 10, 11, 12, 13, 0x10, 0x11, 0x12
 CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM, CFW_ANIM_STATE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
+CFW_INPUT_CONTROL, CFW_INPUT_STATE, CFW_INPUT_EVENT = 0x30, 0x31, 0x32
+TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
               12: 'no-asset', 13: 'bad-asset', 14: 'no-object'}
@@ -444,6 +446,39 @@ async def run_cfw_command(client, args, checkpoint):
             data = b''.join(chunks)
             result = {'addr': hex(args.addr), 'len': len(data), 'hex': data.hex(),
                       'nonzero': sum(1 for b in data if b), 'ascii': ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)}
+        elif args.command == 'touch':
+            def input_state(body):
+                return {'notify': bool(body[0] & 1), 'swallow_stock': bool(body[0] & 2),
+                        'last': TOUCH_CODES.get(body[1], body[1]), 'count': struct.unpack_from('<H', body, 2)[0],
+                        'stock_passed': struct.unpack_from('<H', body, 4)[0]}
+            if args.action == 'state':
+                result = input_state(await link.check(CFW_INPUT_STATE))
+            elif args.action == 'control':
+                flags = (0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
+                await link.check(CFW_INPUT_CONTROL, bytes([flags]))
+                result = input_state(await link.check(CFW_INPUT_STATE))
+            else:
+                flags = 0x01 | (0x02 if args.swallow else 0)
+                await link.check(CFW_INPUT_CONTROL, bytes([flags]))
+                events, started = [], asyncio.get_running_loop().time()
+                deadline = started + args.seconds
+                print(f'Listening for touches on {args.side} for {args.seconds:g} s', file=sys.stderr, flush=True)
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        reply = await asyncio.wait_for(link.replies.get(), remaining)
+                    except asyncio.TimeoutError:
+                        break
+                    if len(reply) >= 6 and reply[1] == CFW_INPUT_EVENT:
+                        event = {'t': round(asyncio.get_running_loop().time() - started, 2), 'gesture': TOUCH_CODES.get(reply[3], reply[3]),
+                                 'count': struct.unpack_from('<H', reply, 4)[0]}
+                        events.append(event)
+                        print(json.dumps(event), file=sys.stderr, flush=True)
+                if not args.keep:
+                    await link.check(CFW_INPUT_CONTROL, bytes([0]))
+                result = {'events': events, 'seconds': args.seconds, 'kept_flags': args.keep}
         elif args.command == 'stats':
             body = await link.check(CFW_STATS)
             result = {'messages': struct.unpack_from('<H', body, 0)[0], 'errors': struct.unpack_from('<H', body, 2)[0],
@@ -554,7 +589,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -621,7 +656,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -695,6 +730,12 @@ def arguments(argv=None):
             child.add_argument('--hidden', action='store_true')
             child.add_argument('--ids', help='show: comma-separated object ids in draw order')
             child.add_argument('--clear', action='store_true', help='show: clear the frame first')
+        if command == 'touch':
+            child.add_argument('action', choices=('watch', 'state', 'control'))
+            child.add_argument('--seconds', type=float, default=20, help='watch: how long to report gestures')
+            child.add_argument('--swallow', action='store_true', help='keep gestures from the stock handler while set')
+            child.add_argument('--notify', action='store_true', help='control: send INPUT_EVENT for each gesture')
+            child.add_argument('--keep', action='store_true', help='watch: leave notify/swallow set after returning')
         if command == 'peek':
             child.add_argument('--addr', type=lambda v: int(v, 0), required=True)
             child.add_argument('--len', type=int, default=64, help='bytes to read (16 per request)')
@@ -714,6 +755,8 @@ def arguments(argv=None):
         parser.error('--chunk-bytes must be between 1 and 480')
     if getattr(args, 'rle', False):
         args.stream = True
+    if getattr(args, 'command', None) == 'touch' and not 1 <= args.seconds <= 75:
+        parser.error('--seconds must be between 1 and 75 (the Bluetooth worker deadline is 90 s)')
     return parser, args
 
 
