@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 18u
+#define CFW_PROTOCOL 19u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -870,6 +870,28 @@ static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
 typedef struct cfw_anims cfw_anims;
 static cfw_anims *cfw_animation(void);
 
+/* --- animation: glides stepped on the display thread ---------------------- */
+#define CFW_ANIM_MAX 16u
+typedef struct {
+    uint16_t id;
+    int16_t  x0, y0, x1, y1;   /* from / to */
+    uint8_t  frames, frame, easing, pad;
+} cfw_anim;
+
+struct cfw_anims {
+    uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
+    uint8_t  active;           /* glides in flight */
+    uint8_t  period_ms;
+    uint8_t  count;
+    uint8_t  ticking;          /* a refresh is queued or running */
+    uint32_t ticks;            /* frames rendered since boot */
+    uint32_t full_pushes;      /* frames that needed a whole-frame push */
+    uint16_t clip_y0, clip_y1; /* row clip for composition (exclusive end); 0,0 = none */
+    cfw_anim items[CFW_ANIM_MAX];
+};
+#define CFW_ANIM_MAGIC 0x314d4e41u  /* "ANM1" */
+
+
 /* --- retained objects (g2flash modes 37-41, without animation yet) -------
  * Objects are small descriptors in the second RAM region; pixels come from
  * assets, the font engine or shape records. SHOW composes an ordered list of
@@ -1011,27 +1033,55 @@ static void cfw_rect_union(cfw_rect *acc, const cfw_rect *r)
     acc->h = y1 - acc->y0;
 }
 
-/* Draw one object into the frame (no flush). */
+/* Draw one object into the frame (no flush). When the animation row clip is
+ * set, images and rects are limited to those rows; text is drawn whole when
+ * its box touches them (glyph cells are idempotent), shapes always whole. */
 static uint8_t cfw_obj_render(const cfw_obj *obj)
 {
     uint8_t buf[16];
+    cfw_anims *an = cfw_animation();
+    int clip = an->clip_y1 > an->clip_y0;
+    int cy0 = an->clip_y0, cy1 = an->clip_y1;
     if (!(obj->flags & 1u)) {
         return CFW_OK;
     }
     switch (obj->kind) {
-    case CFW_OBJ_IMAGE:
+    case CFW_OBJ_IMAGE: {
         if (obj->x < 0 || obj->y < 0) {
             return CFW_BAD_RECT;
         }
-        buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
-        buf[2] = (uint8_t)((obj->level & 0xF) << 4);
-        buf[3] = (uint8_t)obj->x; buf[4] = (uint8_t)(obj->x >> 8);
-        buf[5] = (uint8_t)obj->y; buf[6] = (uint8_t)(obj->y >> 8);
-        return cfw_asset_draw(buf, 7);
+        cfw_ctx *c = cfw_context();
+        cfw_asset *a = c->arena ? cfw_asset_find(c, obj->asset) : 0;
+        if (!a) {
+            return CFW_NO_ASSET;
+        }
+        if (a->kind == CFW_ASSET_STRING || a->bytes != cfw_asset_expected(a)) {
+            return CFW_BAD_ASSET;
+        }
+        int r0 = 0, r1 = a->h;                /* asset rows to draw */
+        if (clip) {
+            if (obj->y + (int)a->h <= cy0 || obj->y >= cy1) {
+                return CFW_OK;
+            }
+            if (obj->y < cy0) r0 = cy0 - obj->y;
+            if (obj->y + (int)a->h > cy1) r1 = cy1 - obj->y;
+        }
+        uint32_t stride = a->kind == CFW_ASSET_1BPP ? (a->w + 7u) / 8u : a->w / 2u;
+        int y = obj->y + r0;
+        buf[0] = (uint8_t)(((obj->level & 0xF) << 4) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
+        buf[1] = (uint8_t)obj->x; buf[2] = (uint8_t)(obj->x >> 8);
+        buf[3] = (uint8_t)y; buf[4] = (uint8_t)(y >> 8);
+        buf[5] = (uint8_t)a->w; buf[6] = (uint8_t)(a->w >> 8);
+        buf[7] = (uint8_t)(r1 - r0); buf[8] = (uint8_t)((r1 - r0) >> 8);
+        return cfw_blit_from(buf, cfw_asset_bytes(c, a) + (uint32_t)r0 * stride, (uint32_t)(r1 - r0) * stride);
+    }
     case CFW_OBJ_TEXT: {
         int x1 = obj->x + obj->w, y1 = obj->y + obj->h - 1;
         if (obj->x < 0 || obj->y < 0 || x1 > FW_FRAME_WIDTH || y1 >= FW_FRAME_HEIGHT) {
             return CFW_BAD_RECT;
+        }
+        if (clip && (y1 < cy0 || obj->y >= cy1)) {
+            return CFW_OK;
         }
         buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
         buf[2] = obj->font; buf[3] = 0;
@@ -1044,7 +1094,13 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
     }
     case CFW_OBJ_RECT: {
         uint8_t *frame = cfw_row(cfw_panel(), 0, 0);
-        cfw_fill_rect(frame, obj->x, obj->y, obj->x + (int)obj->w - 1, obj->y + (int)obj->h - 1, (uint8_t)(obj->level & 0xF));
+        int y0 = obj->y, y1 = obj->y + (int)obj->h - 1;
+        if (clip) {
+            if (y0 < cy0) y0 = cy0;
+            if (y1 >= cy1) y1 = cy1 - 1;
+            if (y0 > y1) return CFW_OK;
+        }
+        cfw_fill_rect(frame, obj->x, y0, obj->x + (int)obj->w - 1, y1, (uint8_t)(obj->level & 0xF));
         return CFW_OK;
     }
     case CFW_OBJ_SHAPES: {
@@ -1178,26 +1234,6 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
     return CFW_BAD_COMMAND;
 }
 
-/* --- animation: glides stepped on the display thread ---------------------- */
-#define CFW_ANIM_MAX 16u
-typedef struct {
-    uint16_t id;
-    int16_t  x0, y0, x1, y1;   /* from / to */
-    uint8_t  frames, frame, easing, pad;
-} cfw_anim;
-
-struct cfw_anims {
-    uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
-    uint8_t  active;           /* glides in flight */
-    uint8_t  period_ms;
-    uint8_t  count;
-    uint8_t  ticking;          /* a refresh is queued or running */
-    uint32_t ticks;            /* frames rendered since boot */
-    uint32_t full_pushes;      /* frames that needed a whole-frame push */
-    cfw_anim items[CFW_ANIM_MAX];
-};
-#define CFW_ANIM_MAGIC 0x314d4e41u  /* "ANM1" */
-
 static cfw_anims *cfw_animation(void)
 {
     cfw_anims *a = (cfw_anims *)(FW_CFW_RAM2 + sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj));
@@ -1237,20 +1273,25 @@ static int32_t cfw_ease(uint8_t easing, int32_t t, int32_t frames)
 static uint8_t cfw_obj_present(const cfw_rect *dirty)
 {
     cfw_objs *o = cfw_objects();
+    cfw_anims *an = cfw_animation();
     uint8_t *panel = cfw_panel();
     uint8_t *frame = cfw_row(panel, 0, 0);
-    for (uint32_t i = 0; i < FW_FRAME_STRIDE * FW_FRAME_HEIGHT; i++) {
+    if (dirty && dirty->w == 0) {
+        return CFW_OK;                        /* nothing visible changed */
+    }
+    uint32_t row0 = dirty ? dirty->y0 : 0, row1 = dirty ? dirty->y0 + dirty->h : FW_FRAME_HEIGHT;
+    for (uint32_t i = row0 * FW_FRAME_STRIDE; i < row1 * FW_FRAME_STRIDE; i++) {
         frame[i] = 0;
     }
+    an->clip_y0 = (uint16_t)row0;
+    an->clip_y1 = dirty ? (uint16_t)row1 : 0;
     for (uint32_t i = 0; i < o->shown_count; i++) {
         cfw_obj *obj = cfw_obj_find(o, o->shown[i]);
         if (obj) {
             cfw_obj_render(obj);
         }
     }
-    if (dirty && dirty->w == 0) {
-        return CFW_OK;                        /* nothing visible changed */
-    }
+    an->clip_y0 = an->clip_y1 = 0;
     cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
     return cfw_flush(panel, dirty ? dirty : &all);
 }
@@ -1355,7 +1396,7 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
             return CFW_NO_OBJECT;
         }
     }
-    if (p[0] >= 10) {
+    if (p[0] >= 1) {
         a->period_ms = p[0];
     }
     a->count = (uint8_t)count;
