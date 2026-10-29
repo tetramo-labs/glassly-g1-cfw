@@ -559,6 +559,10 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
             return
         if args.command == 'ping':
             result = await query_ping(client)
+            if args.hold:
+                # Prove the link survives longer than the stock 30 s unbonded drop.
+                await asyncio.sleep(args.hold)
+                result = {'first': result, 'held_seconds': args.hold, 'after_hold': await query_ping(client)}
             checkpoint('ping', result)
             emit(result)
             return
@@ -635,6 +639,8 @@ def arguments(argv=None):
                                help='Explicit permanent selection instead of a test boot; rollback is not promised')
         if command == 'verify':
             child.add_argument('--expect', choices=('cfw', 'stock'), default='cfw')
+        if command == 'ping':
+            child.add_argument('--hold', type=float, default=0, help='Stay connected this many seconds, then ping again')
         if command == 'panel':
             group = child.add_mutually_exclusive_group(required=True)
             group.add_argument('--on', action='store_true', help='Resume the panel via the stock system-resume path')
