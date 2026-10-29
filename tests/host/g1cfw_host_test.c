@@ -29,6 +29,8 @@ static void *host_malloc(uint32_t size);
 #define FW_MALLOC host_malloc
 static uint8_t host_peek_mem[64];
 #define FW_PEEK_PTR(addr) (host_peek_mem + ((addr) & 63))
+static uint8_t host_ram2[0x140c + 64];
+#define FW_CFW_RAM2 (host_ram2 + 32)
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -141,7 +143,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/15", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/16", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -410,6 +412,43 @@ int main(void)
     uint8_t peek[] = { 0xF0, 0x12, 0x08, 0, 0, 0x20, 32 };
     CHECK(send_packet(peek, sizeof peek) == 0 && last_reply[2] == CFW_OK && last_reply_len == 19 && last_reply[3] == 8 && last_reply[18] == 23);
     CHECK(send_packet(peek, 6) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+
+    /* Retained objects: a rect, an image (asset 5 from above, re-put), a text, shown in order. */
+    uint8_t put5[] = { 0xF0, 0x08, 5, 0, 0x00, 0x00, 16, 0, 2, 0, 0xFF, 0x00, 0x00, 0xFF };
+    CHECK(send_packet(put5, sizeof put5) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(puts2, sizeof puts2) == 0 && last_reply[2] == CFW_OK);  /* string asset 9 = "Yo" */
+    uint8_t o1[] = { 0xF0, 0x20, 1, 0, 1, 0, 2, 0x01, 10, 0, 10, 0, 8, 0, 4, 0, 0, 0, 0x0C, 0, 0 };  /* rect 8x4 at (10,10) level C */
+    uint8_t o2[] = { 0xF0, 0x20, 2, 0, 1, 0, 0, 0x01, 20, 0, 50, 0, 0, 0, 0, 0, 5, 0, 0x0F, 0, 0 };  /* image asset 5 at (20,50) */
+    uint8_t o3[] = { 0xF0, 0x20, 3, 0, 7, 0, 1, 0x01, 32, 0, 32, 0, 0x40, 0x02, 28, 0, 9, 0, 0, 0, 1 }; /* text asset 9 box 576x28 */
+    CHECK(send_packet(o1, sizeof o1) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(o2, sizeof o2) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(o3, sizeof o3) == 0 && last_reply[2] == CFW_OK);
+    CHECK(memcmp(host_ram2 + 32, "OBJ2", 4) == 0 && host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
+    memset(frame, 0x33, 200 * 320);
+    utf_calls = 0; reflash_calls = 0;
+    uint8_t show[] = { 0xF0, 0x21, 0x03, 3, 1, 0, 2, 0, 3, 0 };
+    CHECK(send_packet(show, sizeof show) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[4] == 640);
+    CHECK(frame[0] == 0 && frame[10 * 320 + 5] == 0xCC && frame[13 * 320 + 8] == 0xCC && frame[14 * 320 + 5] == 0);
+    CHECK(frame[50 * 320 + 10] == 0xFF && frame[50 * 320 + 14] == 0 && frame[51 * 320 + 14] == 0xFF);
+    CHECK(utf_calls == 1 && strcmp(utf_text, "Yo") == 0 && utf_box[0] == 32 && utf_box[2] == 608 && utf_box[3] == 59);
+    const uint8_t ostate[] = { 0xF0, 0x23 };
+    CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[2] == CFW_OK && last_reply[5] == 3 && last_reply[6] == 3 && last_reply[7] == 1 && last_reply[9] == 1 && last_reply[11] == 2 && last_reply[15] == 3 && last_reply[17] == 7);
+    /* Unknown id refused before anything is drawn; hide blanks; control drops one object. */
+    uint8_t show_bad[] = { 0xF0, 0x21, 0x01, 1, 9, 9 };
+    memset(frame, 0x33, 200 * 320);
+    CHECK(send_packet(show_bad, sizeof show_bad) == 0 && last_reply[2] == CFW_NO_OBJECT && frame[0] == 0x33);
+    const uint8_t hide[] = { 0xF0, 0x22 };
+    CHECK(send_packet(hide, sizeof hide) == 0 && last_reply[2] == CFW_OK && frame[0] == 0 && frame[64000 - 1] == 0 && reflash_calls == 2);
+    uint8_t drop[] = { 0xF0, 0x24, 1, 2, 0 };
+    CHECK(send_packet(drop, sizeof drop) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[5] == 2 && last_reply[6] == 0);
+    uint8_t show2[] = { 0xF0, 0x21, 0x00, 2, 1, 0, 3, 0 };
+    CHECK(send_packet(show2, sizeof show2) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2);
+    CHECK(send_packet(show, sizeof show) == 0 && last_reply[2] == CFW_NO_OBJECT);
+    uint8_t clear_all[] = { 0xF0, 0x24, 0 };
+    CHECK(send_packet(clear_all, sizeof clear_all) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[5] == 0);
+    CHECK(send_packet(o1, 20) == 0 && last_reply[2] == CFW_BAD_LENGTH);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

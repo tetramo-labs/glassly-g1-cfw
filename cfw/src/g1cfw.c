@@ -12,16 +12,18 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 15u
+#define CFW_PROTOCOL 16u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
        CFW_ASSET_DRAW = 0x09, CFW_ASSET_TEXT = 0x0A, CFW_ASSET_CLEAR = 0x0B, CFW_ASSET_INFO = 0x0C,
-       CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11, CFW_PEEK = 0x12 };
+       CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11, CFW_PEEK = 0x12,
+       CFW_OBJ_PUT = 0x20, CFW_OBJ_SHOW = 0x21, CFW_OBJ_HIDE = 0x22, CFW_OBJ_STATE = 0x23,
+       CFW_OBJ_CONTROL = 0x24 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
-       CFW_NO_ASSET = 0x0C, CFW_BAD_ASSET = 0x0D };
+       CFW_NO_ASSET = 0x0C, CFW_BAD_ASSET = 0x0D, CFW_NO_OBJECT = 0x0E };
 
 /* Stock commands of the BMP upload flow whose staging RAM the CFW now owns. */
 #define STOCK_BMP_DATA 0x15u
@@ -865,6 +867,264 @@ static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
     return CFW_OK;
 }
 
+/* --- retained objects (g2flash modes 37-41, without animation yet) -------
+ * Objects are small descriptors in the second RAM region; pixels come from
+ * assets, the font engine or shape records. SHOW composes an ordered list of
+ * object ids into a cleared frame and pushes it. */
+#define CFW_OBJ_MAX    96u
+#define CFW_OBJ_MAGIC  0x324a424fu  /* "OBJ2" */
+enum { CFW_OBJ_IMAGE = 0, CFW_OBJ_TEXT = 1, CFW_OBJ_RECT = 2, CFW_OBJ_SHAPES = 3 };
+
+typedef struct {
+    uint16_t id, version;
+    uint8_t  kind, flags;      /* flags: bit 0 visible */
+    int16_t  x, y;             /* position (box origin) */
+    uint16_t w, h;             /* box size (text/rect) */
+    uint16_t asset;            /* image or string asset id, or shapes asset id */
+    uint8_t  level, font;      /* grey level / font; text: lines in `level`? no: */
+    uint8_t  lines, pad;
+} cfw_obj;                     /* 20 bytes */
+
+typedef struct {
+    uint32_t magic;
+    uint16_t count;
+    uint16_t revision;         /* bumps on every mutation */
+    uint16_t shown[CFW_OBJ_MAX];  /* current SHOW list */
+    uint16_t shown_count;
+    uint16_t pad;
+} cfw_objs;                    /* 8 + 192 + 4 = 204 bytes, then the objects */
+
+static cfw_objs *cfw_objects(void)
+{
+    cfw_objs *o = (cfw_objs *)FW_CFW_RAM2;
+    if (o->magic != CFW_OBJ_MAGIC) {
+        uint8_t *p = (uint8_t *)o;
+        for (uint32_t i = 0; i < sizeof *o; i++) {
+            p[i] = 0;
+        }
+        o->magic = CFW_OBJ_MAGIC;
+    }
+    return o;
+}
+
+static cfw_obj *cfw_obj_table(void)
+{
+    return (cfw_obj *)(FW_CFW_RAM2 + sizeof(cfw_objs));
+}
+
+static cfw_obj *cfw_obj_find(cfw_objs *o, uint16_t id)
+{
+    cfw_obj *t = cfw_obj_table();
+    for (uint32_t i = 0; i < o->count; i++) {
+        if (t[i].id == id) {
+            return &t[i];
+        }
+    }
+    return 0;
+}
+
+/* [id:u16][version:u16][kind][flags][x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines] = 19 bytes */
+static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
+{
+    cfw_objs *o = cfw_objects();
+    if (n < 19) {
+        return CFW_BAD_LENGTH;
+    }
+    uint16_t id = rd16(p);
+    uint8_t kind = p[4];
+    if (kind > CFW_OBJ_SHAPES) {
+        return CFW_BAD_RECORD;
+    }
+    cfw_obj *obj = cfw_obj_find(o, id);
+    if (!obj) {
+        if (o->count >= CFW_OBJ_MAX) {
+            return CFW_NO_MEMORY;
+        }
+        obj = &cfw_obj_table()[o->count++];
+    }
+    obj->id = id;
+    obj->version = rd16(p + 2);
+    obj->kind = kind;
+    obj->flags = p[5];
+    obj->x = rd16s(p + 6);
+    obj->y = rd16s(p + 8);
+    obj->w = rd16(p + 10);
+    obj->h = rd16(p + 12);
+    obj->asset = rd16(p + 14);
+    obj->level = p[16];
+    obj->font = p[17];
+    obj->lines = p[18];
+    o->revision++;
+    return CFW_OK;
+}
+
+/* Draw one object into the frame (no flush). */
+static uint8_t cfw_obj_render(const cfw_obj *obj)
+{
+    uint8_t buf[16];
+    if (!(obj->flags & 1u)) {
+        return CFW_OK;
+    }
+    switch (obj->kind) {
+    case CFW_OBJ_IMAGE:
+        if (obj->x < 0 || obj->y < 0) {
+            return CFW_BAD_RECT;
+        }
+        buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
+        buf[2] = (uint8_t)((obj->level & 0xF) << 4);
+        buf[3] = (uint8_t)obj->x; buf[4] = (uint8_t)(obj->x >> 8);
+        buf[5] = (uint8_t)obj->y; buf[6] = (uint8_t)(obj->y >> 8);
+        return cfw_asset_draw(buf, 7);
+    case CFW_OBJ_TEXT: {
+        int x1 = obj->x + obj->w, y1 = obj->y + obj->h - 1;
+        if (obj->x < 0 || obj->y < 0 || x1 > FW_FRAME_WIDTH || y1 >= FW_FRAME_HEIGHT) {
+            return CFW_BAD_RECT;
+        }
+        buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
+        buf[2] = obj->font; buf[3] = 0;
+        buf[4] = (uint8_t)obj->x; buf[5] = (uint8_t)(obj->x >> 8);
+        buf[6] = (uint8_t)obj->y; buf[7] = (uint8_t)(obj->y >> 8);
+        buf[8] = (uint8_t)x1; buf[9] = (uint8_t)(x1 >> 8);
+        buf[10] = (uint8_t)y1; buf[11] = (uint8_t)(y1 >> 8);
+        buf[12] = obj->lines ? obj->lines : 1;
+        return cfw_asset_text(buf, 13);
+    }
+    case CFW_OBJ_RECT: {
+        uint8_t *frame = cfw_row(cfw_panel(), 0, 0);
+        cfw_fill_rect(frame, obj->x, obj->y, obj->x + (int)obj->w - 1, obj->y + (int)obj->h - 1, (uint8_t)(obj->level & 0xF));
+        return CFW_OK;
+    }
+    case CFW_OBJ_SHAPES: {
+        /* A shapes asset: kind 2 (string) bytes holding [count][records]. */
+        cfw_ctx *c = cfw_context();
+        cfw_asset *a = c->arena ? cfw_asset_find(c, obj->asset) : 0;
+        if (!a || a->kind != CFW_ASSET_STRING || a->bytes < 1) {
+            return CFW_NO_ASSET;
+        }
+        uint8_t hdr_and_body[2 + CFW_TEXT_MAX];
+        hdr_and_body[0] = 0;  /* no flush */
+        const uint8_t *src = cfw_asset_bytes(c, a);
+        for (uint32_t i = 0; i < a->bytes; i++) {
+            hdr_and_body[1 + i] = src[i];
+        }
+        return cfw_shapes(hdr_and_body, 1 + a->bytes);
+    }
+    default:
+        return CFW_BAD_RECORD;
+    }
+}
+
+/* [flags][count][ids:u16...]: compose the listed objects in order. flags bit 0
+ * clears the frame first; bit 1 pushes the whole frame afterwards. */
+static uint8_t cfw_obj_show(const uint8_t *p, uint32_t n)
+{
+    cfw_objs *o = cfw_objects();
+    if (n < 2) {
+        return CFW_BAD_LENGTH;
+    }
+    uint8_t flags = p[0];
+    uint32_t count = p[1];
+    if (count > CFW_OBJ_MAX || n - 2 < count * 2) {
+        return CFW_BAD_LENGTH;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        if (!cfw_obj_find(o, rd16(p + 2 + 2 * i))) {
+            return CFW_NO_OBJECT;
+        }
+    }
+    uint8_t *panel = cfw_panel();
+    if (flags & 1u) {
+        uint8_t *frame = cfw_row(panel, 0, 0);
+        for (uint32_t i = 0; i < FW_FRAME_STRIDE * FW_FRAME_HEIGHT; i++) {
+            frame[i] = 0;
+        }
+    }
+    o->shown_count = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint16_t id = rd16(p + 2 + 2 * i);
+        o->shown[o->shown_count++] = id;
+        uint8_t status = cfw_obj_render(cfw_obj_find(o, id));
+        if (status != CFW_OK) {
+            return status;
+        }
+    }
+    o->revision++;
+    if (flags & CFW_FLAG_FLUSH) {
+        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+        return cfw_flush(panel, &all);
+    }
+    return CFW_OK;
+}
+
+/* Blank the frame and forget the SHOW list (objects stay resident). */
+static uint8_t cfw_obj_hide(const uint8_t *p, uint32_t n)
+{
+    cfw_objs *o = cfw_objects();
+    uint8_t flags = n ? p[0] : CFW_FLAG_FLUSH;
+    uint8_t *panel = cfw_panel();
+    uint8_t *frame = cfw_row(panel, 0, 0);
+    for (uint32_t i = 0; i < FW_FRAME_STRIDE * FW_FRAME_HEIGHT; i++) {
+        frame[i] = 0;
+    }
+    o->shown_count = 0;
+    o->revision++;
+    if (flags & CFW_FLAG_FLUSH) {
+        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+        return cfw_flush(panel, &all);
+    }
+    return CFW_OK;
+}
+
+/* Reply body: [revision:u16][count][shown][id,version pairs of the first 4 shown]. */
+static void cfw_obj_state(void)
+{
+    cfw_objs *o = cfw_objects();
+    uint8_t body[4 + 4 * 4];
+    uint32_t n = 4;
+    body[0] = (uint8_t)o->revision; body[1] = (uint8_t)(o->revision >> 8);
+    body[2] = (uint8_t)o->count;
+    body[3] = (uint8_t)o->shown_count;
+    for (uint32_t i = 0; i < o->shown_count && i < 4; i++) {
+        cfw_obj *obj = cfw_obj_find(o, o->shown[i]);
+        body[n++] = (uint8_t)obj->id; body[n++] = (uint8_t)(obj->id >> 8);
+        body[n++] = (uint8_t)obj->version; body[n++] = (uint8_t)(obj->version >> 8);
+    }
+    cfw_reply(CFW_OBJ_STATE, CFW_OK, body, n);
+}
+
+/* [op][id:u16]: op 0 drops every object, op 1 drops one object. */
+static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
+{
+    cfw_objs *o = cfw_objects();
+    if (n < 1) {
+        return CFW_BAD_LENGTH;
+    }
+    if (p[0] == 0) {
+        o->count = 0;
+        o->shown_count = 0;
+        o->revision++;
+        return CFW_OK;
+    }
+    if (p[0] == 1 && n >= 3) {
+        cfw_obj *obj = cfw_obj_find(o, rd16(p + 1));
+        if (!obj) {
+            return CFW_NO_OBJECT;
+        }
+        cfw_obj *last = &cfw_obj_table()[o->count - 1];
+        for (cfw_obj *q = obj; q < last; q++) {
+            uint8_t *d = (uint8_t *)q;
+            const uint8_t *src = (const uint8_t *)(q + 1);
+            for (uint32_t i = 0; i < sizeof *q; i++) {
+                d[i] = src[i];  /* byte copy: no memcpy in the blob */
+            }
+        }
+        o->count--;
+        o->revision++;
+        return CFW_OK;
+    }
+    return CFW_BAD_COMMAND;
+}
+
 /* Run one command record (same bodies as the packet commands). */
 static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 {
@@ -879,6 +1139,10 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
     case CFW_ASSET_TEXT:  return cfw_asset_text(p, n);
     case CFW_ASSET_CLEAR: return cfw_asset_clear();
     case CFW_SHAPES: return cfw_shapes(p, n);
+    case CFW_OBJ_PUT:     return cfw_obj_put(p, n);
+    case CFW_OBJ_SHOW:    return cfw_obj_show(p, n);
+    case CFW_OBJ_HIDE:    return cfw_obj_hide(p, n);
+    case CFW_OBJ_CONTROL: return cfw_obj_control(p, n);
     default:        return CFW_BAD_COMMAND;
     }
 }
@@ -1071,7 +1335,14 @@ int cfw_rx(const uint8_t *data, uint32_t len)
     case CFW_ASSET_TEXT:
     case CFW_ASSET_CLEAR:
     case CFW_SHAPES:
+    case CFW_OBJ_PUT:
+    case CFW_OBJ_SHOW:
+    case CFW_OBJ_HIDE:
+    case CFW_OBJ_CONTROL:
         cfw_reply(data[1], cfw_run_record(data[1], data + 2, len - 2), 0, 0);
+        break;
+    case CFW_OBJ_STATE:
+        cfw_obj_state();
         break;
     case CFW_ASSET_INFO:
         cfw_asset_info();

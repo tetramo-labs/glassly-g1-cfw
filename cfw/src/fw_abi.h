@@ -140,3 +140,14 @@ typedef void *(*fw_malloc_fn)(uint32_t size);
 #ifndef FW_PEEK_PTR
 #define FW_PEEK_PTR(addr) ((const uint8_t *)(uintptr_t)(addr))
 #endif
+
+/* Second CFW RAM region: the stock navigation map buffer (0x1210 bytes at
+ * 0x2001bf23, referenced only by the stubbed UI block) and the translate
+ * screen's 512-byte buffer after it. PEEK showed it untouched after boot.
+ * A third region, 0x20013b84..0x20014f28 (DashBoard_Reflash/navigation
+ * scratch), is also free but unused so far. */
+#define FW_CFW_RAM2_BASE 0x2001bf24u
+#define FW_CFW_RAM2_SIZE 0x140cu
+#ifndef FW_CFW_RAM2
+#define FW_CFW_RAM2 ((uint8_t *)FW_CFW_RAM2_BASE)
+#endif

@@ -32,6 +32,7 @@ reply:    F0 <sub> <status> <body...>
 | `0B` | no memory (heap arena unavailable, directory or arena full) |
 | `0C` | no asset (unknown id) |
 | `0D` | bad asset (wrong kind, incomplete image, append to a closed asset) |
+| `0E` | no object (SHOW or drop named an unknown object id) |
 
 A bare `F0` with no sub-command is answered `F0 FF 01`.
 
@@ -42,7 +43,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (15 for this document) and the version is the stock base
+protocol revision (16 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -147,6 +148,27 @@ triangles; otherwise they are outlined with `width` pixels (1-16), which is
 also the brush size for lines. `level` is the grey nibble. Coordinates are
 signed and everything clips to 640x200. Payload `flags` bit 1 pushes the whole
 frame afterwards. SHAPES is also a valid stream record.
+
+## Retained objects (`20`-`24`)
+
+Up to 96 object descriptors live in the second CFW RAM region (the stock
+navigation map buffer at `0x2001bf24`); pixels come from assets, the font
+engine or shape records, so showing a scene again costs one SHOW.
+
+- `20` OBJ_PUT `[id:u16][version:u16][kind][flags][x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines]`:
+  define or replace an object. Kinds: 0 image (asset at x,y, grey `level`
+  for 1bpp), 1 text (string asset in the box x,y,w,h with `font`/`lines`),
+  2 rect (filled, `level`), 3 shapes (a string asset holding
+  `[count][records]`). `flags` bit 0 = visible.
+- `21` OBJ_SHOW `[flags][count][ids:u16...]`: compose the listed objects in
+  order; bit 0 clears the frame first, bit 1 pushes it afterwards. An unknown
+  id refuses the whole SHOW before drawing.
+- `22` OBJ_HIDE `[flags]`: blank the frame (bit 1 pushes); objects stay.
+- `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`.
+- `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects, op 1 drops one.
+
+All but STATE are valid stream records. Animation is not implemented yet; a
+phone can re-SHOW per frame.
 
 ## `10` STREAM: `[seq][flags][data]`
 

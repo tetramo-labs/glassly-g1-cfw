@@ -130,9 +130,10 @@ async def query_ping(client, timeout=8):
 CFW_SID = 0xF0
 CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY = 0, 1, 2, 3, 4, 5, 6, 7
 CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS, CFW_PEEK = 8, 9, 10, 11, 12, 13, 0x10, 0x11, 0x12
+CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL = 0x20, 0x21, 0x22, 0x23, 0x24
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
-              12: 'no-asset', 13: 'bad-asset'}
+              12: 'no-asset', 13: 'bad-asset', 14: 'no-object'}
 CFW_MSG_MAX = 4096
 FRAME_W, FRAME_H, MAX_PACKET = 640, 200, 255
 
@@ -387,6 +388,31 @@ async def run_cfw_command(client, args, checkpoint):
             payload = bytes([0 if args.no_flush else 0x02, len(recs)]) + b''.join(recs)
             await link.check(CFW_SHAPES, payload)
             result = {'shapes': len(recs), 'flushed': not args.no_flush}
+        elif args.command == 'obj':
+            kinds = {'image': 0, 'text': 1, 'rect': 2, 'shapes': 3}
+            if args.action == 'put':
+                if args.id is None:
+                    raise FirmwareError('obj put needs --id')
+                payload = struct.pack('<HHBBhhHHHBBB', args.id, args.version, kinds[args.kind], 1 if not args.hidden else 0,
+                                      args.at[0], args.at[1], args.size[0], args.size[1], args.asset, args.level, args.font, args.lines)
+                await link.check(CFW_OBJ_PUT, payload)
+                result = {'id': args.id, 'kind': args.kind, 'at': args.at}
+            elif args.action == 'show':
+                ids = [int(v) for v in args.ids.split(',')] if args.ids else []
+                flags = (0x01 if args.clear else 0) | (0 if args.no_flush else 0x02)
+                await link.check(CFW_OBJ_SHOW, bytes([flags, len(ids)]) + b''.join(struct.pack('<H', i) for i in ids))
+                result = {'shown': ids}
+            elif args.action == 'hide':
+                await link.check(CFW_OBJ_HIDE, bytes([0 if args.no_flush else 0x02]))
+                result = {'hidden': True}
+            elif args.action == 'state':
+                body = await link.check(CFW_OBJ_STATE)
+                shown = [(struct.unpack_from('<H', body, 4 + 4 * i)[0], struct.unpack_from('<H', body, 6 + 4 * i)[0]) for i in range((len(body) - 4) // 4)]
+                result = {'revision': struct.unpack_from('<H', body)[0], 'objects': body[2], 'shown_count': body[3], 'shown': shown}
+            else:
+                payload = bytes([0]) if args.id is None else bytes([1]) + struct.pack('<H', args.id)
+                await link.check(CFW_OBJ_CONTROL, payload)
+                result = {'dropped': 'all' if args.id is None else args.id}
         elif args.command == 'peek':
             chunks, addr, remaining = [], args.addr, args.len
             while remaining > 0:
@@ -507,7 +533,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -570,7 +596,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -625,6 +651,20 @@ def arguments(argv=None):
             child.add_argument('--box', type=lambda v: tuple(int(x) for x in v.split(',')), default=(32, 32, 608, 59))
             child.add_argument('--lines', type=int, default=1)
             child.add_argument('--clear', action='store_true', help='text: clear the box first')
+        if command == 'obj':
+            child.add_argument('action', choices=('put', 'show', 'hide', 'state', 'drop'))
+            child.add_argument('--id', type=int, default=None)
+            child.add_argument('--version', type=int, default=1)
+            child.add_argument('--kind', choices=('image', 'text', 'rect', 'shapes'), default='rect')
+            child.add_argument('--at', type=lambda v: tuple(int(x) for x in v.split(',')), default=(0, 0))
+            child.add_argument('--size', type=lambda v: tuple(int(x) for x in v.split(',')), default=(0, 0), help='w,h for rect/text boxes')
+            child.add_argument('--asset', type=int, default=0)
+            child.add_argument('--level', type=int, default=15)
+            child.add_argument('--font', type=int, default=0)
+            child.add_argument('--lines', type=int, default=1)
+            child.add_argument('--hidden', action='store_true')
+            child.add_argument('--ids', help='show: comma-separated object ids in draw order')
+            child.add_argument('--clear', action='store_true', help='show: clear the frame first')
         if command == 'peek':
             child.add_argument('--addr', type=lambda v: int(v, 0), required=True)
             child.add_argument('--len', type=int, default=64, help='bytes to read (16 per request)')
@@ -632,7 +672,7 @@ def arguments(argv=None):
             child.add_argument('--demo', action='store_true', help='Draw a built-in shapes demo')
             child.add_argument('--shape', action='append', default=[],
                                help='kind,fill,level,width,p0,...  kinds: 0 line x0,y0,x1,y1; 1 rect; 2 circle cx,cy,r; 3 triangle')
-        if command in ('fill', 'draw', 'text', 'copy', 'asset', 'shapes'):
+        if command in ('fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'obj'):
             child.add_argument('--no-flush', action='store_true', help='Write the frame buffer only; do not push to the panel')
         if command == 'draw':
             child.add_argument('--stream', action='store_true', help='Send as pipelined multi-packet messages (G1CFW/9+)')

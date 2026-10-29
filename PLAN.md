@@ -153,8 +153,12 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 7. **Vector shapes.** G1CFW/13 draws lines (brush width), rectangles,
    circles/rings and triangles, filled or outlined, clipped and signed, as
    16-byte records. Not yet: rounded rectangles, arcs/sectors, beziers, image
-   and text records inside a shape list. Then the **retained object cache
-   with animation** (g2flash modes 37-41) on top of the asset store.
+   and text records inside a shape list. The **retained object cache**
+   (G1CFW/16: PUT/SHOW/HIDE/STATE/CONTROL, 96 descriptors in reclaimed RAM at
+   `0x2001bf24`) is in; animation is not. Firmware-side animation needs a
+   thread-context tick: the stock image has no delayable-work users, so the
+   plan is to drive it from the display thread by posting the stock refresh
+   message and hooking the stubbed `display_reflash_handler`.
 8. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.
