@@ -584,6 +584,13 @@ events and attitude come from the right side while touch gestures come from
 whichever temple was tapped. `g1flash.py imu --samples N` reads the three
 words; the third is the pitch the head-up detector compares.
 
+**Right temple worn test (2026-10-29).** `touch watch` on the right temple
+while the user put the glasses on, looked up, looked down and docked them:
+`11` bind check, 6 worn, `0a` battery, 9 charging, then **2 head-up** at
+7.7 s, `12` (a stock UI event) and **3 head-down** at 9.8 s, then 8
+in-case-open, `0e` case charging, `0f` case battery on docking. All ten
+events were also forwarded to the stock path (counters matched).
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
