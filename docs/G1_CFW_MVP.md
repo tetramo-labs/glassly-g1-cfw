@@ -486,6 +486,18 @@ About 33 ms per frame remained after the sleep, which is the full-frame
 composition in RAM (clearing 64,000 bytes and expanding the 1bpp image).
 G1CFW/19 composes only the dirty rows.
 
+### Animation frame rates, G1CFW/19 (2026-10-29)
+
+Composing only the dirty rows (right temple, same scene):
+
+| Period | Frames | Time | fps | full pushes |
+| --- | --- | --- | --- | --- |
+| 10 ms | 40 | 0.81 s | 49.4 | 0 |
+| 1 ms | 60 | 0.75 s | 79.8 | 0 |
+
+About 12 ms per frame remains at the floor: the SPI push of the dirty rows,
+the driver's 1 ms wait, and the display-thread round trip.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
