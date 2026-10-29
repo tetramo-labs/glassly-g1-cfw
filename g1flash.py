@@ -130,7 +130,7 @@ async def query_ping(client, timeout=8):
 CFW_SID = 0xF0
 CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY = 0, 1, 2, 3, 4, 5, 6, 7
 CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS, CFW_PEEK = 8, 9, 10, 11, 12, 13, 0x10, 0x11, 0x12
-CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL = 0x20, 0x21, 0x22, 0x23, 0x24
+CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
               12: 'no-asset', 13: 'bad-asset', 14: 'no-object'}
@@ -409,6 +409,15 @@ async def run_cfw_command(client, args, checkpoint):
                 body = await link.check(CFW_OBJ_STATE)
                 shown = [(struct.unpack_from('<H', body, 4 + 4 * i)[0], struct.unpack_from('<H', body, 6 + 4 * i)[0]) for i in range((len(body) - 4) // 4)]
                 result = {'revision': struct.unpack_from('<H', body)[0], 'objects': body[2], 'shown_count': body[3], 'shown': shown}
+            elif args.action == 'anim':
+                moves = []
+                for spec in args.move:
+                    oid, target, rest = spec.split(':', 2) if spec.count(':') >= 2 else (*spec.split(':', 1), '8')
+                    tx, ty = (int(v) for v in target.split(','))
+                    frames, _, ease = rest.partition(':')
+                    moves.append(struct.pack('<HhhBB', int(oid), tx, ty, int(frames), int(ease or 0)))
+                await link.check(CFW_OBJ_ANIM, bytes([args.period, len(moves)]) + b''.join(moves))
+                result = {'moves': len(moves), 'period_ms': args.period}
             else:
                 payload = bytes([0]) if args.id is None else bytes([1]) + struct.pack('<H', args.id)
                 await link.check(CFW_OBJ_CONTROL, payload)
@@ -652,7 +661,9 @@ def arguments(argv=None):
             child.add_argument('--lines', type=int, default=1)
             child.add_argument('--clear', action='store_true', help='text: clear the box first')
         if command == 'obj':
-            child.add_argument('action', choices=('put', 'show', 'hide', 'state', 'drop'))
+            child.add_argument('action', choices=('put', 'show', 'hide', 'state', 'drop', 'anim'))
+            child.add_argument('--move', action='append', default=[], help='anim: id:tx,ty:frames[:easing] (0 linear, 1 smooth, 2 out, 3 in)')
+            child.add_argument('--period', type=int, default=50, help='anim: ms per frame (10-250; 0 keeps current)')
             child.add_argument('--id', type=int, default=None)
             child.add_argument('--version', type=int, default=1)
             child.add_argument('--kind', choices=('image', 'text', 'rect', 'shapes'), default='rect')

@@ -42,10 +42,17 @@ STUB = bytes.fromhex('00207047')  # movs r0, #0; bx lr
 # entered at its start (tools/g1carve.py) and its return value is unused.
 STUBS = {
     'display': [
-        (0x4bee0, 'display_reflash_handler: stock UI refresh pipeline'),
         (0x80d58, 'whole-frame clear and push used on screen exit'),
     ],
 }
+# Stock entry points redirected into blob functions with a B.W (same 4 bytes
+# as a stub). The blob function receives the stock arguments unchanged.
+HOOKS = {
+    'display': [
+        (0x4bee0, 'cfw_display_tick', 'display_reflash_handler: display-thread tick for CFW animation'),
+    ],
+}
+BW_TEMPLATE = bytes.fromhex('00f0009000')[:4]  # b.w placeholder; thumb_branch keeps the B.W opcode bits
 
 
 def main():
@@ -98,6 +105,13 @@ def main():
             off = addr - SLOT_BASE
             patches.append({'offset': off, 'old': stock[off:off + 4].hex(), 'new': STUB.hex(),
                             'description': f'stub {addr:#x}: {why}'})
+        for addr, fn_name, why in HOOKS.get(group, []):
+            fn = next(f for f in funcs if f['name'] == fn_name)
+            off = addr - SLOT_BASE
+            site = bytearray(BW_TEMPLATE)
+            thumb_branch(site, 0, blob_addr + fn['offset'] - addr)
+            patches.append({'offset': off, 'old': stock[off:off + 4].hex(), 'new': site.hex(),
+                            'description': f'hook {addr:#x}: b.w {fn_name} at {blob_addr + fn["offset"]:#x}; {why}'})
 
     marker_new = (f'G1CFW/{args.protocol} net bt:' if args.protocol < 10 else f'G1CFW/{args.protocol} netbt:').encode()
     assert len(marker_new) == len(MARKER_OLD) and stock.count(MARKER_OLD) == 1

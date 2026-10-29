@@ -31,6 +31,10 @@ static uint8_t host_peek_mem[64];
 #define FW_PEEK_PTR(addr) (host_peek_mem + ((addr) & 63))
 static uint8_t host_ram2[0x140c + 64];
 #define FW_CFW_RAM2 (host_ram2 + 32)
+static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3);
+static int host_msleep(int ms);
+#define FW_DISPLAY_POST host_display_post
+#define FW_K_MSLEEP host_msleep
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -104,6 +108,10 @@ static int malloc_calls; static uint32_t malloc_size;
 /* Refuse 48 KB and 40 KB like the real heap did; grant the 32 KB retry. */
 static void *host_malloc(uint32_t size) { malloc_calls++; malloc_size = size; return size > 32 * 1024 ? NULL : host_arena + 32; }
 
+static int post_calls, sleep_calls, last_sleep; static uint8_t last_screen;
+static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3) { (void)p2; (void)p3; post_calls++; last_screen = screen; return 0; }
+static int host_msleep(int ms) { sleep_calls++; last_sleep = ms; return 0; }
+
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
 
@@ -143,7 +151,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/16", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/17", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -449,6 +457,35 @@ int main(void)
     CHECK(send_packet(clear_all, sizeof clear_all) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[5] == 0);
     CHECK(send_packet(o1, 20) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+
+    /* Animation: glide a rect object from (10,10) to (110,50) in 4 frames, driven by display ticks. */
+    CHECK(send_packet(o1, sizeof o1) == 0 && last_reply[2] == CFW_OK);   /* rect id 1 at (10,10) */
+    uint8_t show1[] = { 0xF0, 0x21, 0x03, 1, 1, 0 };
+    CHECK(send_packet(show1, sizeof show1) == 0 && last_reply[2] == CFW_OK);
+    post_calls = 0; sleep_calls = 0; reflash_calls = 0;
+    uint8_t anim[] = { 0xF0, 0x25, 40, 1, 1, 0, 110, 0, 50, 0, 4, 0 };
+    CHECK(send_packet(anim, sizeof anim) == 0 && last_reply[2] == CFW_OK && post_calls == 1 && last_screen == 0x10);
+    cfw_display_tick(state, 0x10, 0, 2);   /* frame 1: linear 1/4 of the way */
+    CHECK(reflash_calls == 1 && sleep_calls == 1 && last_sleep == 40 && post_calls == 2);
+    CHECK(frame[20 * 320 + 17] == 0x0C && frame[20 * 320 + 18] == 0xCC && frame[20 * 320 + 16] == 0 && frame[23 * 320 + 21] == 0xC0 && frame[24 * 320 + 17] == 0);
+    cfw_display_tick(state, 0x10, 0, 2);
+    cfw_display_tick(state, 0x10, 0, 2);
+    cfw_display_tick(state, 0x10, 0, 2);   /* frame 4: arrived, no further post */
+    CHECK(reflash_calls == 4 && sleep_calls == 3 && post_calls == 4);
+    CHECK(frame[50 * 320 + 55] == 0xCC && frame[53 * 320 + 58] == 0xCC && frame[10 * 320 + 5] == 0);
+    cfw_display_tick(state, 0x10, 0, 2);   /* idle tick: nothing happens */
+    CHECK(reflash_calls == 4 && post_calls == 4);
+    cfw_display_tick(state, 0x06, 0, 2);   /* stock screen id: ignored */
+    CHECK(reflash_calls == 4);
+    uint8_t anim_bad[] = { 0xF0, 0x25, 40, 1, 9, 9, 0, 0, 0, 0, 4, 0 };
+    CHECK(send_packet(anim_bad, sizeof anim_bad) == 0 && last_reply[2] == CFW_NO_OBJECT);
+    CHECK(send_packet(anim, 9) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    /* Easing end points land exactly on the target. */
+    uint8_t anim2[] = { 0xF0, 0x25, 0, 1, 1, 0, 10, 0, 10, 0, 3, 1 };
+    CHECK(send_packet(anim2, sizeof anim2) == 0 && last_reply[2] == CFW_OK && last_sleep == 40);
+    for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(frame[10 * 320 + 5] == 0xCC && frame[13 * 320 + 8] == 0xCC && frame[14 * 320 + 5] == 0 && frame[50 * 320 + 55] == 0);
+    CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

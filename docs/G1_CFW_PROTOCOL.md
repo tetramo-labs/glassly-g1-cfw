@@ -43,7 +43,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (16 for this document) and the version is the stock base
+protocol revision (17 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -167,8 +167,16 @@ engine or shape records, so showing a scene again costs one SHOW.
 - `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`.
 - `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects, op 1 drops one.
 
-All but STATE are valid stream records. Animation is not implemented yet; a
-phone can re-SHOW per frame.
+- `25` OBJ_ANIM `[period_ms][count][entries: id:u16, tx:i16, ty:i16, frames, easing]`:
+  glide up to 16 shown objects from their current position to (tx, ty) over
+  `frames` frames, `period_ms` apart (10-250; 0 keeps the current period).
+  Easing 0 linear, 1 smoothstep, 2 ease-out, 3 ease-in. The glasses render
+  the frames themselves on the display thread: the stubbed stock refresh
+  handler is redirected to the CFW tick, which re-composes the SHOW list,
+  pushes the frame, sleeps the period and re-posts the stock refresh message
+  until every glide has settled. A new ANIM replaces the glide set.
+
+All but STATE are valid stream records.
 
 ## `10` STREAM: `[seq][flags][data]`
 

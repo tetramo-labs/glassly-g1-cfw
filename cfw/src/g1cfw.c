@@ -12,14 +12,14 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 16u
+#define CFW_PROTOCOL 17u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
        CFW_ASSET_DRAW = 0x09, CFW_ASSET_TEXT = 0x0A, CFW_ASSET_CLEAR = 0x0B, CFW_ASSET_INFO = 0x0C,
        CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11, CFW_PEEK = 0x12,
        CFW_OBJ_PUT = 0x20, CFW_OBJ_SHOW = 0x21, CFW_OBJ_HIDE = 0x22, CFW_OBJ_STATE = 0x23,
-       CFW_OBJ_CONTROL = 0x24 };
+       CFW_OBJ_CONTROL = 0x24, CFW_OBJ_ANIM = 0x25 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
@@ -1125,6 +1125,169 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
     return CFW_BAD_COMMAND;
 }
 
+/* --- animation: glides stepped on the display thread ---------------------- */
+#define CFW_ANIM_MAX 16u
+typedef struct {
+    uint16_t id;
+    int16_t  x0, y0, x1, y1;   /* from / to */
+    uint8_t  frames, frame, easing, pad;
+} cfw_anim;
+
+typedef struct {
+    uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
+    uint8_t  active;           /* glides in flight */
+    uint8_t  period_ms;
+    uint8_t  count;
+    uint8_t  ticking;          /* a refresh is queued or running */
+    uint32_t ticks;            /* frames rendered since boot */
+    cfw_anim items[CFW_ANIM_MAX];
+} cfw_anims;
+#define CFW_ANIM_MAGIC 0x314d4e41u  /* "ANM1" */
+
+static cfw_anims *cfw_animation(void)
+{
+    cfw_anims *a = (cfw_anims *)(FW_CFW_RAM2 + sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj));
+    if (a->magic != CFW_ANIM_MAGIC) {
+        uint8_t *p = (uint8_t *)a;
+        for (uint32_t i = 0; i < sizeof *a; i++) {
+            p[i] = 0;
+        }
+        a->magic = CFW_ANIM_MAGIC;
+        a->period_ms = 50;
+    }
+    return a;
+}
+
+/* Eased interpolation of `t` in [0, frames]; returns 0..1024. */
+static int32_t cfw_ease(uint8_t easing, int32_t t, int32_t frames)
+{
+    if (frames <= 0 || t >= frames) {
+        return 1024;
+    }
+    int32_t u = t * 1024 / frames;            /* linear 0..1024 */
+    if (easing == 1) {                        /* smoothstep: 3u^2 - 2u^3 */
+        return (3 * u * u - 2 * u * u / 1024 * u) / 1024;
+    }
+    if (easing == 2) {                        /* ease-out: 1 - (1-u)^2 */
+        int32_t v = 1024 - u;
+        return 1024 - v * v / 1024;
+    }
+    if (easing == 3) {                        /* ease-in: u^2 */
+        return u * u / 1024;
+    }
+    return u;
+}
+
+/* Re-render the current SHOW list into a cleared frame and push it. */
+static uint8_t cfw_obj_present(void)
+{
+    cfw_objs *o = cfw_objects();
+    uint8_t *panel = cfw_panel();
+    uint8_t *frame = cfw_row(panel, 0, 0);
+    for (uint32_t i = 0; i < FW_FRAME_STRIDE * FW_FRAME_HEIGHT; i++) {
+        frame[i] = 0;
+    }
+    for (uint32_t i = 0; i < o->shown_count; i++) {
+        cfw_obj *obj = cfw_obj_find(o, o->shown[i]);
+        if (obj) {
+            cfw_obj_render(obj);
+        }
+    }
+    cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+    return cfw_flush(panel, &all);
+}
+
+/* Advance every glide one frame; returns the number still in flight. */
+static uint32_t cfw_anim_step(cfw_anims *a)
+{
+    cfw_objs *o = cfw_objects();
+    uint32_t left = 0;
+    for (uint32_t i = 0; i < a->count; i++) {
+        cfw_anim *g = &a->items[i];
+        if (g->frame >= g->frames) {
+            continue;
+        }
+        g->frame++;
+        int32_t k = cfw_ease(g->easing, g->frame, g->frames);
+        cfw_obj *obj = cfw_obj_find(o, g->id);
+        if (obj) {
+            obj->x = (int16_t)(g->x0 + ((int32_t)(g->x1 - g->x0) * k) / 1024);
+            obj->y = (int16_t)(g->y0 + ((int32_t)(g->y1 - g->y0) * k) / 1024);
+        }
+        if (g->frame < g->frames) {
+            left++;
+        }
+    }
+    o->revision++;
+    return left;
+}
+
+/* Called on the display thread in place of the stock refresh handler. */
+int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode)
+{
+    (void)state; (void)p3; (void)mode;
+    cfw_anims *a = cfw_animation();
+    if (screen != FW_SCREEN_CFW || !a->active) {
+        a->ticking = 0;
+        return 0;
+    }
+    uint32_t left = cfw_anim_step(a);
+    cfw_obj_present();
+    a->ticks++;
+    if (left == 0) {
+        a->active = 0;
+        a->ticking = 0;
+        return 0;
+    }
+    FW_K_MSLEEP(a->period_ms);
+    FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+    return 0;
+}
+
+/* [period_ms][count][entries: id:u16, tx:i16, ty:i16, frames, easing] = 8 bytes each.
+ * Glides start from the object's current position; a period of 0 keeps the
+ * current one. The first frame is rendered by the display thread. */
+static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
+{
+    cfw_anims *a = cfw_animation();
+    cfw_objs *o = cfw_objects();
+    if (n < 2) {
+        return CFW_BAD_LENGTH;
+    }
+    uint32_t count = p[1];
+    if (count > CFW_ANIM_MAX || n - 2 < count * 8) {
+        return CFW_BAD_LENGTH;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        if (!cfw_obj_find(o, rd16(p + 2 + 8 * i)) || p[2 + 8 * i + 6] == 0) {
+            return CFW_NO_OBJECT;
+        }
+    }
+    if (p[0] >= 10) {
+        a->period_ms = p[0];
+    }
+    a->count = (uint8_t)count;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *e = p + 2 + 8 * i;
+        cfw_anim *g = &a->items[i];
+        cfw_obj *obj = cfw_obj_find(o, rd16(e));
+        g->id = obj->id;
+        g->x0 = obj->x;
+        g->y0 = obj->y;
+        g->x1 = rd16s(e + 2);
+        g->y1 = rd16s(e + 4);
+        g->frames = e[6];
+        g->frame = 0;
+        g->easing = e[7];
+    }
+    a->active = 1;
+    if (!a->ticking) {
+        a->ticking = 1;
+        FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+    }
+    return CFW_OK;
+}
+
 /* Run one command record (same bodies as the packet commands). */
 static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 {
@@ -1143,6 +1306,7 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
     case CFW_OBJ_SHOW:    return cfw_obj_show(p, n);
     case CFW_OBJ_HIDE:    return cfw_obj_hide(p, n);
     case CFW_OBJ_CONTROL: return cfw_obj_control(p, n);
+    case CFW_OBJ_ANIM:    return cfw_obj_anim(p, n);
     default:        return CFW_BAD_COMMAND;
     }
 }
@@ -1339,6 +1503,7 @@ int cfw_rx(const uint8_t *data, uint32_t len)
     case CFW_OBJ_SHOW:
     case CFW_OBJ_HIDE:
     case CFW_OBJ_CONTROL:
+    case CFW_OBJ_ANIM:
         cfw_reply(data[1], cfw_run_record(data[1], data + 2, len - 2), 0, 0);
         break;
     case CFW_OBJ_STATE:

@@ -151,3 +151,17 @@ typedef void *(*fw_malloc_fn)(uint32_t size);
 #ifndef FW_CFW_RAM2
 #define FW_CFW_RAM2 ((uint8_t *)FW_CFW_RAM2_BASE)
 #endif
+
+/* Display-thread tick for animation. 0x80ed8 posts a stock refresh message
+ * for `screen` to the display queue (display_reflash + k_yield); the display
+ * thread then calls display_reflash_handler(state, screen, p3, mode), which the
+ * profile redirects to cfw_display_tick. 0x7ff98 is k_msleep(ms). */
+typedef int (*fw_display_post_fn)(uint8_t screen, uint32_t p2, uint32_t p3);
+#ifndef FW_DISPLAY_POST
+#define FW_DISPLAY_POST ((fw_display_post_fn)0x00080ed9)
+#endif
+typedef int (*fw_msleep_fn)(int ms);
+#ifndef FW_K_MSLEEP
+#define FW_K_MSLEEP ((fw_msleep_fn)0x0007ff99)
+#endif
+#define FW_SCREEN_CFW 0x10
