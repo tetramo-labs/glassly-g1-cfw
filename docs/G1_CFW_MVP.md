@@ -470,6 +470,22 @@ linear) took it to 83. The right temple ran the first glide the same way.
 STATS 0 errors on both. Frame cost is a full-frame compose and push per tick,
 so 30 ms periods are a request, not a guarantee.
 
+### Animation frame rates, G1CFW/18 (2026-10-29)
+
+The user found the G1CFW/17 glides slow. G1CFW/18 pushes only the union of
+each moved object's old and new boxes and reports frames per second from
+ANIM_STATE ticks against host wall clock (40x40 square over the full-frame
+test pattern, left temple):
+
+| Period | Frames | Time | fps | full pushes |
+| --- | --- | --- | --- | --- |
+| 30 ms | 40 | 2.49 s | 16.1 | 0 |
+| 10 ms | 60 | 2.61 s | 23.0 | 0 |
+
+About 33 ms per frame remained after the sleep, which is the full-frame
+composition in RAM (clearing 64,000 bytes and expanding the 1bpp image).
+G1CFW/19 composes only the dirty rows.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
