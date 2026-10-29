@@ -42,6 +42,10 @@ static void host_sem_give(void *sem);
 #define FW_KEY_EVENT_SEM ((void *)host_key_sem)
 #define FW_KEY_EVENT_SEM_READY (&host_key_sem_ready)
 #define FW_K_SEM_GIVE host_sem_give
+static uint8_t host_event_pending = 0xFF; static int host_enqueues; static uint8_t host_enqueued[8]; static uint32_t host_enqueued_len;
+static int host_enqueue(const void *data, uint32_t len);
+#define FW_EVENT_PENDING (&host_event_pending)
+#define FW_ENQUEUE_BT_DATA host_enqueue
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -59,7 +63,7 @@ static uint8_t *host_frame;
 static uint8_t state[0x1100];
 static uint8_t frame_store[GUARD + 5 + 200 * 320 + GUARD];
 static uint8_t *frame;
-static uint8_t ctx[0x20];
+static uint8_t ctx[0x260];
 static uint8_t last_reply[64];
 static uint32_t last_reply_len;
 static int hook_calls, reflash_calls, last_rect[6];
@@ -116,6 +120,7 @@ static int malloc_calls; static uint32_t malloc_size;
 static void *host_malloc(uint32_t size) { malloc_calls++; malloc_size = size; return size > 32 * 1024 ? NULL : host_arena + 32; }
 
 static void host_sem_give(void *sem) { host_sem_gives++; host_last_sem = sem; }
+static int host_enqueue(const void *data, uint32_t len) { if (len > sizeof host_enqueued) abort(); memcpy(host_enqueued, data, len); host_enqueued_len = len; host_enqueues++; return 0; }
 static int post_calls, sleep_calls, last_sleep; static uint8_t last_screen;
 static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3) { (void)p2; (void)p3; post_calls++; last_screen = screen; return 0; }
 static int host_msleep(int ms) { sleep_calls++; last_sleep = ms; return 0; }
@@ -159,7 +164,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/21", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/22", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -514,7 +519,7 @@ int main(void)
     /* Touch gestures: the redirected stock helper hands codes to the stock
      * semaphore by default, reports them when asked, and can swallow them. */
     uint8_t in_state[] = { 0xF0, 0x31 };
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 9);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 14);
     host_touch_code = 2;
     last_reply_len = 0;
     cfw_touch_event();                      /* semaphore not initialised yet: nothing given, nothing sent */
@@ -526,15 +531,15 @@ int main(void)
     CHECK(send_packet(in_notify, sizeof in_notify) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0x01);
     host_touch_code = 1;
     cfw_touch_event();
-    CHECK(last_reply_len == 6 && last_reply[1] == 0x32 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 3 && last_reply[5] == 0);
+    CHECK(last_reply_len == 7 && last_reply[1] == 0x32 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1 && last_reply[5] == 3 && last_reply[6] == 0);
     CHECK(host_sem_gives == 2);
     uint8_t in_grab[] = { 0xF0, 0x30, 0x03 };
     CHECK(send_packet(in_grab, sizeof in_grab) == 0 && last_reply[2] == CFW_OK);
     host_touch_code = 4;
     cfw_touch_event();
-    CHECK(host_sem_gives == 2 && last_reply[3] == 4 && last_reply[4] == 4);
+    CHECK(host_sem_gives == 2 && last_reply[3] == 0 && last_reply[4] == 4 && last_reply[5] == 4);
     CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x03 && last_reply[4] == 4 && last_reply[5] == 4 && last_reply[7] == 2);
-    uint8_t in_bad[] = { 0xF0, 0x30, 0x04 };
+    uint8_t in_bad[] = { 0xF0, 0x30, 0x10 };
     CHECK(send_packet(in_bad, sizeof in_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     uint8_t in_short[] = { 0xF0, 0x30 };
     CHECK(send_packet(in_short, sizeof in_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
@@ -542,6 +547,34 @@ int main(void)
     uint8_t in_release[] = { 0xF0, 0x30, 0x00 };
     CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0);
     CHECK((uint8_t *)cfw_input_state() + sizeof(cfw_input) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
+
+    /* Stock events: the redirected poster keeps the stock behaviour (direct
+     * F5 packet or semaphore), reports when asked, and can swallow. */
+    memset(ctx, 0, sizeof ctx);
+    host_enqueues = 0; host_sem_gives = 0; sleep_calls = 0;
+    cfw_stock_event(6, 0, 0);               /* worn; link not ready: semaphore path */
+    CHECK(host_sem_gives == 1 && host_last_sem == ctx + 0x218 && host_enqueues == 0 && sleep_calls == 1 && last_sleep == 1);
+    CHECK(host_event_pending == 6);
+    ctx[0x248] = 1;
+    host_event_pending = 0xFF;
+    cfw_stock_event(2, 0, 0);               /* look up; link ready: direct packet */
+    CHECK(host_enqueues == 1 && host_enqueued_len == 3 && host_enqueued[0] == 0xF5 && host_enqueued[1] == 2 && host_enqueued[2] == 0xCB);
+    CHECK(host_event_pending == 0xFF && host_sem_gives == 1);
+    host_event_pending = 0x05;
+    cfw_stock_event(0xF1, 0, 0);            /* special range with another event pending: dropped */
+    CHECK(host_enqueues == 1 && host_event_pending == 0x05);
+    host_event_pending = 0xFF;
+    uint8_t in_events[] = { 0xF0, 0x30, 0x04 };
+    CHECK(send_packet(in_events, sizeof in_events) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0x04);
+    cfw_stock_event(3, 0, 0);               /* bow head: reported and still sent */
+    CHECK(last_reply_len == 7 && last_reply[1] == 0x32 && last_reply[3] == 1 && last_reply[4] == 3 && last_reply[5] == 4 && last_reply[6] == 0);
+    CHECK(host_enqueues == 2 && host_enqueued[1] == 3);
+    uint8_t in_grab_events[] = { 0xF0, 0x30, 0x0C };
+    CHECK(send_packet(in_grab_events, sizeof in_grab_events) == 0 && last_reply[2] == CFW_OK);
+    cfw_stock_event(7, 0, 0);               /* taken off: reported, swallowed */
+    CHECK(last_reply[3] == 1 && last_reply[4] == 7 && host_enqueues == 2 && host_sem_gives == 1);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x0C && last_reply[9] == 7 && last_reply[10] == 5 && last_reply[12] == 3);
+    CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

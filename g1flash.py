@@ -133,6 +133,8 @@ CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, 
 CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM, CFW_ANIM_STATE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
 CFW_INPUT_CONTROL, CFW_INPUT_STATE, CFW_INPUT_EVENT = 0x30, 0x31, 0x32
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
+STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 0x0b: 'in-case-closed'}
+EVENT_CLASSES = {0: ('touch', TOUCH_CODES), 1: ('stock', STOCK_EVENTS)}
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
               12: 'no-asset', 13: 'bad-asset', 14: 'no-object'}
@@ -448,17 +450,21 @@ async def run_cfw_command(client, args, checkpoint):
                       'nonzero': sum(1 for b in data if b), 'ascii': ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)}
         elif args.command == 'touch':
             def input_state(body):
-                return {'notify': bool(body[0] & 1), 'swallow_stock': bool(body[0] & 2),
-                        'last': TOUCH_CODES.get(body[1], body[1]), 'count': struct.unpack_from('<H', body, 2)[0],
-                        'stock_passed': struct.unpack_from('<H', body, 4)[0]}
+                return {'notify_gestures': bool(body[0] & 1), 'swallow_gestures': bool(body[0] & 2),
+                        'notify_events': bool(body[0] & 4), 'swallow_events': bool(body[0] & 8),
+                        'last_gesture': TOUCH_CODES.get(body[1], body[1]), 'gestures': struct.unpack_from('<H', body, 2)[0],
+                        'gestures_passed': struct.unpack_from('<H', body, 4)[0],
+                        'last_event': STOCK_EVENTS.get(body[6], body[6]), 'events': struct.unpack_from('<H', body, 7)[0],
+                        'events_sent': struct.unpack_from('<H', body, 9)[0]}
             if args.action == 'state':
                 result = input_state(await link.check(CFW_INPUT_STATE))
             elif args.action == 'control':
-                flags = (0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
+                flags = ((0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
+                         | (0x04 if args.notify_events else 0) | (0x08 if args.swallow_events else 0))
                 await link.check(CFW_INPUT_CONTROL, bytes([flags]))
                 result = input_state(await link.check(CFW_INPUT_STATE))
             else:
-                flags = 0x01 | (0x02 if args.swallow else 0)
+                flags = 0x01 | 0x04 | (0x02 if args.swallow else 0) | (0x08 if args.swallow_events else 0)
                 await link.check(CFW_INPUT_CONTROL, bytes([flags]))
                 events, started = [], asyncio.get_running_loop().time()
                 deadline = started + args.seconds
@@ -471,9 +477,10 @@ async def run_cfw_command(client, args, checkpoint):
                         reply = await asyncio.wait_for(link.replies.get(), remaining)
                     except asyncio.TimeoutError:
                         break
-                    if len(reply) >= 6 and reply[1] == CFW_INPUT_EVENT:
-                        event = {'t': round(asyncio.get_running_loop().time() - started, 2), 'gesture': TOUCH_CODES.get(reply[3], reply[3]),
-                                 'count': struct.unpack_from('<H', reply, 4)[0]}
+                    if len(reply) >= 7 and reply[1] == CFW_INPUT_EVENT:
+                        kind, names = EVENT_CLASSES.get(reply[3], (f'class-{reply[3]}', {}))
+                        event = {'t': round(asyncio.get_running_loop().time() - started, 2), 'kind': kind,
+                                 'event': names.get(reply[4], reply[4]), 'count': struct.unpack_from('<H', reply, 5)[0]}
                         events.append(event)
                         print(json.dumps(event), file=sys.stderr, flush=True)
                 if not args.keep:
@@ -735,6 +742,8 @@ def arguments(argv=None):
             child.add_argument('--seconds', type=float, default=20, help='watch: how long to report gestures')
             child.add_argument('--swallow', action='store_true', help='keep gestures from the stock handler while set')
             child.add_argument('--notify', action='store_true', help='control: send INPUT_EVENT for each gesture')
+            child.add_argument('--notify-events', action='store_true', help='control: send INPUT_EVENT for each stock event (head, wear, case)')
+            child.add_argument('--swallow-events', action='store_true', help='keep stock events from the phone path while set')
             child.add_argument('--keep', action='store_true', help='watch: leave notify/swallow set after returning')
         if command == 'peek':
             child.add_argument('--addr', type=lambda v: int(v, 0), required=True)

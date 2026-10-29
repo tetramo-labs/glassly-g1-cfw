@@ -207,25 +207,39 @@ Reply body: `[messages:u16][errors:u16][stock_swallowed:u16][last_status]
 Diagnostic: reply body is `len` (at most 16) bytes read from `addr`. Used to
 inspect candidate RAM before reclaiming it.
 
-## Touch input (`30`-`32`, G1CFW/21 and later)
+## Input events (`30`-`32`, G1CFW/21 and later)
 
-Each temple's capacitive touch chip wakes the stock `touch_key_thread`, which
-classifies the press history into a gesture code and hands it to the stock
-key-event thread through a small helper. The profile redirects that helper
-into the CFW, so every gesture passes through `cfw_touch_event` on the touch
-thread. Codes: 1 single tap, 2 double, 3 triple, 4 long-press start (stock
-turns the mic on), 5 long-press end, 6 long-press timeout. Five, six, ten,
-eleven and fifteen taps act inside the stock thread (reboot, force bind, user
-data reset, ESB band) and never reach the helper, so they are not reported.
+Two stock paths are redirected into the CFW so the host can observe what
+the glasses sense:
 
-- `30` INPUT_CONTROL `[flags]`: bit 0 reports each gesture to the host as an
-  INPUT_EVENT; bit 1 keeps gestures from the stock handler (no dashboard,
-  mic or temple sync). Both default to off at boot, so a bare host sees no
-  unsolicited traffic. Reply body `[flags]`; an unknown bit is `bad-record`.
-- `31` INPUT_STATE: reply `[flags][last_code][count:u16][stock_passed:u16]`.
-- `32` INPUT_EVENT: unsolicited `F0 32 00 [code][count:u16]`, one per gesture,
-  from the temple that was touched. The host tool (`g1flash.py touch watch`)
-  sets bit 0, prints events for a while and clears the flags on exit.
+- **Touch gestures** (G1CFW/21). Each temple's capacitive touch chip wakes
+  the stock `touch_key_thread`, which classifies the press history into a
+  gesture code and hands it to the stock key-event thread through a small
+  helper; that helper is now `cfw_touch_event`. Codes: 1 single tap,
+  2 double, 3 triple, 4 long-press start (stock turns the mic on), 5
+  long-press end, 6 long-press timeout. Five, six, ten, eleven and fifteen
+  taps act inside the stock thread (reboot, force bind, user data reset,
+  ESB band) and never reach the helper, so they are not reported.
+- **Stock events** (G1CFW/22). Everything the stock firmware reports to the
+  phone as an `F5` notification passes through one poster function, now
+  `cfw_stock_event`: 2 head up, 3 head down (IMU fusion thread), 6 worn,
+  7 taken off outside the case, 8 placed in the open case, `0b` case closed
+  (work-mode checker), plus key and dashboard events the stock UI emits.
+  The CFW re-implements the poster (direct `[F5][code][CB]` packet when the
+  link is ready, otherwise the BLE context's event semaphore), so the stock
+  phone path is unchanged unless swallowed.
+
+- `30` INPUT_CONTROL `[flags]`: bit 0 report gestures, bit 1 keep gestures
+  from the stock handler (no dashboard, mic or temple sync), bit 2 report
+  stock events, bit 3 keep stock events from the phone path. All off at
+  boot, so a bare host sees no unsolicited traffic. Reply body `[flags]`;
+  an unknown bit is `bad-record`.
+- `31` INPUT_STATE: reply `[flags][last_gesture][gestures:u16]
+  [gestures_passed:u16][last_event][events:u16][events_sent:u16]`.
+- `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
+  gesture, class 1 stock event, from the temple that produced it. The host
+  tool (`g1flash.py touch watch`) sets bits 0 and 2, prints events for a
+  while and clears the flags on exit.
 
 The flags are per temple and live in RAM until reboot.
 

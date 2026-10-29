@@ -183,3 +183,23 @@ typedef void (*fw_sem_give_fn)(void *sem);
 #ifndef FW_K_SEM_GIVE
 #define FW_K_SEM_GIVE ((fw_sem_give_fn)0x0007ff69)   /* 0x7ff68: k_sem_give trampoline */
 #endif
+
+/* Stock event poster (1.5.60 0x28f38; 1.6.3 FUN_00029774). Every stock
+ * event the glasses report to the phone passes through it as a code in r0:
+ * 2 look up, 3 bow head (imu_fusion_thread), 6 worn, 7 taken off out of the
+ * case, 8 put in the open case, 0xb case closed (check_work_mode), plus key
+ * and dashboard events. It parks the code in a pending byte and either
+ * enqueues [F5][code][CB] for the connected central (enqueue_bt_data,
+ * 0x184d8) or gives the BLE context's event semaphore at ctx+0x218 when the
+ * link is not ready (ctx+0x248 and ctx+0x220 both zero). The profile
+ * redirects its entry to cfw_stock_event, which re-implements this. */
+#ifndef FW_EVENT_PENDING
+#define FW_EVENT_PENDING ((volatile uint8_t *)0x20003035u)
+#endif
+#define FW_CTX_EVENT_SEM    0x218   /* struct k_sem inside the BLE context */
+#define FW_CTX_EVENT_READY  0x220   /* uint32_t, non-zero: send directly */
+#define FW_CTX_EVENT_DIRECT 0x248   /* uint8_t, non-zero: send directly */
+typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
+#ifndef FW_ENQUEUE_BT_DATA
+#define FW_ENQUEUE_BT_DATA ((fw_enqueue_fn)0x000184d9)
+#endif

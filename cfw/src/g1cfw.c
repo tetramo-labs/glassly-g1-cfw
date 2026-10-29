@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 21u
+#define CFW_PROTOCOL 22u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1373,15 +1373,22 @@ int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode
  * lives in the second RAM region after the animation table. */
 typedef struct {
     uint32_t magic;
-    uint8_t  flags;         /* bit 0 notify host, bit 1 swallow stock */
+    uint8_t  flags;         /* bits: 0 notify gestures, 1 swallow gestures, 2 notify stock events, 3 swallow stock events */
     uint8_t  last_code;
     uint16_t count;         /* gestures seen since boot */
     uint16_t stock_passed;  /* gestures handed to key_event_thread */
-    uint16_t pad;
+    uint8_t  last_event;    /* last stock event code posted */
+    uint8_t  pad;
+    uint16_t events;        /* stock events seen since boot */
+    uint16_t events_sent;   /* stock events forwarded to the stock path */
 } cfw_input;
-#define CFW_INPUT_MAGIC 0x31504e49u  /* "INP1" */
-#define CFW_INPUT_NOTIFY  0x01u
-#define CFW_INPUT_SWALLOW 0x02u
+#define CFW_INPUT_MAGIC 0x32504e49u  /* "INP2" */
+#define CFW_INPUT_NOTIFY        0x01u
+#define CFW_INPUT_SWALLOW       0x02u
+#define CFW_INPUT_NOTIFY_EVENT  0x04u
+#define CFW_INPUT_SWALLOW_EVENT 0x08u
+#define CFW_INPUT_FLAGS (CFW_INPUT_NOTIFY | CFW_INPUT_SWALLOW | CFW_INPUT_NOTIFY_EVENT | CFW_INPUT_SWALLOW_EVENT)
+enum { CFW_EVENT_TOUCH = 0, CFW_EVENT_STOCK = 1 };
 
 static cfw_input *cfw_input_state(void)
 {
@@ -1404,7 +1411,7 @@ int cfw_touch_event(void)
     in->count++;
     in->last_code = code;
     if (in->flags & CFW_INPUT_NOTIFY) {
-        uint8_t body[3] = { code, (uint8_t)in->count, (uint8_t)(in->count >> 8) };
+        uint8_t body[4] = { CFW_EVENT_TOUCH, code, (uint8_t)in->count, (uint8_t)(in->count >> 8) };
         cfw_reply(CFW_INPUT_EVENT, CFW_OK, body, sizeof body);
     }
     if (!(in->flags & CFW_INPUT_SWALLOW) && *FW_KEY_EVENT_SEM_READY) {
@@ -1414,11 +1421,45 @@ int cfw_touch_event(void)
     return 0;
 }
 
+/* Runs in place of the stock event poster (see fw_abi.h). `code` is the
+ * stock event; the two other register arguments are unused by the stock
+ * body except as scratch. Re-implements the stock behaviour after noting
+ * the event, unless the host asked for stock events to be swallowed. */
+int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
+{
+    (void)p2; (void)p3;
+    cfw_input *in = cfw_input_state();
+    in->events++;
+    in->last_event = (uint8_t)code;
+    if (in->flags & CFW_INPUT_NOTIFY_EVENT) {
+        uint8_t body[4] = { CFW_EVENT_STOCK, (uint8_t)code, (uint8_t)in->events, (uint8_t)(in->events >> 8) };
+        cfw_reply(CFW_INPUT_EVENT, CFW_OK, body, sizeof body);
+    }
+    if (in->flags & CFW_INPUT_SWALLOW_EVENT) {
+        return 0;
+    }
+    uint8_t *ctx = FW_GET_CTX();
+    if (code - 0xF0u <= 2u && *FW_EVENT_PENDING != 0xFF) {
+        return 0;   /* a special-range event is still queued: stock drops this one */
+    }
+    *FW_EVENT_PENDING = (uint8_t)code;
+    in->events_sent++;
+    if (ctx[FW_CTX_EVENT_DIRECT] != 0 || *(uint32_t *)(ctx + FW_CTX_EVENT_READY) != 0) {
+        uint8_t packet[3] = { 0xF5, (uint8_t)code, 0xCB };
+        FW_ENQUEUE_BT_DATA(packet, sizeof packet);
+        *FW_EVENT_PENDING = 0xFF;
+        return 0;
+    }
+    FW_K_SEM_GIVE(ctx + FW_CTX_EVENT_SEM);
+    FW_K_MSLEEP(1);
+    return 0;
+}
+
 /* [flags] -> reply body [flags]. */
 static void cfw_input_control(const uint8_t *p, uint32_t n)
 {
     cfw_input *in = cfw_input_state();
-    if (n != 1 || (p[0] & ~(CFW_INPUT_NOTIFY | CFW_INPUT_SWALLOW))) {
+    if (n != 1 || (p[0] & ~CFW_INPUT_FLAGS)) {
         cfw_reply(CFW_INPUT_CONTROL, n != 1 ? CFW_BAD_LENGTH : CFW_BAD_RECORD, 0, 0);
         return;
     }
@@ -1426,12 +1467,14 @@ static void cfw_input_control(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_INPUT_CONTROL, CFW_OK, &in->flags, 1);
 }
 
-/* Reply body: [flags][last_code][count:u16][stock_passed:u16]. */
+/* Reply body: [flags][last_code][count:u16][stock_passed:u16][last_event][events:u16][events_sent:u16]. */
 static void cfw_input_report(void)
 {
     cfw_input *in = cfw_input_state();
-    uint8_t body[6] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
-                        (uint8_t)in->stock_passed, (uint8_t)(in->stock_passed >> 8) };
+    uint8_t body[11] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
+                         (uint8_t)in->stock_passed, (uint8_t)(in->stock_passed >> 8), in->last_event,
+                         (uint8_t)in->events, (uint8_t)(in->events >> 8),
+                         (uint8_t)in->events_sent, (uint8_t)(in->events_sent >> 8) };
     cfw_reply(CFW_INPUT_STATE, CFW_OK, body, sizeof body);
 }
 

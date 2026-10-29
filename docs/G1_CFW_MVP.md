@@ -546,6 +546,24 @@ that is the stock classifier's own output (it is unchanged), not a CFW
 artefact. Stock handling stayed on (`swallow` off), so the dashboard reacted
 as before.
 
+### G1CFW/22: stock event tap (2026-10-29)
+
+Trace (1.5.60): `imu_fusion_thread` (`0xfec0`) logs "look up" / "bow head"
+and calls `0x28f38` with 2 / 3 (`0x10418`, `0x10642`); `check_work_mode`
+(`0x28fa4`, 1.6.3 decomp `src/app/check_work_mode.c`) calls it with 6 worn,
+7 taken off, 8 in open case, `0xb` case closed; 32 call sites in all. The
+poster (1.6.3 `FUN_00029774`) parks the code in the byte at `0x20003035`
+and either enqueues `[F5][code][CB]` through `enqueue_bt_data` (`0x184d8`)
+when ctx+0x248 or ctx+0x220 is set, or gives the semaphore at ctx+0x218 and
+sleeps 1 ms. The `input` hook group now also replaces the poster's entry
+with `b.w cfw_stock_event`, which re-implements that body after counting
+and optionally reporting the event. Note the Mac, as the connected central,
+already receives the stock `F5` notifications under the open link policy;
+the tap adds counters, the last wear/case state and an off switch. The IMU
+attitude words (`0x20007c40..0x20007c4c`, from the 1.5.60 `get_imu_info`
+literal pool) read as zero while docked; the fusion thread sleeps in work
+modes 1 and 8, so they need a worn test.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

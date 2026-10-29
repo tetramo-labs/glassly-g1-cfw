@@ -163,8 +163,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    journal deltas, request-id replay protection.
 8. **Inputs and sensors in scope:** touchpad gestures (G1CFW/21: every
    gesture code passes through the CFW; the host can watch them and keep
-   them from the stock handler), then head-up/IMU events, wear detection,
-   microphone streaming and control, wakeword and screen-wake takeover.
+   them from the stock handler) and the stock event stream (G1CFW/22: head
+   up/down, worn/taken off, case open/closed and the other `F5` events pass
+   through the CFW). Next: raw IMU attitude while worn, microphone streaming
+   and control, wakeword and screen-wake takeover.
    Each needs its own trace through the 1.5.60 binary. Out of scope: the
    R1, the volume gate, the BLE keyboard bridge, the light sensor, and a
    buzzer or compass (the G1 has neither). The 1.6.3 decompilation at
