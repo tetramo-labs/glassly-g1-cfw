@@ -150,9 +150,11 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 6. **Assets.** Done in G1CFW/12 for images (1bpp/4bpp) and strings: a 48 KB
    heap arena with a 56-entry directory, PUT/DRAW/TEXT/CLEAR/INFO. Not yet:
    uploaded fonts, cached draw commands, LRU eviction (CLEAR only).
-7. **Vector shapes (mode 36)** and the **retained object cache with animation
-   (modes 37-41)**: port `shapes.c`/`scene.c` logic against the 4bpp 640x200
-   frame.
+7. **Vector shapes.** G1CFW/13 draws lines (brush width), rectangles,
+   circles/rings and triangles, filled or outlined, clipped and signed, as
+   16-byte records. Not yet: rounded rectangles, arcs/sectors, beziers, image
+   and text records inside a shape list. Then the **retained object cache
+   with animation** (g2flash modes 37-41) on top of the asset store.
 8. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.
