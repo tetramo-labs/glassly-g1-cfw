@@ -443,7 +443,7 @@ reports the size it obtained.
 
 ### Hardware result for G1CFW/14: assets and shapes (2026-10-29)
 
-Right temple: the stock heap granted a **16 KB** arena (48, 40, 32 and 24 KB
+Both temples (left checked after): the stock heap granted a **16 KB** arena (48, 40, 32 and 24 KB
 were refused). A 16,000-byte 1bpp test-pattern asset uploaded in 4 stream
 messages, ASSET_DRAW blitted it, a 12-byte string asset rendered through
 ASSET_TEXT, ASSET_INFO showed 2 assets and 16,012 bytes used, and the 8-record
