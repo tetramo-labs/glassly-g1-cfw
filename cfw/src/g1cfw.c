@@ -12,12 +12,12 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 12u
+#define CFW_PROTOCOL 13u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
        CFW_ASSET_DRAW = 0x09, CFW_ASSET_TEXT = 0x0A, CFW_ASSET_CLEAR = 0x0B, CFW_ASSET_INFO = 0x0C,
-       CFW_STREAM = 0x10, CFW_STATS = 0x11 };
+       CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
@@ -635,6 +635,224 @@ static void cfw_asset_info(void)
     cfw_reply(CFW_ASSET_INFO, CFW_OK, body, sizeof body);
 }
 
+/* --- vector shapes (g2flash mode 36, G1-sized) --------------------------- */
+/* Record: [type][flags][level][width][p0..p5 as int16 LE] = 16 bytes.
+ * type 0 line (x0,y0,x1,y1); 1 rect (x0,y0,x1,y1); 2 circle (cx,cy,r);
+ * 3 triangle (x0,y0,x1,y1,x2,y2). flags bit 0: fill (rect, circle, triangle);
+ * width: stroke width for lines and outlines (1-16); level: 0-15.
+ * Coordinates are signed pixels and everything clips to the frame. */
+#define CFW_SHAPE_RECORD 16u
+enum { CFW_SHAPE_LINE = 0, CFW_SHAPE_RECT = 1, CFW_SHAPE_CIRCLE = 2, CFW_SHAPE_TRIANGLE = 3 };
+
+static int16_t rd16s(const uint8_t *p)
+{
+    return (int16_t)rd16(p);
+}
+
+static void cfw_pixel(uint8_t *frame, int x, int y, uint8_t level)
+{
+    if (x < 0 || y < 0 || x >= FW_FRAME_WIDTH || y >= FW_FRAME_HEIGHT) {
+        return;
+    }
+    uint8_t *b = frame + y * FW_FRAME_STRIDE + x / 2;
+    *b = (x & 1) ? (uint8_t)((*b & 0xF0) | level) : (uint8_t)((*b & 0x0F) | (level << 4));
+}
+
+/* Horizontal span [x0, x1] inclusive, clipped. */
+static void cfw_hspan(uint8_t *frame, int x0, int x1, int y, uint8_t level)
+{
+    if (y < 0 || y >= FW_FRAME_HEIGHT) {
+        return;
+    }
+    if (x0 > x1) {
+        int t = x0; x0 = x1; x1 = t;
+    }
+    if (x1 < 0 || x0 >= FW_FRAME_WIDTH) {
+        return;
+    }
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (x1 >= FW_FRAME_WIDTH) {
+        x1 = FW_FRAME_WIDTH - 1;
+    }
+    uint8_t *row = frame + y * FW_FRAME_STRIDE;
+    if (x0 & 1) {
+        row[x0 / 2] = (uint8_t)((row[x0 / 2] & 0xF0) | level);
+        x0++;
+    }
+    if (!(x1 & 1)) {
+        if (x1 >= x0) {
+            row[x1 / 2] = (uint8_t)((row[x1 / 2] & 0x0F) | (level << 4));
+        }
+        x1--;
+    }
+    uint8_t pair = (uint8_t)(level * 0x11);
+    for (int x = x0; x < x1; x += 2) {
+        row[x / 2] = pair;
+    }
+}
+
+static void cfw_fill_rect(uint8_t *frame, int x0, int y0, int x1, int y1, uint8_t level)
+{
+    if (y0 > y1) {
+        int t = y0; y0 = y1; y1 = t;
+    }
+    for (int y = y0; y <= y1; y++) {
+        cfw_hspan(frame, x0, x1, y, level);
+    }
+}
+
+/* Bresenham line with a square brush of `width` pixels. */
+static void cfw_line(uint8_t *frame, int x0, int y0, int x1, int y1, uint8_t level, int width)
+{
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    int half = (width - 1) / 2;
+    for (;;) {
+        if (width <= 1) {
+            cfw_pixel(frame, x0, y0, level);
+        } else {
+            cfw_fill_rect(frame, x0 - half, y0 - half, x0 - half + width - 1, y0 - half + width - 1, level);
+        }
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void cfw_circle(uint8_t *frame, int cx, int cy, int r, uint8_t level, int fill, int width)
+{
+    if (r < 0) {
+        return;
+    }
+    if (fill) {
+        for (int y = -r; y <= r; y++) {
+            int xx = 0;
+            while ((xx + 1) * (xx + 1) + y * y <= r * r) {
+                xx++;
+            }
+            cfw_hspan(frame, cx - xx, cx + xx, cy + y, level);
+        }
+        return;
+    }
+    /* Ring: pixels whose distance d satisfies r-width < d <= r. */
+    int inner = r - width;
+    for (int y = -r; y <= r; y++) {
+        for (int x = -r; x <= r; x++) {
+            int d = x * x + y * y;
+            if (d <= r * r && (inner < 0 || d > inner * inner)) {
+                cfw_pixel(frame, cx + x, cy + y, level);
+            }
+        }
+    }
+}
+
+static void cfw_triangle(uint8_t *frame, int x0, int y0, int x1, int y1, int x2, int y2, uint8_t level, int fill, int width)
+{
+    if (!fill) {
+        cfw_line(frame, x0, y0, x1, y1, level, width);
+        cfw_line(frame, x1, y1, x2, y2, level, width);
+        cfw_line(frame, x2, y2, x0, y0, level, width);
+        return;
+    }
+    /* Scanline fill: for each row find the span covered by the edges. */
+    int ymin = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+    int ymax = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+    int ex[3] = { x0, x1, x2 }, ey[3] = { y0, y1, y2 };
+    for (int y = ymin; y <= ymax; y++) {
+        int left = 0x7FFF, right = -0x7FFF;
+        for (int e = 0; e < 3; e++) {
+            int ax = ex[e], ay = ey[e], bx = ex[(e + 1) % 3], by = ey[(e + 1) % 3];
+            if (ay == by) {
+                if (y == ay) {
+                    if (ax < left) left = ax;
+                    if (bx < left) left = bx;
+                    if (ax > right) right = ax;
+                    if (bx > right) right = bx;
+                }
+                continue;
+            }
+            if ((y < ay && y < by) || (y > ay && y > by)) {
+                continue;
+            }
+            int x = ax + (int)((long)(bx - ax) * (y - ay) / (by - ay));
+            if (x < left) left = x;
+            if (x > right) right = x;
+        }
+        if (left <= right) {
+            cfw_hspan(frame, left, right, y, level);
+        }
+    }
+}
+
+/* [count][records...][optional flush rect when flags bit 1 of the first byte? no: see below]
+ * SHAPES payload: [flags][count][records]. flags bit 1 flushes the whole frame
+ * afterwards (shapes have no single bounding box worth computing here). */
+static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
+{
+    if (n < 2) {
+        return CFW_BAD_LENGTH;
+    }
+    uint8_t flags = p[0];
+    uint32_t count = p[1];
+    if (n - 2 < count * CFW_SHAPE_RECORD) {
+        return CFW_BAD_LENGTH;
+    }
+    uint8_t *panel = cfw_panel();
+    uint8_t *frame = cfw_row(panel, 0, 0);
+    const uint8_t *r = p + 2;
+    for (uint32_t i = 0; i < count; i++, r += CFW_SHAPE_RECORD) {
+        uint8_t type = r[0], rflags = r[1], level = (uint8_t)(r[2] & 0xF);
+        int width = r[3] ? (r[3] > 16 ? 16 : r[3]) : 1;
+        int v[6];
+        for (int k = 0; k < 6; k++) {
+            v[k] = rd16s(r + 4 + 2 * k);
+        }
+        switch (type) {
+        case CFW_SHAPE_LINE:
+            cfw_line(frame, v[0], v[1], v[2], v[3], level, width);
+            break;
+        case CFW_SHAPE_RECT:
+            if (rflags & 1u) {
+                cfw_fill_rect(frame, v[0], v[1], v[2], v[3], level);
+            } else {
+                int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
+                int y0 = v[1] < v[3] ? v[1] : v[3], y1 = v[1] < v[3] ? v[3] : v[1];
+                cfw_fill_rect(frame, x0, y0, x1, y0 + width - 1, level);
+                cfw_fill_rect(frame, x0, y1 - width + 1, x1, y1, level);
+                cfw_fill_rect(frame, x0, y0, x0 + width - 1, y1, level);
+                cfw_fill_rect(frame, x1 - width + 1, y0, x1, y1, level);
+            }
+            break;
+        case CFW_SHAPE_CIRCLE:
+            cfw_circle(frame, v[0], v[1], v[2], level, rflags & 1u, width);
+            break;
+        case CFW_SHAPE_TRIANGLE:
+            cfw_triangle(frame, v[0], v[1], v[2], v[3], v[4], v[5], level, rflags & 1u, width);
+            break;
+        default:
+            return CFW_BAD_RECORD;
+        }
+    }
+    if (flags & CFW_FLAG_FLUSH) {
+        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+        return cfw_flush(panel, &all);
+    }
+    return CFW_OK;
+}
+
 /* Run one command record (same bodies as the packet commands). */
 static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 {
@@ -648,6 +866,7 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
     case CFW_ASSET_DRAW:  return cfw_asset_draw(p, n);
     case CFW_ASSET_TEXT:  return cfw_asset_text(p, n);
     case CFW_ASSET_CLEAR: return cfw_asset_clear();
+    case CFW_SHAPES: return cfw_shapes(p, n);
     default:        return CFW_BAD_COMMAND;
     }
 }
@@ -826,6 +1045,7 @@ int cfw_rx(const uint8_t *data, uint32_t len)
     case CFW_ASSET_DRAW:
     case CFW_ASSET_TEXT:
     case CFW_ASSET_CLEAR:
+    case CFW_SHAPES:
         cfw_reply(data[1], cfw_run_record(data[1], data + 2, len - 2), 0, 0);
         break;
     case CFW_ASSET_INFO:

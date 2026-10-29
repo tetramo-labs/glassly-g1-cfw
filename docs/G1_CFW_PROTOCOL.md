@@ -42,7 +42,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (12 for this document) and the version is the stock base
+protocol revision (13 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -134,6 +134,17 @@ bytes), 1 = 4bpp image, 2 = UTF-8 string (up to 240 bytes).
 - `0C` ASSET_INFO: reply `[count][max][used:u24][arena_kib][allocated][arena>>8:u24]`.
 
 All of these except INFO are valid stream records.
+
+## `0D` SHAPES: `[flags][count][records...]`
+
+Draws `count` 16-byte records straight into the frame:
+`[type][flags][level][width][p0..p5 as int16 LE]`. Types: 0 line
+(x0,y0,x1,y1), 1 rectangle (x0,y0,x1,y1), 2 circle (cx,cy,r), 3 triangle
+(x0,y0,x1,y1,x2,y2). Record `flags` bit 0 fills rectangles, circles and
+triangles; otherwise they are outlined with `width` pixels (1-16), which is
+also the brush size for lines. `level` is the grey nibble. Coordinates are
+signed and everything clips to 640x200. Payload `flags` bit 1 pushes the whole
+frame afterwards. SHAPES is also a valid stream record.
 
 ## `10` STREAM: `[seq][flags][data]`
 

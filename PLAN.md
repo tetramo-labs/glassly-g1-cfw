@@ -147,8 +147,9 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 5. **Text.** Done in G1CFW/10 on the stock font engine (fonts 0-2, left
    aligned, wrapping, `\n`). Not yet: alignment, grey levels (the stock glyphs
    are on/off only), uploaded fonts.
-6. **Assets.** The asset store (images, fonts, strings) and cached draw
-   commands, allocated from the stock heap.
+6. **Assets.** Done in G1CFW/12 for images (1bpp/4bpp) and strings: a 48 KB
+   heap arena with a 56-entry directory, PUT/DRAW/TEXT/CLEAR/INFO. Not yet:
+   uploaded fonts, cached draw commands, LRU eviction (CLEAR only).
 7. **Vector shapes (mode 36)** and the **retained object cache with animation
    (modes 37-41)**: port `shapes.c`/`scene.c` logic against the 4bpp 640x200
    frame.

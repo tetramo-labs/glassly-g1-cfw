@@ -138,7 +138,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/12", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/13", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -368,6 +368,39 @@ int main(void)
     CHECK(host_arena[0] == 0 && host_arena[sizeof host_arena - 1] == 0);
     uint8_t bad_kind[] = { 0xF0, 0x08, 1, 0, 0x07, 0x00, 2, 0, 1, 0, 0 };
     CHECK(send_packet(bad_kind, sizeof bad_kind) == 0 && last_reply[2] == CFW_BAD_ASSET);
+
+    /* Shapes: filled rect, outlined rect, line, filled circle, ring, triangles; clipping. */
+    memset(frame, 0, 200 * 320);
+    *(int *)(panel + FW_PANEL_POWERED) = 1;
+    uint8_t shapes[2 + 2 + 16 * 7];
+    shapes[0] = 0xF0; shapes[1] = 0x0D; shapes[2] = 0x02; shapes[3] = 7;
+    int16_t recs[7][10] = {
+        { 1, 1, 0x0F, 1, 10, 10, 13, 11, 0, 0 },      /* filled rect (10,10)-(13,11) */
+        { 1, 0, 0x0A, 1, 20, 20, 25, 24, 0, 0 },      /* outlined rect */
+        { 0, 0, 0x0F, 1, 100, 50, 104, 50, 0, 0 },    /* horizontal line */
+        { 2, 1, 0x0F, 1, 300, 100, 2, 0, 0, 0 },      /* filled circle r=2 */
+        { 2, 0, 0x0F, 1, 400, 100, 2, 0, 0, 0 },      /* ring r=2 */
+        { 3, 1, 0x0F, 1, 500, 150, 510, 150, 505, 160 }, /* filled triangle */
+        { 1, 1, 0x0F, 1, -10, 195, 5, 300, 0, 0 },    /* clipped rect to the bottom-left corner */
+    };
+    for (int i = 0; i < 7; i++) {
+        uint8_t *rec = shapes + 4 + 16 * i;
+        rec[0] = (uint8_t)recs[i][0]; rec[1] = (uint8_t)recs[i][1]; rec[2] = (uint8_t)recs[i][2]; rec[3] = (uint8_t)recs[i][3];
+        for (int k = 0; k < 6; k++) { rec[4 + 2 * k] = (uint8_t)recs[i][4 + k]; rec[5 + 2 * k] = (uint8_t)(recs[i][4 + k] >> 8); }
+    }
+    reflash_calls = 0;
+    CHECK(send_packet(shapes, sizeof shapes) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[4] == 640 && last_rect[5] == 199);
+    CHECK(frame[10 * 320 + 5] == 0xFF && frame[10 * 320 + 6] == 0xFF && frame[11 * 320 + 6] == 0xFF && frame[10 * 320 + 7] == 0 && frame[12 * 320 + 5] == 0);
+    CHECK(frame[20 * 320 + 10] == 0xAA && frame[22 * 320 + 10] == 0xA0 && frame[22 * 320 + 11] == 0 && frame[22 * 320 + 12] == 0x0A && frame[24 * 320 + 11] == 0xAA);
+    CHECK(frame[50 * 320 + 50] == 0xFF && frame[50 * 320 + 52] == 0xF0 && frame[50 * 320 + 49] == 0 && frame[49 * 320 + 50] == 0);
+    CHECK(frame[100 * 320 + 150] == 0xFF && frame[98 * 320 + 150] == 0xF0 && frame[98 * 320 + 149] == 0 && frame[102 * 320 + 150] == 0xF0);
+    CHECK(frame[100 * 320 + 200] == 0 && frame[100 * 320 + 199] == 0xF0 && frame[100 * 320 + 201] == 0xF0 && frame[98 * 320 + 200] == 0xF0 && frame[99 * 320 + 199] == 0x0F);
+    CHECK(frame[150 * 320 + 250] == 0xFF && frame[150 * 320 + 255] == 0xF0 && frame[160 * 320 + 252] == 0x0F && frame[160 * 320 + 250] == 0 && frame[161 * 320 + 252] == 0);
+    CHECK(frame[195 * 320 + 0] == 0xFF && frame[199 * 320 + 2] == 0xFF && frame[199 * 320 + 3] == 0 && frame[194 * 320 + 0] == 0);
+    guards_intact();
+    uint8_t shapes_bad[] = { 0xF0, 0x0D, 0x00, 1, 9, 0, 0, 0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0 };
+    CHECK(send_packet(shapes_bad, sizeof shapes_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    CHECK(send_packet(shapes, 10) == 0 && last_reply[2] == CFW_BAD_LENGTH);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);
