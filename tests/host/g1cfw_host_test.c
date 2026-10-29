@@ -25,6 +25,11 @@ static int host_manual_flush(void);
 #define FW_GUI_UTF_DRAW host_utf_draw
 #define FW_GUI_SET_ROWS host_set_rows
 #define FW_GUI_MANUAL_FLUSH host_manual_flush
+static void *host_malloc(uint32_t size);
+#define FW_MALLOC host_malloc
+static uint8_t host_arena[48 * 1024 + 64];
+#define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
+#define FW_PTR_OF(addr) (host_arena + (addr))
 #define FW_CFW_RAM (host_ram + 32)
 static int host_panel_on(uint8_t *panel);
 static int host_panel_off(uint8_t *panel);
@@ -91,6 +96,9 @@ static int host_utf_draw(int u, const char *t, unsigned f, int x0, int y0, int x
 static int host_set_rows(void *rows) { rows_arg = rows; rows_set++; return 0; }
 static int host_manual_flush(void) { manual_flush_calls++; return 0; }
 
+static int malloc_calls; static uint32_t malloc_size;
+static void *host_malloc(uint32_t size) { malloc_calls++; malloc_size = size; return malloc_calls > 1 ? NULL : host_arena + 32; }
+
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
 
@@ -130,7 +138,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/11", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/12", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -323,6 +331,43 @@ int main(void)
     uint8_t copy_bad[] = { 0xF0, 0x07, 0x00, 10, 0, 10, 0, 4, 0, 3, 0, 0x7E, 0x02, 9, 0 }; /* dst x 638 + 4 > 640 */
     CHECK(send_packet(copy_bad, sizeof copy_bad) == 0 && last_reply[2] == CFW_BAD_RECT);
     CHECK(send_packet(up, 12) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+
+    /* Assets: a 16x2 1bpp image uploaded in two PUTs, drawn, then a string asset. */
+    memset(frame, 0, 200 * 320);
+    const uint8_t no_asset[] = { 0xF0, 0x09, 5, 0, 0x00, 0, 0, 0, 0 };
+    CHECK(send_packet(no_asset, sizeof no_asset) == 0 && last_reply[2] == CFW_NO_ASSET && malloc_calls == 0);
+    uint8_t put1[] = { 0xF0, 0x08, 5, 0, 0x00, 0x00, 16, 0, 2, 0, 0xFF, 0x00 };          /* id 5, 1bpp 16x2, first 2 bytes */
+    CHECK(send_packet(put1, sizeof put1) == 0 && last_reply[2] == CFW_OK && malloc_calls == 1 && malloc_size == 48 * 1024);
+    CHECK(send_packet(no_asset, sizeof no_asset) == 0 && last_reply[2] == CFW_BAD_ASSET);  /* incomplete */
+    uint8_t put2[] = { 0xF0, 0x08, 5, 0, 0x00, 0x01, 16, 0, 2, 0, 0x00, 0xFF };          /* append remaining 2 bytes */
+    CHECK(send_packet(put2, sizeof put2) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(put2, sizeof put2) == 0 && last_reply[2] == CFW_BAD_ASSET);          /* closed: no more appends */
+    uint8_t drawa[] = { 0xF0, 0x09, 5, 0, 0x92, 4, 0, 100, 0 };                          /* level 9, flush, at (4,100) */
+    reflash_calls = 0;
+    CHECK(send_packet(drawa, sizeof drawa) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
+    CHECK(frame[100 * 320 + 2] == 0x99 && frame[100 * 320 + 5] == 0x99 && frame[100 * 320 + 6] == 0 && frame[101 * 320 + 2] == 0 && frame[101 * 320 + 6] == 0x99);
+    CHECK(last_rect[2] == 4 && last_rect[3] == 100 && last_rect[4] == 20 && last_rect[5] == 101);
+    uint8_t puts[] = { 0xF0, 0x08, 9, 0, 0x02, 0x00, 0, 0, 0, 0, 'H', 'e', 'y' };        /* string asset id 9 */
+    CHECK(send_packet(puts, sizeof puts) == 0 && last_reply[2] == CFW_OK);
+    uint8_t atext[] = { 0xF0, 0x0A, 9, 0, 0, 0x02, 32, 0, 32, 0, 0x60, 0x02, 59, 0, 1 };
+    utf_calls = 0;
+    CHECK(send_packet(atext, sizeof atext) == 0 && last_reply[2] == CFW_OK && utf_calls == 1 && strcmp(utf_text, "Hey") == 0 && utf_box[3] == 59);
+    CHECK(send_packet(drawa, 8) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    uint8_t text_as_img[] = { 0xF0, 0x09, 9, 0, 0x00, 0, 0, 0, 0 };
+    CHECK(send_packet(text_as_img, sizeof text_as_img) == 0 && last_reply[2] == CFW_BAD_ASSET);
+    /* Replacing the newest asset reclaims its bytes; INFO and CLEAR. */
+    const uint8_t ainfo[] = { 0xF0, 0x0C };
+    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 2 && last_reply[5] == 7 && last_reply[9] == 1);
+    uint8_t puts2[] = { 0xF0, 0x08, 9, 0, 0x02, 0x00, 0, 0, 0, 0, 'Y', 'o' };
+    CHECK(send_packet(puts2, sizeof puts2) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[3] == 2 && last_reply[5] == 6);
+    const uint8_t aclear[] = { 0xF0, 0x0B };
+    CHECK(send_packet(aclear, sizeof aclear) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[3] == 0 && last_reply[5] == 0);
+    CHECK(send_packet(drawa, sizeof drawa) == 0 && last_reply[2] == CFW_NO_ASSET);
+    CHECK(host_arena[0] == 0 && host_arena[sizeof host_arena - 1] == 0);
+    uint8_t bad_kind[] = { 0xF0, 0x08, 1, 0, 0x07, 0x00, 2, 0, 1, 0, 0 };
+    CHECK(send_packet(bad_kind, sizeof bad_kind) == 0 && last_reply[2] == CFW_BAD_ASSET);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

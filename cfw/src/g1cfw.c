@@ -12,13 +12,16 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 11u
+#define CFW_PROTOCOL 12u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
-       CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_STREAM = 0x10, CFW_STATS = 0x11 };
+       CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
+       CFW_ASSET_DRAW = 0x09, CFW_ASSET_TEXT = 0x0A, CFW_ASSET_CLEAR = 0x0B, CFW_ASSET_INFO = 0x0C,
+       CFW_STREAM = 0x10, CFW_STATS = 0x11 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
-       CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A };
+       CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
+       CFW_NO_ASSET = 0x0C, CFW_BAD_ASSET = 0x0D };
 
 /* Stock commands of the BMP upload flow whose staging RAM the CFW now owns. */
 #define STOCK_BMP_DATA 0x15u
@@ -40,8 +43,56 @@ typedef struct {
     uint16_t stream_errors;
     uint16_t stock_swallowed;
     uint8_t  last_status;
-    uint8_t  reserved[9];
-} cfw_ctx;                 /* 32 bytes, then the message buffer */
+    uint8_t  asset_count;  /* directory entries in use */
+    uint32_t arena;        /* heap arena base (0 until first PUT) */
+    uint32_t arena_used;   /* bump pointer */
+} cfw_ctx;                 /* 32 bytes, then the message buffer, then the directory */
+
+/* --- asset store: directory in the reclaimed RAM, bytes in a heap arena --- */
+#define CFW_ARENA_BYTES  (48u * 1024u)
+#define CFW_ASSET_MAX    56u   /* 16-byte entries after the 4 KB message buffer */
+enum { CFW_ASSET_1BPP = 0, CFW_ASSET_4BPP = 1, CFW_ASSET_STRING = 2 };
+
+typedef struct {
+    uint16_t id;
+    uint8_t  kind;
+    uint8_t  open;      /* 1 while PUT appends may follow */
+    uint16_t w, h;      /* pixels for images; unused for strings */
+    uint32_t bytes;     /* bytes stored so far */
+    uint32_t offset;    /* into the arena */
+} cfw_asset;
+
+static cfw_asset *cfw_assets(void)
+{
+    return (cfw_asset *)(FW_CFW_RAM + sizeof(cfw_ctx) + CFW_MSG_MAX);
+}
+
+static cfw_asset *cfw_asset_find(cfw_ctx *c, uint16_t id)
+{
+    cfw_asset *a = cfw_assets();
+    for (uint32_t i = 0; i < c->asset_count; i++) {
+        if (a[i].id == id) {
+            return &a[i];
+        }
+    }
+    return 0;
+}
+
+static uint8_t *cfw_asset_bytes(cfw_ctx *c, const cfw_asset *a)
+{
+    return FW_PTR_OF(c->arena) + a->offset;
+}
+
+static uint32_t cfw_asset_expected(const cfw_asset *a)
+{
+    if (a->kind == CFW_ASSET_1BPP) {
+        return ((a->w + 7u) / 8u) * a->h;
+    }
+    if (a->kind == CFW_ASSET_4BPP) {
+        return (a->w / 2u) * a->h;
+    }
+    return a->bytes;  /* strings: whatever was uploaded */
+}
 
 static cfw_ctx *cfw_context(void)
 {
@@ -184,24 +235,20 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
                          (int)(r->y0 + r->h - 1)) < 0 ? CFW_PANEL_OFF : CFW_OK;
 }
 
-/* [flags][rect][pixels]: write a rectangle into the frame buffer. */
-static uint8_t cfw_blit(const uint8_t *p, uint32_t n)
+/* [flags][rect] header plus a separate pixel buffer (packet or asset). */
+static uint8_t cfw_blit_from(const uint8_t *hdr, const uint8_t *px, uint32_t px_len)
 {
     cfw_rect r;
     cfw_rle rle;
-    if (n < 9) {
-        return CFW_BAD_LENGTH;
-    }
-    uint8_t flags = p[0];
-    if (!cfw_parse_rect(p + 1, &r)) {
+    uint8_t flags = hdr[0];
+    if (!cfw_parse_rect(hdr + 1, &r)) {
         return CFW_BAD_RECT;
     }
-    const uint8_t *px = p + 9;
     uint32_t stride = (flags & CFW_BLIT_1BPP) ? (r.w + 7) / 8 : r.w / 2;
-    if (!(flags & CFW_BLIT_RLE) && n - 9 < stride * r.h) {
+    if (!(flags & CFW_BLIT_RLE) && px_len < stride * r.h) {
         return CFW_BAD_LENGTH;
     }
-    cfw_rle_init(&rle, px, n - 9);
+    cfw_rle_init(&rle, px, px_len);
     uint8_t *panel = cfw_panel();
     uint8_t level = (uint8_t)CFW_BLIT_LEVEL(flags);
     uint8_t row[FW_FRAME_STRIDE];
@@ -229,6 +276,15 @@ static uint8_t cfw_blit(const uint8_t *p, uint32_t n)
         }
     }
     return (flags & CFW_FLAG_FLUSH) ? cfw_flush(panel, &r) : CFW_OK;
+}
+
+/* [flags][rect][pixels]: write a rectangle into the frame buffer. */
+static uint8_t cfw_blit(const uint8_t *p, uint32_t n)
+{
+    if (n < 9) {
+        return CFW_BAD_LENGTH;
+    }
+    return cfw_blit_from(p, p + 9, n - 9);
 }
 
 /* [flags][rect][nibble]: fill a rectangle with one grey level. */
@@ -426,6 +482,159 @@ static uint8_t cfw_copy(const uint8_t *p, uint32_t n)
     return (p[0] & CFW_FLAG_FLUSH) ? cfw_flush(panel, &dst) : CFW_OK;
 }
 
+/* [id:u16][kind][flags][w:u16][h:u16][data...]: store an asset. flags bit 0
+ * appends to the open asset with this id (same kind/size), otherwise a new
+ * asset replaces any entry with the same id. Only the newest asset can grow.
+ * The arena comes from the stock heap on first use. */
+static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
+{
+    cfw_ctx *c = cfw_context();
+    if (n < 8) {
+        return CFW_BAD_LENGTH;
+    }
+    uint16_t id = rd16(p);
+    uint8_t kind = p[2], flags = p[3];
+    uint32_t w = rd16(p + 4), h = rd16(p + 6);
+    const uint8_t *data = p + 8;
+    uint32_t len = n - 8;
+    if (kind > CFW_ASSET_STRING) {
+        return CFW_BAD_ASSET;
+    }
+    if (kind != CFW_ASSET_STRING && (w == 0 || h == 0 || (w & 1u) || w > FW_FRAME_WIDTH || h > FW_FRAME_HEIGHT)) {
+        return CFW_BAD_RECT;
+    }
+    if (!c->arena) {
+        void *arena = FW_MALLOC(CFW_ARENA_BYTES);
+        if (!arena) {
+            return CFW_NO_MEMORY;
+        }
+        c->arena = FW_ADDR_OF(arena);
+        c->arena_used = 0;
+        c->asset_count = 0;
+    }
+    cfw_asset *a = cfw_asset_find(c, id);
+    if (flags & 1u) {
+        if (!a || !a->open || a->kind != kind || a->w != w || a->h != h) {
+            return CFW_BAD_ASSET;
+        }
+    } else {
+        if (a) {
+            /* Replace: drop it from the directory; its bytes are reclaimed only
+             * if it was the newest asset. */
+            cfw_asset *last = &cfw_assets()[c->asset_count - 1];
+            if (a == last) {
+                c->arena_used = a->offset;
+            }
+            for (cfw_asset *q = a; q < last; q++) {
+                *q = q[1];
+            }
+            c->asset_count--;
+        }
+        if (c->asset_count >= CFW_ASSET_MAX) {
+            return CFW_NO_MEMORY;
+        }
+        if (c->asset_count) {
+            cfw_assets()[c->asset_count - 1].open = 0;
+        }
+        a = &cfw_assets()[c->asset_count++];
+        a->id = id;
+        a->kind = kind;
+        a->open = 1;
+        a->w = (uint16_t)w;
+        a->h = (uint16_t)h;
+        a->bytes = 0;
+        a->offset = c->arena_used;
+    }
+    uint32_t limit = (kind == CFW_ASSET_STRING) ? CFW_TEXT_MAX : cfw_asset_expected(a);
+    if (a->bytes + len > limit) {
+        return CFW_BAD_ASSET;
+    }
+    if (c->arena_used + len > CFW_ARENA_BYTES) {
+        return CFW_NO_MEMORY;
+    }
+    uint8_t *dst = cfw_asset_bytes(c, a) + a->bytes;
+    for (uint32_t i = 0; i < len; i++) {
+        dst[i] = data[i];
+    }
+    a->bytes += len;
+    c->arena_used += len;
+    if (kind != CFW_ASSET_STRING && a->bytes == limit) {
+        a->open = 0;
+    }
+    return CFW_OK;
+}
+
+/* [id:u16][flags][x:u16][y:u16]: blit an image asset. flags as BLIT (bit 1
+ * flush, high nibble grey level for 1bpp). */
+static uint8_t cfw_asset_draw(const uint8_t *p, uint32_t n)
+{
+    cfw_ctx *c = cfw_context();
+    uint8_t hdr[9];
+    if (n < 7) {
+        return CFW_BAD_LENGTH;
+    }
+    cfw_asset *a = c->arena ? cfw_asset_find(c, rd16(p)) : 0;
+    if (!a) {
+        return CFW_NO_ASSET;
+    }
+    if (a->kind == CFW_ASSET_STRING || a->bytes != cfw_asset_expected(a)) {
+        return CFW_BAD_ASSET;
+    }
+    /* Reuse the BLIT parser on a synthetic header followed by the stored bytes:
+     * the bytes sit in the arena, so build the header beside a pointer walk. */
+    hdr[0] = (uint8_t)((p[2] & 0xF2u) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
+    hdr[1] = p[3]; hdr[2] = p[4]; hdr[3] = p[5]; hdr[4] = p[6];
+    hdr[5] = (uint8_t)a->w; hdr[6] = (uint8_t)(a->w >> 8);
+    hdr[7] = (uint8_t)a->h; hdr[8] = (uint8_t)(a->h >> 8);
+    return cfw_blit_from(hdr, cfw_asset_bytes(c, a), a->bytes);
+}
+
+/* [id:u16][font][flags][box][max_lines]: TEXT with a string asset. */
+static uint8_t cfw_asset_text(const uint8_t *p, uint32_t n)
+{
+    cfw_ctx *c = cfw_context();
+    uint8_t packet[11 + CFW_TEXT_MAX];
+    if (n < 13) {
+        return CFW_BAD_LENGTH;
+    }
+    cfw_asset *a = c->arena ? cfw_asset_find(c, rd16(p)) : 0;
+    if (!a) {
+        return CFW_NO_ASSET;
+    }
+    if (a->kind != CFW_ASSET_STRING || a->bytes == 0) {
+        return CFW_BAD_ASSET;
+    }
+    for (uint32_t i = 0; i < 11; i++) {
+        packet[i] = p[2 + i];
+    }
+    const uint8_t *str = cfw_asset_bytes(c, a);
+    for (uint32_t i = 0; i < a->bytes; i++) {
+        packet[11 + i] = str[i];
+    }
+    return cfw_text(packet, 11 + a->bytes);
+}
+
+static uint8_t cfw_asset_clear(void)
+{
+    cfw_ctx *c = cfw_context();
+    c->asset_count = 0;
+    c->arena_used = 0;
+    return CFW_OK;
+}
+
+static void cfw_asset_info(void)
+{
+    cfw_ctx *c = cfw_context();
+    uint8_t body[10];
+    body[0] = c->asset_count;
+    body[1] = CFW_ASSET_MAX;
+    body[2] = (uint8_t)c->arena_used; body[3] = (uint8_t)(c->arena_used >> 8); body[4] = (uint8_t)(c->arena_used >> 16);
+    body[5] = (uint8_t)(CFW_ARENA_BYTES >> 10);
+    body[6] = c->arena != 0;
+    body[7] = (uint8_t)(c->arena >> 8); body[8] = (uint8_t)(c->arena >> 16); body[9] = (uint8_t)(c->arena >> 24);
+    cfw_reply(CFW_ASSET_INFO, CFW_OK, body, sizeof body);
+}
+
 /* Run one command record (same bodies as the packet commands). */
 static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 {
@@ -435,6 +644,10 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
     case CFW_FLUSH: return cfw_flush_cmd(p, n);
     case CFW_TEXT:  return cfw_text(p, n);
     case CFW_COPY:  return cfw_copy(p, n);
+    case CFW_ASSET_PUT:   return cfw_asset_put(p, n);
+    case CFW_ASSET_DRAW:  return cfw_asset_draw(p, n);
+    case CFW_ASSET_TEXT:  return cfw_asset_text(p, n);
+    case CFW_ASSET_CLEAR: return cfw_asset_clear();
     default:        return CFW_BAD_COMMAND;
     }
 }
@@ -608,6 +821,15 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_COPY:
         cfw_reply(CFW_COPY, cfw_copy(data + 2, len - 2), 0, 0);
+        break;
+    case CFW_ASSET_PUT:
+    case CFW_ASSET_DRAW:
+    case CFW_ASSET_TEXT:
+    case CFW_ASSET_CLEAR:
+        cfw_reply(data[1], cfw_run_record(data[1], data + 2, len - 2), 0, 0);
+        break;
+    case CFW_ASSET_INFO:
+        cfw_asset_info();
         break;
     case CFW_PANEL:
         cfw_panel_cmd(data + 2, len - 2);

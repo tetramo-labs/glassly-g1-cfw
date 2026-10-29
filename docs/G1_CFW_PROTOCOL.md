@@ -29,6 +29,9 @@ reply:    F0 <sub> <status> <body...>
 | `08` | bad record (record header or length does not fit the message) |
 | `09` | bad RLE (PackBits data ended before the rectangle was filled) |
 | `0A` | bad font (TEXT font other than 0, 1, 2) |
+| `0B` | no memory (heap arena unavailable, directory or arena full) |
+| `0C` | no asset (unknown id) |
+| `0D` | bad asset (wrong kind, incomplete image, append to a closed asset) |
 
 A bare `F0` with no sub-command is answered `F0 FF 01`.
 
@@ -39,7 +42,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (11 for this document) and the version is the stock base
+protocol revision (12 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -110,6 +113,27 @@ Copies a rectangle to another position in the frame buffer. Overlapping
 source and destination are handled, so it can scroll a region by any offset.
 Destination x must be even and the rectangle must fit. `flags` bit 1 pushes
 the destination rectangle afterwards. COPY is also a valid stream record.
+
+## Assets (`08`-`0C`)
+
+Assets live in a 48 KB arena taken from the stock heap on first use, with a
+56-entry directory in the CFW RAM. Kinds: 0 = 1bpp image (rows padded to
+bytes), 1 = 4bpp image, 2 = UTF-8 string (up to 240 bytes).
+
+- `08` ASSET_PUT `[id:u16][kind][flags][w:u16][h:u16][data...]`: `flags`
+  bit 0 appends to the still-open asset with this id (images close when all
+  their bytes have arrived; the newest asset is the only one that can grow);
+  otherwise it creates the asset, replacing any entry with that id (bytes are
+  reclaimed only when the replaced asset was the newest). Use STREAM records
+  for images larger than one packet.
+- `09` ASSET_DRAW `[id:u16][flags][x:u16][y:u16]`: blit a complete image
+  asset; `flags` as BLIT (bit 1 flush, high nibble grey level for 1bpp).
+- `0A` ASSET_TEXT `[id:u16][font][flags][x0][y0][x1][y1][max_lines]`: TEXT
+  with a string asset.
+- `0B` ASSET_CLEAR: forget every asset and reset the arena.
+- `0C` ASSET_INFO: reply `[count][max][used:u24][arena_kib][allocated][arena>>8:u24]`.
+
+All of these except INFO are valid stream records.
 
 ## `10` STREAM: `[seq][flags][data]`
 

@@ -121,3 +121,16 @@ typedef int (*fw_void_fn)(void);
 #define FW_GUI_MANUAL_FLUSH ((fw_void_fn)0x000459b9)
 #endif
 #define FW_PANEL_ROWS 0x24   /* int *rows[200] inside the panel context */
+
+/* 0x7a15c: stock malloc wrapper (the call that allocates the 64 KB frame
+ * buffer at boot). Returns NULL when the heap is exhausted. The CFW takes one
+ * arena at first use and never frees it. */
+typedef void *(*fw_malloc_fn)(uint32_t size);
+#ifndef FW_MALLOC
+#define FW_MALLOC ((fw_malloc_fn)0x0007a15d)
+#endif
+/* Heap pointers are kept as 32-bit addresses in the CFW context. */
+#ifndef FW_ADDR_OF
+#define FW_ADDR_OF(ptr) ((uint32_t)(uintptr_t)(ptr))
+#define FW_PTR_OF(addr) ((uint8_t *)(uintptr_t)(addr))
+#endif
