@@ -61,7 +61,7 @@ RAW = {
     # docs/G1_CFW_MVP.md). Both are stock behaviour the CFW does not need.
     'link': [
         (0x18c8e, 'c0b1', '18e0', 'ancs_connected: cbz -> b, accept any central address'),
-        (0x2c4be, '2df0cbfc', 'bf00bf00', 'low_speed_peripheral_dispatch_thread: no 30 s unbonded disconnect'),
+        (0x2c4be, '2df0cbfc', '00bf00bf', 'low_speed_peripheral_dispatch_thread: no 30 s unbonded disconnect'),
     ],
 }
 
