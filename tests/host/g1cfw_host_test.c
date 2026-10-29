@@ -97,7 +97,8 @@ static int host_set_rows(void *rows) { rows_arg = rows; rows_set++; return 0; }
 static int host_manual_flush(void) { manual_flush_calls++; return 0; }
 
 static int malloc_calls; static uint32_t malloc_size;
-static void *host_malloc(uint32_t size) { malloc_calls++; malloc_size = size; return malloc_calls > 1 ? NULL : host_arena + 32; }
+/* Refuse 48 KB and 40 KB like the real heap did; grant the 32 KB retry. */
+static void *host_malloc(uint32_t size) { malloc_calls++; malloc_size = size; return size > 32 * 1024 ? NULL : host_arena + 32; }
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -138,7 +139,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/13", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/14", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -337,7 +338,7 @@ int main(void)
     const uint8_t no_asset[] = { 0xF0, 0x09, 5, 0, 0x00, 0, 0, 0, 0 };
     CHECK(send_packet(no_asset, sizeof no_asset) == 0 && last_reply[2] == CFW_NO_ASSET && malloc_calls == 0);
     uint8_t put1[] = { 0xF0, 0x08, 5, 0, 0x00, 0x00, 16, 0, 2, 0, 0xFF, 0x00 };          /* id 5, 1bpp 16x2, first 2 bytes */
-    CHECK(send_packet(put1, sizeof put1) == 0 && last_reply[2] == CFW_OK && malloc_calls == 1 && malloc_size == 48 * 1024);
+    CHECK(send_packet(put1, sizeof put1) == 0 && last_reply[2] == CFW_OK && malloc_calls == 3 && malloc_size == 32 * 1024);
     CHECK(send_packet(no_asset, sizeof no_asset) == 0 && last_reply[2] == CFW_BAD_ASSET);  /* incomplete */
     uint8_t put2[] = { 0xF0, 0x08, 5, 0, 0x00, 0x01, 16, 0, 2, 0, 0x00, 0xFF };          /* append remaining 2 bytes */
     CHECK(send_packet(put2, sizeof put2) == 0 && last_reply[2] == CFW_OK);
@@ -357,7 +358,7 @@ int main(void)
     CHECK(send_packet(text_as_img, sizeof text_as_img) == 0 && last_reply[2] == CFW_BAD_ASSET);
     /* Replacing the newest asset reclaims its bytes; INFO and CLEAR. */
     const uint8_t ainfo[] = { 0xF0, 0x0C };
-    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 2 && last_reply[5] == 7 && last_reply[9] == 1);
+    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 2 && last_reply[5] == 7 && last_reply[8] == 32 && last_reply[9] == 1);
     uint8_t puts2[] = { 0xF0, 0x08, 9, 0, 0x02, 0x00, 0, 0, 0, 0, 'Y', 'o' };
     CHECK(send_packet(puts2, sizeof puts2) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[3] == 2 && last_reply[5] == 6);

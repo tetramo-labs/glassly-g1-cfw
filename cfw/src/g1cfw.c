@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 13u
+#define CFW_PROTOCOL 14u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -46,10 +46,12 @@ typedef struct {
     uint8_t  asset_count;  /* directory entries in use */
     uint32_t arena;        /* heap arena base (0 until first PUT) */
     uint32_t arena_used;   /* bump pointer */
+    uint32_t arena_size;   /* bytes obtained from the stock heap */
 } cfw_ctx;                 /* 32 bytes, then the message buffer, then the directory */
 
 /* --- asset store: directory in the reclaimed RAM, bytes in a heap arena --- */
-#define CFW_ARENA_BYTES  (48u * 1024u)
+#define CFW_ARENA_MAX    (48u * 1024u)   /* first attempt; halves down to 8 KB */
+#define CFW_ARENA_MIN    (8u * 1024u)
 #define CFW_ASSET_MAX    56u   /* 16-byte entries after the 4 KB message buffer */
 enum { CFW_ASSET_1BPP = 0, CFW_ASSET_4BPP = 1, CFW_ASSET_STRING = 2 };
 
@@ -504,11 +506,21 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
         return CFW_BAD_RECT;
     }
     if (!c->arena) {
-        void *arena = FW_MALLOC(CFW_ARENA_BYTES);
+        /* The stock heap also holds the 64 KB frame buffer and the upload
+         * queue, so take the largest block it will still give us. */
+        void *arena = 0;
+        uint32_t size = CFW_ARENA_MAX;
+        while (!arena && size >= CFW_ARENA_MIN) {
+            arena = FW_MALLOC(size);
+            if (!arena) {
+                size -= 8u * 1024u;
+            }
+        }
         if (!arena) {
             return CFW_NO_MEMORY;
         }
         c->arena = FW_ADDR_OF(arena);
+        c->arena_size = size;
         c->arena_used = 0;
         c->asset_count = 0;
     }
@@ -549,7 +561,7 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
     if (a->bytes + len > limit) {
         return CFW_BAD_ASSET;
     }
-    if (c->arena_used + len > CFW_ARENA_BYTES) {
+    if (c->arena_used + len > c->arena_size) {
         return CFW_NO_MEMORY;
     }
     uint8_t *dst = cfw_asset_bytes(c, a) + a->bytes;
@@ -629,7 +641,7 @@ static void cfw_asset_info(void)
     body[0] = c->asset_count;
     body[1] = CFW_ASSET_MAX;
     body[2] = (uint8_t)c->arena_used; body[3] = (uint8_t)(c->arena_used >> 8); body[4] = (uint8_t)(c->arena_used >> 16);
-    body[5] = (uint8_t)(CFW_ARENA_BYTES >> 10);
+    body[5] = (uint8_t)(c->arena_size >> 10);
     body[6] = c->arena != 0;
     body[7] = (uint8_t)(c->arena >> 8); body[8] = (uint8_t)(c->arena >> 16); body[9] = (uint8_t)(c->arena >> 24);
     cfw_reply(CFW_ASSET_INFO, CFW_OK, body, sizeof body);
