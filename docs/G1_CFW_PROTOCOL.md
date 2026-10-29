@@ -43,7 +43,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (17 for this document) and the version is the stock base
+protocol revision (18 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -174,7 +174,10 @@ engine or shape records, so showing a scene again costs one SHOW.
   the frames themselves on the display thread: the stubbed stock refresh
   handler is redirected to the CFW tick, which re-composes the SHOW list,
   pushes the frame, sleeps the period and re-posts the stock refresh message
-  until every glide has settled. A new ANIM replaces the glide set.
+  until every glide has settled. A new ANIM replaces the glide set. Each
+  frame pushes only the union of the moved objects' old and new boxes; a
+  shapes object has no box and forces a whole-frame push.
+- `26` ANIM_STATE: reply `[active][period_ms][ticks:u32][full_pushes:u32]`.
 
 All but STATE are valid stream records.
 

@@ -151,7 +151,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/17", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/18", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -467,6 +467,8 @@ int main(void)
     CHECK(send_packet(anim, sizeof anim) == 0 && last_reply[2] == CFW_OK && post_calls == 1 && last_screen == 0x10);
     cfw_display_tick(state, 0x10, 0, 2);   /* frame 1: linear 1/4 of the way */
     CHECK(reflash_calls == 1 && sleep_calls == 1 && last_sleep == 40 && post_calls == 2);
+    /* Only the union of the old (10,10 8x4) and new (35,20 8x4) boxes was pushed. */
+    CHECK(last_rect[2] == 10 && last_rect[3] == 10 && last_rect[4] == 44 && last_rect[5] == 23);
     CHECK(frame[20 * 320 + 17] == 0x0C && frame[20 * 320 + 18] == 0xCC && frame[20 * 320 + 16] == 0 && frame[23 * 320 + 21] == 0xC0 && frame[24 * 320 + 17] == 0);
     cfw_display_tick(state, 0x10, 0, 2);
     cfw_display_tick(state, 0x10, 0, 2);
@@ -486,6 +488,20 @@ int main(void)
     for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
     CHECK(frame[10 * 320 + 5] == 0xCC && frame[13 * 320 + 8] == 0xCC && frame[14 * 320 + 5] == 0 && frame[50 * 320 + 55] == 0);
     CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
+    const uint8_t astate[] = { 0xF0, 0x26 };
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 40 && last_reply[5] == 7 && last_reply[9] == 0);
+    /* A shapes object has no box, so its glide forces a full-frame push. */
+    uint8_t shp_asset[] = { 0xF0, 0x08, 11, 0, 0x02, 0x00, 0, 0, 0, 0, 1, 0, 1, 0x0F, 1, 0, 0, 0, 0, 5, 0, 5, 0, 0, 0, 0, 0 };
+    CHECK(send_packet(shp_asset, sizeof shp_asset) == 0 && last_reply[2] == CFW_OK);
+    uint8_t o5[] = { 0xF0, 0x20, 5, 0, 1, 0, 3, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0x0F, 0, 0 };
+    CHECK(send_packet(o5, sizeof o5) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show5[] = { 0xF0, 0x21, 0x01, 1, 5, 0 };
+    CHECK(send_packet(show5, sizeof show5) == 0 && last_reply[2] == CFW_OK);
+    uint8_t anim5[] = { 0xF0, 0x25, 0, 1, 5, 0, 0, 0, 0, 0, 1, 0 };
+    CHECK(send_packet(anim5, sizeof anim5) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(last_rect[4] == 640 && last_rect[5] == 199);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[5] == 8 && last_reply[9] == 1);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);
