@@ -448,7 +448,7 @@ were refused). A 16,000-byte 1bpp test-pattern asset uploaded in 4 stream
 messages, ASSET_DRAW blitted it, a 12-byte string asset rendered through
 ASSET_TEXT, ASSET_INFO showed 2 assets and 16,012 bytes used, and the 8-record
 `shapes --demo` drew (filled and outlined rectangles, circle and ring, two
-lines, filled and outlined triangles). STATS 0 errors. The arena is therefore
+lines, filled and outlined triangles); the user confirmed the shapes look right on the lenses. STATS 0 errors. The arena is therefore
 one full frame; a larger store needs static RAM reclaimed from stubbed stock
 features rather than the heap.
 
