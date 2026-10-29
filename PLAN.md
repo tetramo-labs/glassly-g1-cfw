@@ -130,24 +130,32 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    of the BLE worker (hook the stubbed refresh handler).
 2. **CFW context in RAM.** Done in G1CFW/9: a magic-guarded context plus a
    4 KB message buffer live in the reclaimed BMP staging RAM at `0x200174e4`
-   (5,120 bytes); stock `0x15`/`0x16`/`0x20` are swallowed.
+   (5,120 bytes); stock `0x15`/`0x16`/`0x20` are swallowed. The stock upload
+   queue is heap-allocated (`k_msgq_alloc_init(201, 30)` at `0x24c6c`), so it
+   is not a static region to reclaim; larger CFW buffers (asset store) should
+   come from the stock heap through `malloc` at `0x7a15c`, the call that
+   allocates the 64 KB frame buffer, taken once at first use like g2flash's
+   lease-scoped allocations.
 3. **Message transport.** Done in G1CFW/9: STREAM packets with sequence
    numbers, CRC-16 per message, one reply per message, batched records
    (fill, blits, flush). Pending: hardware throughput numbers, and a resend
    policy in the host tool when a message is refused.
 4. **Compression and deltas.** PackBits RLE done in G1CFW/9 (test pattern
-   16,000 to 5,077 bytes). Next: zlib inflate once a 30 KB+ region is carved,
-   dirty-rect updates and rect-to-rect copies.
-5. **Text and assets.** A text command on top of the stock `gui_utf_*` drawers
-   and built-in font, then the asset store (images, fonts, strings) and cached
-   draw commands.
-6. **Vector shapes (mode 36)** and the **retained object cache with animation
+   16,000 to 5,077 bytes); rect-to-rect COPY done in G1CFW/11. Dirty-rect
+   updates are already expressible as BLIT records. Next: zlib inflate once a
+   30 KB+ region is carved.
+5. **Text.** Done in G1CFW/10 on the stock font engine (fonts 0-2, left
+   aligned, wrapping, `\n`). Not yet: alignment, grey levels (the stock glyphs
+   are on/off only), uploaded fonts.
+6. **Assets.** The asset store (images, fonts, strings) and cached draw
+   commands, allocated from the stock heap.
+7. **Vector shapes (mode 36)** and the **retained object cache with animation
    (modes 37-41)**: port `shapes.c`/`scene.c` logic against the 4bpp 640x200
    frame.
-7. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
+8. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.
-8. **Phone path.** The Mac only connects while docked (30 s windows). Real use
+9. **Phone path.** The Mac only connects while docked (30 s windows). Real use
    needs a bonded client speaking `0xF0`, or a CFW change to the pairing policy
    now that stock behaviour is disposable.
 

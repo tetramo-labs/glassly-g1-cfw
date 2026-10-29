@@ -427,6 +427,12 @@ temple's first activation attempt missed its scan window after the staging
 disconnect, so the install loop now retries activation. Legibility of the
 glyphs is for the user to confirm by eye.
 
+### Hardware result for G1CFW/11: copy (2026-10-28)
+
+Left temple: `copy --rect 300,10,336,28 --to 300,110` returned ok after the
+text draw, so the text box should now appear twice (at y 10 and y 110);
+STATS 0 errors. Visual confirmation pending.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
