@@ -495,8 +495,9 @@ Composing only the dirty rows (right temple, same scene):
 | 10 ms | 40 | 0.81 s | 49.4 | 0 |
 | 1 ms | 60 | 0.75 s | 79.8 | 0 |
 
-About 12 ms per frame remains at the floor: the SPI push of the dirty rows,
-the driver's 1 ms wait, and the display-thread round trip.
+Left temple: 24.3 fps at 30 ms, 48.7 at 10 ms, 83-87 at 1 ms. About 12 ms per
+frame remains at the floor: the SPI push of the dirty rows, the driver's 1 ms
+wait, and the display-thread round trip.
 
 ## References and remaining work
 
