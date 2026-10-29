@@ -661,6 +661,21 @@ RAM region, `0x20013b84`, 200 x 24 bytes), moves the span, zeroes the
 uncovered strip, pushes the clipped panel span and restores the row. Host
 test covers both signs, an interior dirty rect and frame restoration.
 
+**Worn result (2026-10-29).** With G1CFW/26 on both temples, the pattern at
+height gear 6 and depth gear 7 fused as one image at a greater distance
+with no wrap-around; the outer 12 columns of each lens are cropped, which
+is inherent to the stock depth model (content must stay inside a margin of
+the largest shift used, 22 px per side at the nearest gear).
+
+**Microphone while worn (right temple, 2026-10-29).** `mic record
+--seconds 8` while the user spoke: first packet 0.15 s after start, 79
+packets, 15,800 bytes, no sequence gaps, 7.90 s decoded with no LC3
+errors. The 250 ms loudness envelope shows a start transient (the first
+quarter second is loud, probably the PDM filter settling) followed by
+speech-shaped levels with pauses. Note the panels did not power on when the
+glasses were worn: with the stock refresh pipeline stubbed nothing asks for
+the panel, so a host has to send PANEL force-on (mode 2) before drawing.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
