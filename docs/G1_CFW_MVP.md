@@ -433,6 +433,14 @@ Left temple: `copy --rect 300,10,336,28 --to 300,110` returned ok after the
 text draw, so the text box should now appear twice (at y 10 and y 110);
 STATS 0 errors. The right temple did the same. Visual confirmation pending.
 
+### Hardware result for G1CFW/12: heap arena (2026-10-29)
+
+Both temples booted G1CFW/12 and every asset command returned `no-memory`:
+the stock `malloc` (0x7a15c) refused the 48 KB arena request, and ASSET_INFO
+showed nothing allocated. The heap already holds the 64 KB frame buffer and
+the stock upload queue. G1CFW/14 retries in 8 KB steps down to 8 KB and
+reports the size it obtained.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference).
