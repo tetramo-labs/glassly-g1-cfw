@@ -431,7 +431,7 @@ glyphs is for the user to confirm by eye.
 
 Left temple: `copy --rect 300,10,336,28 --to 300,110` returned ok after the
 text draw, so the text box should now appear twice (at y 10 and y 110);
-STATS 0 errors. Visual confirmation pending.
+STATS 0 errors. The right temple did the same. Visual confirmation pending.
 
 ## References and remaining work
 
