@@ -591,6 +591,17 @@ while the user put the glasses on, looked up, looked down and docked them:
 in-case-open, `0e` case charging, `0f` case battery on docking. All ten
 events were also forwarded to the stock path (counters matched).
 
+**Attitude while worn (right temple, 2026-10-29).** `g1flash.py imu
+--samples 60 --interval 0.5` with the glasses on and the user nodding:
+pitch (third word) swung between -71.9 and +38.0 degrees in time with the
+nods, the first word sat near 93 degrees (about 165 while the glasses lie
+in the case, so it is roll), and the second word drifted at about 2 degrees
+per second whether worn or docked (yaw, gyro-integrated, no magnetometer).
+A recording made while the glasses were still in the case was flat at
+pitch 14.6, which is the docked value; the fusion words only move with the
+sensor. Reading the three words through PEEK costs one round trip per
+sample; 2 Hz was comfortable.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
