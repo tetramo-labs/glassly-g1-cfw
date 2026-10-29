@@ -43,7 +43,7 @@ Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 ## `00` PING
 
 Reply body: `"G1CFW/<n>" 00 <major> <minor> <patch>` where `<n>` is the
-protocol revision (19 for this document) and the version is the stock base
+protocol revision (20 for this document) and the version is the stock base
 (1, 5, 60). `g1flash.py ping` checks this.
 
 ## `01` BLIT: `[flags][rect][pixels]`
@@ -206,6 +206,14 @@ Reply body: `[messages:u16][errors:u16][stock_swallowed:u16][last_status]
 
 Diagnostic: reply body is `len` (at most 16) bytes read from `addr`. Used to
 inspect candidate RAM before reclaiming it.
+
+## Link policy (G1CFW/20 and later)
+
+The stock firmware accepts only the bonded phone's address while out of the
+case and drops any unbonded central 30 s after it connects. G1CFW/20 patches
+both checks out, so any BLE central can connect at any time and stay
+connected. There is no authentication on the private protocol; this is a
+development firmware.
 
 ## Stock commands the CFW swallows
 

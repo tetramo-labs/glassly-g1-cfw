@@ -53,6 +53,17 @@ HOOKS = {
     ],
 }
 BW_TEMPLATE = bytes.fromhex('00f0009000')[:4]  # b.w placeholder; thumb_branch keeps the B.W opcode bits
+# Raw instruction patches (address, old bytes, new bytes, why).
+RAW = {
+    # Open link policy: let any central connect and stay connected while the
+    # glasses are worn. Stock accepts only the bonded phone's address and drops
+    # an unbonded central 30 s after connecting (tools/g1dis.py evidence in
+    # docs/G1_CFW_MVP.md). Both are stock behaviour the CFW does not need.
+    'link': [
+        (0x18c8e, 'c0b1', '18e0', 'ancs_connected: cbz -> b, accept any central address'),
+        (0x2c4be, '2df0cbfc', 'bf00bf00', 'low_speed_peripheral_dispatch_thread: no 30 s unbonded disconnect'),
+    ],
+}
 
 
 def main():
@@ -65,7 +76,7 @@ def main():
     parser.add_argument('--upgrade-from', type=Path, action='append', default=[],
                         help='Older profile whose installed image may be upgraded in place')
     parser.add_argument('--carve', choices=sorted(CARVES), help='Place the blob over this stock function instead of appending')
-    parser.add_argument('--stub', choices=sorted(STUBS), action='append', default=[],
+    parser.add_argument('--stub', choices=sorted(set(STUBS) | set(RAW) | set(HOOKS)), action='append', default=[],
                         help='Also stub this group of stock functions (return 0 immediately)')
     args = parser.parse_args()
     package, pem = args.stock.read_bytes(), args.key.read_bytes()
@@ -101,10 +112,14 @@ def main():
             raise SystemExit('Injected blob does not fit before the MCUboot trailer sector')
     entry_addr = blob_addr + entry['offset']
     for group in args.stub:
-        for addr, why in STUBS[group]:
+        for addr, why in STUBS.get(group, []):
             off = addr - SLOT_BASE
             patches.append({'offset': off, 'old': stock[off:off + 4].hex(), 'new': STUB.hex(),
                             'description': f'stub {addr:#x}: {why}'})
+        for addr, old_hex, new_hex, why in RAW.get(group, []):
+            off = addr - SLOT_BASE
+            assert stock[off:off + len(bytes.fromhex(old_hex))].hex() == old_hex, f'raw patch {addr:#x}'
+            patches.append({'offset': off, 'old': old_hex, 'new': new_hex, 'description': f'raw {addr:#x}: {why}'})
         for addr, fn_name, why in HOOKS.get(group, []):
             fn = next(f for f in funcs if f['name'] == fn_name)
             off = addr - SLOT_BASE
