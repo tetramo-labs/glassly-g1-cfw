@@ -684,6 +684,41 @@ unless INPUT_CONTROL bit 4 hands panel power to the host. The on callback
 is the same one PANEL mode 2 uses, which worked while docked when the
 stock resume path refused.
 
+**Hardware result (2026-10-29).** Wrong mechanism. With both temples on
+/27 and the pattern lit, the user took the glasses off for five seconds and
+the lenses stayed on. The right temple's counters explained it: 4 events
+since the install reboot with `11` (bind check) last and no `7`, while the
+work-mode byte at state+1 read 3 (normal standby) and the wear state byte
+(1.5.60 `0x20003034`, 1.6.3 `DAT_20003050`) read `0xff`. `check_work_mode`
+resets that state machine whenever no central is connected (its third
+argument is the link flag; the reset path is `param_3 == 0`), and only posts
+`11` then the wear code on the first two passes after a connection. Stock
+gets away with it because the phone is always connected; the CFW host was
+not. The wear events are therefore a connected-only signal.
+
+### G1CFW/28: panel follows the work mode (2026-10-29)
+
+Trace (1.5.60): `check_work_mode` (`0x28fa4`) runs every pass of the
+200 ms low-speed thread and classifies the wear sensor word (1.6.3
+`DAT_20006bc8`): at or above `0x33` worn, below `0x28` not worn, with a
+debounce of 3 passes (no stock page), 10 or 60 (page up). It then calls
+`change_work_mode` (1.5.60 `0x16ee0`, 1.6.3 `0x169c0`) with 3 (normal
+standby) or 2 (normal run, when a stock page is showing) while worn, 4
+(normal low power) when taken off out of the case, 5/6 when charging in
+the case; `try_enter_low_power_mode` adds 8 (deep sleep after five minutes
+with the lid closed and no charger) and 9 (waking). None of this depends on
+a connection. `change_work_mode` itself only stores the byte at state+1 and
+reprograms the IMU, so the CFW detours its entry: the first four bytes
+(`push {r4, r5, r6, lr}; mov r4, r0`) become `b.w cfw_work_mode_entry`, a
+naked blob function that repeats them, calls `cfw_work_mode(mode)` and
+jumps back to `0x16ee4`. `cfw_work_mode` counts the change, records the
+mode for INPUT_STATE and switches the panel: on (callback, then a
+whole-frame push so the surviving frame buffer reappears on the blank
+panel) for 2 and 3, off for 4, 5, 6 and 8, nothing for 0, 1, 7 and 9. The
+stock-event path from /27 stays as a second, connected-only source; both
+check the powered flag first, so they never fight. Host test: the detour is
+`#ifdef __thumb__`, `cfw_work_mode` is called directly.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

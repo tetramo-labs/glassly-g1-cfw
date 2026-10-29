@@ -293,14 +293,23 @@ the glasses sense:
   unknown bit is `bad-record`.
 - `31` INPUT_STATE: reply `[flags][last_gesture][gestures:u16]
   [gestures_passed:u16][last_event][events:u16][events_sent:u16]
-  [panel_autos]`.
+  [panel_autos][work_mode][last_mode][mode_changes:u16]` (the last four
+  since G1CFW/28: the stock work mode now, the last mode asked of
+  `change_work_mode`, and how many times it was entered).
 
-**Panel follows wear (G1CFW/27).** With the stock refresh pipeline stubbed
-nothing asks for the panel when the glasses are put on, so unless bit 4 is
-set the CFW switches it from the wear events: on at `worn` (6) through the
-panel's own callback, off at `taken off` (7), `in case open` (8) and `case
-closed` (`0b`). The frame buffer persists across the switch, so the last
-scene reappears. PANEL (`05`) still works for manual control.
+**Panel follows wear (G1CFW/27, reworked in /28).** With the stock refresh
+pipeline stubbed nothing asks for the panel when the glasses are put on, so
+unless bit 4 is set the CFW switches it: on through the panel's own
+callback followed by a push of the whole frame buffer (the panel comes up
+blank, the buffer survives), off through the off callback. Two sources
+feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
+and `case closed` (`0b`) only flow while a central is connected (the stock
+wear state machine resets when nothing is). The stock work-mode switch
+(`change_work_mode`, detoured at its entry) runs whether or not one is:
+modes 2 `normal-run` and 3 `normal-standby` mean worn and switch on, 4
+`normal-low-power` (taken off), 5 and 6 (charging in the case) and 8 (deep
+sleep) switch off; 0, 1, 7 and 9 are left alone. PANEL (`05`) still works
+for manual control.
 - `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
   gesture, class 1 stock event, from the temple that produced it. The host
   tool (`g1flash.py touch watch`) sets bits 0 and 2, prints events for a

@@ -141,6 +141,8 @@ IMU_ATTITUDE_ADDR = 0x20007c40  # three int32 words, hundredths of a degree (1.5
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
 STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 9: 'charging',
                 10: 'battery', 0x0b: 'in-case-closed', 0x0e: 'case-charging', 0x0f: 'case-battery', 0x11: 'bind-finished'}
+WORK_MODES = {0: 'boot', 1: 'link-setup', 2: 'normal-run', 3: 'normal-standby', 4: 'normal-low-power',
+              5: 'charging-run', 6: 'charging-low-power', 7: 'ship', 8: 'deep-sleep', 9: 'waking'}
 EVENT_CLASSES = {0: ('touch', TOUCH_CODES), 1: ('stock', STOCK_EVENTS)}
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
@@ -472,7 +474,10 @@ async def run_cfw_command(client, args, checkpoint):
                         'gestures_passed': struct.unpack_from('<H', body, 4)[0],
                         'auto_panel': not body[0] & 0x10,
                         'last_event': STOCK_EVENTS.get(body[6], body[6]), 'events': struct.unpack_from('<H', body, 7)[0],
-                        'events_sent': struct.unpack_from('<H', body, 9)[0], 'panel_autos': body[11] if len(body) > 11 else None}
+                        'events_sent': struct.unpack_from('<H', body, 9)[0], 'panel_autos': body[11] if len(body) > 11 else None,
+                        'work_mode': WORK_MODES.get(body[12], body[12]) if len(body) > 15 else None,
+                        'last_mode_request': WORK_MODES.get(body[13], body[13]) if len(body) > 15 else None,
+                        'mode_changes': struct.unpack_from('<H', body, 14)[0] if len(body) > 15 else None}
             if args.action == 'state':
                 result = input_state(await link.check(CFW_INPUT_STATE))
             elif args.action == 'control':

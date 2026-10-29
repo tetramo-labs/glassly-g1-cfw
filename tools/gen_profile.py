@@ -53,6 +53,7 @@ HOOKS = {
     ],    'input': [
         (0x2ba48, 'cfw_touch_event', 'touch_key_thread signal helper: every gesture code passes through the CFW'),
         (0x28f38, 'cfw_stock_event', 'stock event poster: head, wear, case and key events pass through the CFW'),
+        (0x16ee0, 'cfw_work_mode_entry', 'change_work_mode entry detour: every work-mode change passes through the CFW (panel follows wear without a central)'),
     ],
 }
 BW_TEMPLATE = bytes.fromhex('00f0009000')[:4]  # b.w placeholder; thumb_branch keeps the B.W opcode bits

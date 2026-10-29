@@ -215,6 +215,21 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #define FW_ENQUEUE_BT_DATA ((fw_enqueue_fn)0x000184d9)
 #endif
 
+/* Work-mode switch (1.5.60 0x16ee0; 1.6.3 change_work_mode at 0x169c0),
+ * r0 = new mode: 0 boot, 1 link setup, 2 normal run (worn, stock page up),
+ * 3 normal standby (worn, no page), 4 normal low power (taken off), 5
+ * charging run and 6 charging low power (in the case), 7 ship mode, 8 deep
+ * sleep (lid closed, no charger, five minutes), 9 waking from 8. The
+ * 200 ms low-speed thread (check_work_mode, 0x28fa4) drives 2..6 from the
+ * wear sensor whether or not a central is connected; its event poster is
+ * only fed while one is. The profile replaces the entry's first four bytes
+ * (push {r4, r5, r6, lr}; mov r4, r0) with a branch to cfw_work_mode_entry,
+ * which repeats them and resumes at 0x16ee4. The current mode is the byte
+ * at state+1. */
+#define FW_STATE_WORK_MODE 0x1
+#define FW_CHANGE_WORK_MODE_RESUME_LO 0x6ee5
+#define FW_CHANGE_WORK_MODE_RESUME_HI 0x0001
+
 /* IMU attitude (1.5.60): three int32 words in hundredths of a degree kept by
  * imu_fusion_thread on the master temple (1.6.3 DAT_20008484/88/8c). The
  * third is the pitch the head-up detector compares; the first behaves as

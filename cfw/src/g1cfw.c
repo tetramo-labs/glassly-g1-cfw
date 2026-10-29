@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 27u
+#define CFW_PROTOCOL 28u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1440,8 +1440,11 @@ typedef struct {
     uint8_t  panel_autos;   /* panel switches made on wear events */
     uint16_t events;        /* stock events seen since boot */
     uint16_t events_sent;   /* stock events forwarded to the stock path */
+    uint8_t  last_mode;     /* last work mode asked of change_work_mode */
+    uint8_t  reserved;
+    uint16_t mode_changes;  /* change_work_mode entries seen since boot */
 } cfw_input;
-#define CFW_INPUT_MAGIC 0x33504e49u  /* "INP3" */
+#define CFW_INPUT_MAGIC 0x34504e49u  /* "INP4" */
 #define CFW_INPUT_NOTIFY        0x01u
 #define CFW_INPUT_SWALLOW       0x02u
 #define CFW_INPUT_NOTIFY_EVENT  0x04u
@@ -1452,18 +1455,21 @@ enum { CFW_EVENT_TOUCH = 0, CFW_EVENT_STOCK = 1 };
 enum { CFW_STOCK_WORN = 6, CFW_STOCK_TAKEN_OFF = 7, CFW_STOCK_IN_CASE_OPEN = 8, CFW_STOCK_IN_CASE_CLOSED = 0x0b };
 
 /* With the stock refresh pipeline stubbed nothing asks for the panel when
- * the glasses are put on, so the CFW does it from the wear events: on
- * through the panel's own callback (the stock resume path refuses while
- * docked), off again when taken off or cased. The frame buffer persists,
- * so the host's last scene reappears. */
-static void cfw_auto_panel(cfw_input *in, uint32_t code)
+ * the glasses are put on, so the CFW switches it: on through the panel's
+ * own callback (the stock resume path refuses while docked) followed by a
+ * push of the frame buffer, which survives the power cycle while the panel
+ * comes up blank; off again when taken off or cased. Fed by the stock
+ * events while a central is connected and by every work-mode change. */
+static void cfw_auto_panel(cfw_input *in, int on)
 {
     uint8_t *panel = cfw_panel();
     int powered = *(int *)(panel + FW_PANEL_POWERED) != 0;
-    if (code == CFW_STOCK_WORN && !powered) {
+    if (on && !powered) {
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
         in->panel_autos++;
-    } else if ((code == CFW_STOCK_TAKEN_OFF || code == CFW_STOCK_IN_CASE_OPEN || code == CFW_STOCK_IN_CASE_CLOSED) && powered) {
+        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+        cfw_flush(panel, &all);
+    } else if (!on && powered) {
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_OFF)(panel);
         in->panel_autos++;
     }
@@ -1511,7 +1517,11 @@ int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
     in->events++;
     in->last_event = (uint8_t)code;
     if (!(in->flags & CFW_INPUT_NO_AUTO_PANEL)) {
-        cfw_auto_panel(in, code);
+        if (code == CFW_STOCK_WORN) {
+            cfw_auto_panel(in, 1);
+        } else if (code == CFW_STOCK_TAKEN_OFF || code == CFW_STOCK_IN_CASE_OPEN || code == CFW_STOCK_IN_CASE_CLOSED) {
+            cfw_auto_panel(in, 0);
+        }
     }
     if (in->flags & CFW_INPUT_NOTIFY_EVENT) {
         uint8_t body[4] = { CFW_EVENT_STOCK, (uint8_t)code, (uint8_t)in->events, (uint8_t)(in->events >> 8) };
@@ -1549,16 +1559,62 @@ static void cfw_input_control(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_INPUT_CONTROL, CFW_OK, &in->flags, 1);
 }
 
-/* Reply body: [flags][last_code][count:u16][stock_passed:u16][last_event][events:u16][events_sent:u16][panel_autos]. */
+/* Reply body: [flags][last_code][count:u16][stock_passed:u16][last_event][events:u16][events_sent:u16]
+ * [panel_autos][work_mode][last_mode][mode_changes:u16]. */
 static void cfw_input_report(void)
 {
     cfw_input *in = cfw_input_state();
-    uint8_t body[12] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
+    uint8_t *state = FW_GET_STATE();
+    uint8_t body[16] = { in->flags, in->last_code, (uint8_t)in->count, (uint8_t)(in->count >> 8),
                          (uint8_t)in->stock_passed, (uint8_t)(in->stock_passed >> 8), in->last_event,
                          (uint8_t)in->events, (uint8_t)(in->events >> 8),
-                         (uint8_t)in->events_sent, (uint8_t)(in->events_sent >> 8), in->panel_autos };
+                         (uint8_t)in->events_sent, (uint8_t)(in->events_sent >> 8), in->panel_autos,
+                         state[FW_STATE_WORK_MODE], in->last_mode,
+                         (uint8_t)in->mode_changes, (uint8_t)(in->mode_changes >> 8) };
     cfw_reply(CFW_INPUT_STATE, CFW_OK, body, sizeof body);
 }
+
+/* Runs at the entry of the stock change_work_mode (fw_abi.h) with the
+ * requested mode, on whichever thread asked for the change. The work mode
+ * follows the wear sensor whether or not a central is connected, while the
+ * event poster above is only fed while one is, so this is what keeps the
+ * panel in step with wearing: on for 2 (normal run) and 3 (normal standby,
+ * worn without a stock page), off for 4 (taken off), 5 and 6 (in the case)
+ * and 8 (deep sleep). 0, 1, 7 and 9 are left to the stock body. */
+int cfw_work_mode(uint32_t mode)
+{
+    cfw_input *in = cfw_input_state();
+    in->mode_changes++;
+    in->last_mode = (uint8_t)mode;
+    if (in->flags & CFW_INPUT_NO_AUTO_PANEL) {
+        return 0;
+    }
+    if (mode == 2 || mode == 3) {
+        cfw_auto_panel(in, 1);
+    } else if ((mode >= 4 && mode <= 6) || mode == 8) {
+        cfw_auto_panel(in, 0);
+    }
+    return 0;
+}
+
+#ifdef __thumb__
+/* Detour target for the first four bytes of change_work_mode: repeats the
+ * two displaced instructions, calls cfw_work_mode with the mode still in
+ * r0 (r4 keeps it for the stock body), and resumes at the third. */
+#define CFW_STR_(x) #x
+#define CFW_STR(x) CFW_STR_(x)
+__attribute__((naked)) void cfw_work_mode_entry(void)
+{
+    __asm__ volatile(
+        "push {r4, r5, r6, lr}\n\t"
+        "mov r4, r0\n\t"
+        "bl cfw_work_mode\n\t"
+        "mov r0, r4\n\t"
+        "movw r12, #" CFW_STR(FW_CHANGE_WORK_MODE_RESUME_LO) "\n\t"
+        "movt r12, #" CFW_STR(FW_CHANGE_WORK_MODE_RESUME_HI) "\n\t"
+        "bx r12\n\t");
+}
+#endif
 
 static cfw_view *cfw_view_state(void)
 {
