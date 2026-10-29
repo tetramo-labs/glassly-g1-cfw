@@ -132,6 +132,7 @@ CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY
 CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS, CFW_PEEK = 8, 9, 10, 11, 12, 13, 0x10, 0x11, 0x12
 CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM, CFW_ANIM_STATE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
 CFW_INPUT_CONTROL, CFW_INPUT_STATE, CFW_INPUT_EVENT = 0x30, 0x31, 0x32
+IMU_ATTITUDE_ADDR = 0x20007c40  # three int32 words, hundredths of a degree (1.5.60; 1.6.3 DAT_20008484/88/8c)
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
 STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 9: 'charging',
                 10: 'battery', 0x0b: 'in-case-closed', 0x0e: 'case-charging', 0x0f: 'case-battery', 0x11: 'bind-finished'}
@@ -487,6 +488,20 @@ async def run_cfw_command(client, args, checkpoint):
                 if not args.keep:
                     await link.check(CFW_INPUT_CONTROL, bytes([0]))
                 result = {'events': events, 'seconds': args.seconds, 'kept_flags': args.keep}
+        elif args.command == 'imu':
+            # Attitude words kept by the IMU fusion thread on the master (right) temple,
+            # in hundredths of a degree; the third is the pitch the head-up detector uses.
+            samples = []
+            for i in range(args.samples):
+                if i:
+                    await asyncio.sleep(args.interval)
+                body = await link.check(CFW_PEEK, struct.pack('<IB', IMU_ATTITUDE_ADDR, 12))
+                a, b, pitch = struct.unpack('<iii', body)
+                sample = {'t': round(i * args.interval, 2), 'word0': a / 100, 'word1': b / 100, 'pitch': pitch / 100}
+                samples.append(sample)
+                if args.samples > 1:
+                    print(json.dumps(sample), file=sys.stderr, flush=True)
+            result = {'address': hex(IMU_ATTITUDE_ADDR), 'samples': samples}
         elif args.command == 'stats':
             body = await link.check(CFW_STATS)
             result = {'messages': struct.unpack_from('<H', body, 0)[0], 'errors': struct.unpack_from('<H', body, 2)[0],
@@ -597,7 +612,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -664,7 +679,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -746,6 +761,9 @@ def arguments(argv=None):
             child.add_argument('--notify-events', action='store_true', help='control: send INPUT_EVENT for each stock event (head, wear, case)')
             child.add_argument('--swallow-events', action='store_true', help='keep stock events from the phone path while set')
             child.add_argument('--keep', action='store_true', help='watch: leave notify/swallow set after returning')
+        if command == 'imu':
+            child.add_argument('--samples', type=int, default=1, help='attitude samples to read (right temple holds the IMU)')
+            child.add_argument('--interval', type=float, default=0.5, help='seconds between samples')
         if command == 'peek':
             child.add_argument('--addr', type=lambda v: int(v, 0), required=True)
             child.add_argument('--len', type=int, default=64, help='bytes to read (16 per request)')
@@ -765,6 +783,8 @@ def arguments(argv=None):
         parser.error('--chunk-bytes must be between 1 and 480')
     if getattr(args, 'rle', False):
         args.stream = True
+    if getattr(args, 'command', None) == 'imu' and not 1 <= args.samples * max(args.interval, 0.2) <= 75:
+        parser.error('imu sampling must take between 1 and 75 s')
     if getattr(args, 'command', None) == 'touch' and not 1 <= args.seconds <= 75:
         parser.error('--seconds must be between 1 and 75 (the Bluetooth worker deadline is 90 s)')
     return parser, args

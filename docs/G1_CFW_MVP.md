@@ -575,9 +575,14 @@ and `0f` case battery. With the user holding the glasses out of the case
 and then wearing them: `11`, 6 worn, `0a`, 9, then on docking 8, `0e`,
 `0f`. Counters persisted across watches (events 17, all forwarded to the
 stock path). No head-up/down event was produced during a short look up and
-down; the stock detector needs a sustained pitch past its thresholds in an
-eligible screen state, so that test is still open. The IMU attitude words
-read zero while docked.
+down on the **left** watch. The right temple explained it: its counters
+showed 5 events with `head-down` last, and its attitude words were live
+(`0x20007c40..0x4c` = 166.23, 329.06, 13.25 degrees while docked). The IMU
+fusion thread runs on the master temple only (`update_imu_mode` returns
+unless `__is_master()`), and on this pair that is the right temple, so head
+events and attitude come from the right side while touch gestures come from
+whichever temple was tapped. `g1flash.py imu --samples N` reads the three
+words; the third is the pitch the head-up detector compares.
 
 ## References and remaining work
 
