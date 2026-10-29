@@ -245,6 +245,8 @@ must reboot). Reply body `[recording][starts:u16][stops:u16][last_rc]`;
 status `no-memory` when the stock msgq refused the request.
 `g1flash.py mic record --seconds N --out file.lc3` starts, captures, stops
 and writes the raw concatenated chunks.
+`tools/lc3_decode.py file.lc3` turns the capture into a WAV through liblc3
+(`brew install liblc3`), assuming 10 ms frames of 40 bytes at 16 kHz.
 
 ## Input events (`30`-`32`, G1CFW/21 and later)
 
