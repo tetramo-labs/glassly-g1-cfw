@@ -157,8 +157,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    (G1CFW/16: PUT/SHOW/HIDE/STATE/CONTROL, 96 descriptors in reclaimed RAM at
    `0x2001bf24`) and **animation** (G1CFW/17: eased glides stepped on the
    display thread via the hooked refresh handler, `k_msleep` and the stock
-   refresh post) are in. Not yet: per-frame dirty rects instead of full-frame
-   pushes, tween of size/level, journal deltas, request-id replay protection.
+   refresh post) are in, with dirty-row composition and dirty-rect pushes
+   (G1CFW/19: 49 fps at a 10 ms period, 83+ at 1 ms). The agreed target is
+   30 fps, so the default period is 20 ms. Not yet: tween of size/level,
+   journal deltas, request-id replay protection.
 8. **Inputs and sensors in scope:** touchpad gestures, head-up/IMU events, wear
    detection, buzzer, compass, microphone streaming and control, wakeword and
    screen-wake takeover. Each needs its own trace through the 1.5.60 binary.

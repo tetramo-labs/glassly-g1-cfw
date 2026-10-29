@@ -675,7 +675,7 @@ def arguments(argv=None):
         if command == 'obj':
             child.add_argument('action', choices=('put', 'show', 'hide', 'state', 'drop', 'anim'))
             child.add_argument('--move', action='append', default=[], help='anim: id:tx,ty:frames[:easing] (0 linear, 1 smooth, 2 out, 3 in)')
-            child.add_argument('--period', type=int, default=50, help='anim: ms per frame (10-250; 0 keeps current)')
+            child.add_argument('--period', type=int, default=20, help='anim: ms per frame (1-250; 0 keeps current). 20 gives about 30 fps')
             child.add_argument('--wait', action='store_true', help='anim: wait for the glides to finish and report frames per second')
             child.add_argument('--id', type=int, default=None)
             child.add_argument('--version', type=int, default=1)

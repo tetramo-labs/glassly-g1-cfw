@@ -1243,7 +1243,7 @@ static cfw_anims *cfw_animation(void)
             p[i] = 0;
         }
         a->magic = CFW_ANIM_MAGIC;
-        a->period_ms = 50;
+        a->period_ms = 20;   /* about 30 fps with the 12 ms per-frame floor */
     }
     return a;
 }
