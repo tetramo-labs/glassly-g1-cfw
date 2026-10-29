@@ -954,6 +954,9 @@ def main(argv=None):
             # A native CoreBluetooth permission prompt can block the Python event
             # loop. Enforce the deadline in a parent process, not just asyncio.
             limit = 1800 if args.command == 'stage' else 90
+            if args.command == 'peek' and args.samples > 1:
+                # Each sample is a round trip per address range on top of the pause.
+                limit = max(limit, 60 + args.samples * (args.interval + 0.5 * len(args.addr)))
             result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--_worker', *argv],
                                     timeout=limit, check=False)
             return result.returncode
