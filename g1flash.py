@@ -132,6 +132,8 @@ CFW_PING, CFW_BLIT, CFW_FILL, CFW_FLUSH, CFW_INFO, CFW_PANEL, CFW_TEXT, CFW_COPY
 CFW_ASSET_PUT, CFW_ASSET_DRAW, CFW_ASSET_TEXT, CFW_ASSET_CLEAR, CFW_ASSET_INFO, CFW_SHAPES, CFW_STREAM, CFW_STATS, CFW_PEEK = 8, 9, 10, 11, 12, 13, 0x10, 0x11, 0x12
 CFW_OBJ_PUT, CFW_OBJ_SHOW, CFW_OBJ_HIDE, CFW_OBJ_STATE, CFW_OBJ_CONTROL, CFW_OBJ_ANIM, CFW_ANIM_STATE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26
 CFW_INPUT_CONTROL, CFW_INPUT_STATE, CFW_INPUT_EVENT = 0x30, 0x31, 0x32
+CFW_VIEW, CFW_IMU_CONTROL, CFW_IMU_SAMPLE = 0x14, 0x33, 0x34
+DEPTH_SHIFT = {1: 22, 2: 8, 3: 0, 4: -4, 5: -8, 6: -10, 7: -12, 8: -14, 9: -16}  # stock cal_panel_canvas_coord, non-master sign
 IMU_ATTITUDE_ADDR = 0x20007c40  # three int32 words, hundredths of a degree (1.5.60; 1.6.3 DAT_20008484/88/8c)
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
 STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 9: 'charging',
@@ -488,6 +490,52 @@ async def run_cfw_command(client, args, checkpoint):
                 if not args.keep:
                     await link.check(CFW_INPUT_CONTROL, bytes([0]))
                 result = {'events': events, 'seconds': args.seconds, 'kept_flags': args.keep}
+        elif args.command == 'view':
+            def view_state(body):
+                dx, dy, col, row = struct.unpack_from('<hhhh', body, 0)
+                return {'dx': dx, 'dy': dy, 'stock_col': col, 'stock_row': row, 'effective_col': col + dx,
+                        'effective_row': row + dy, 'height_gear': body[8], 'depth_gear': body[9]}
+            current = view_state(await link.check(CFW_VIEW, bytes([1])))
+            if args.height is None and args.depth is None and args.dx is None and args.dy is None:
+                result = current
+            else:
+                dx, dy = current['dx'], current['dy']
+                if args.dx is not None:
+                    dx = args.dx
+                if args.dy is not None:
+                    dy = args.dy
+                if args.height is not None:
+                    dy = (8 - args.height) * 35 - current['stock_row']
+                if args.depth is not None:
+                    # The master (right) temple shifts the opposite way, as the stock UI does.
+                    dx = DEPTH_SHIFT[args.depth] * (-1 if args.side == 'R' else 1)
+                op = 0 | (0 if args.no_flush else 2)
+                body = await link.check(CFW_VIEW, bytes([op]) + struct.pack('<hh', dx, dy))
+                result = view_state(body)
+                result['flushed'] = not args.no_flush
+        elif args.command == 'imu' and args.stream:
+            period = args.period_ms
+            body = await link.check(CFW_IMU_CONTROL, bytes([period]) + struct.pack('<H', args.samples))
+            samples, started = [], asyncio.get_running_loop().time()
+            deadline = started + args.samples * period / 1000 + 5
+            while len(samples) < args.samples:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    reply = await asyncio.wait_for(link.replies.get(), remaining)
+                except asyncio.TimeoutError:
+                    break
+                if len(reply) >= 17 and reply[1] == CFW_IMU_SAMPLE:
+                    seq, a, b, pitch = struct.unpack_from('<Hiii', reply, 3)
+                    sample = {'t': round(asyncio.get_running_loop().time() - started, 3), 'seq': seq,
+                              'word0': a / 100, 'word1': b / 100, 'pitch': pitch / 100}
+                    samples.append(sample)
+                    print(json.dumps(sample), file=sys.stderr, flush=True)
+            elapsed = asyncio.get_running_loop().time() - started
+            await link.check(CFW_IMU_CONTROL, bytes([period, 0, 0]))
+            result = {'period_ms': period, 'requested': args.samples, 'received': len(samples), 'seconds': round(elapsed, 2),
+                      'rate_hz': round(len(samples) / elapsed, 1) if elapsed else None, 'samples': samples}
         elif args.command == 'imu':
             # Attitude words kept by the IMU fusion thread on the master (right) temple,
             # in hundredths of a degree; the third is the pitch the head-up detector uses.
@@ -612,7 +660,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -679,7 +727,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -764,6 +812,14 @@ def arguments(argv=None):
         if command == 'imu':
             child.add_argument('--samples', type=int, default=1, help='attitude samples to read (right temple holds the IMU)')
             child.add_argument('--interval', type=float, default=0.5, help='seconds between samples')
+            child.add_argument('--stream', action='store_true', help='have the glasses push samples (G1CFW/23+) instead of polling PEEK')
+            child.add_argument('--period-ms', type=int, default=50, help='stream: ms between samples (10-250)')
+        if command == 'view':
+            child.add_argument('--height', type=int, choices=range(0, 9), help='stock height gear 0-8 (row origin (8-gear)*35)')
+            child.add_argument('--depth', type=int, choices=range(1, 10), help='stock depth gear 1-9 (opposite column shift per temple)')
+            child.add_argument('--dx', type=int, help='column offset added to the stock origin')
+            child.add_argument('--dy', type=int, help='row offset added to the stock origin')
+            child.add_argument('--no-flush', action='store_true', help='set the offsets without pushing the frame')
         if command == 'peek':
             child.add_argument('--addr', type=lambda v: int(v, 0), required=True)
             child.add_argument('--len', type=int, default=64, help='bytes to read (16 per request)')
@@ -783,8 +839,11 @@ def arguments(argv=None):
         parser.error('--chunk-bytes must be between 1 and 480')
     if getattr(args, 'rle', False):
         args.stream = True
-    if getattr(args, 'command', None) == 'imu' and not 1 <= args.samples * max(args.interval, 0.2) <= 75:
-        parser.error('imu sampling must take between 1 and 75 s')
+    if getattr(args, 'command', None) == 'imu':
+        if args.stream and not (10 <= args.period_ms <= 250 and 1 <= args.samples <= 65534 and args.samples * args.period_ms <= 75000):
+            parser.error('imu --stream needs a 10-250 ms period and at most 75 s of samples')
+        if not args.stream and not 1 <= args.samples * max(args.interval, 0.2) <= 75:
+            parser.error('imu sampling must take between 1 and 75 s')
     if getattr(args, 'command', None) == 'touch' and not 1 <= args.seconds <= 75:
         parser.error('--seconds must be between 1 and 75 (the Bluetooth worker deadline is 90 s)')
     return parser, args

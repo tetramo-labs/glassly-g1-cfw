@@ -207,6 +207,32 @@ Reply body: `[messages:u16][errors:u16][stock_swallowed:u16][last_status]
 Diagnostic: reply body is `len` (at most 16) bytes read from `addr`. Used to
 inspect candidate RAM before reclaiming it.
 
+## `14` VIEW: `[op][dx:i16][dy:i16]` (G1CFW/23 and later)
+
+Where the 640x200 frame lands on the panel. The stock UI turns the phone's
+height gear into the panel row origin ((8 - gear) * 35 rows; both temples
+boot at 210, gear 2) and the depth gear into an opposite horizontal shift of
+the two lenses' content (gears 1..9 shift 22, 8, 0, -4, -8, -10, -12, -14,
+-16 columns, negated on the master temple). The CFW keeps the stock origins
+and adds an offset at every push. `op` bit 0 = query only; bit 1 = push the
+whole frame after setting. Offsets are limited to +/-320 columns and
++/-480 rows. Reply body `[dx:i16][dy:i16][stock_col:i16][stock_row:i16]
+[height_gear][depth_gear]`. `g1flash.py view --height H --depth D` maps the
+stock gears onto the offset per temple; `--dx/--dy` set it directly.
+
+## IMU streaming (`33`-`34`, G1CFW/23 and later)
+
+The IMU fusion thread runs on the master (right) temple and keeps three
+attitude words (hundredths of a degree: roll-like, drifting yaw, pitch).
+
+- `33` IMU_CONTROL `[period_ms][count:u16]`: stream `count` samples (`ffff`
+  = until stopped, 0 = stop) every `period_ms` (10-250). Samples are sent
+  from the display-thread tick that also drives animation; while a glide
+  runs, its period sets the pace. Reply `[active][period_ms][remaining:u16]
+  [sent:u32]`.
+- `34` IMU_SAMPLE: unsolicited `F0 34 00 [seq:u16][word0:i32][word1:i32]
+  [pitch:i32]`.
+
 ## Input events (`30`-`32`, G1CFW/21 and later)
 
 Two stock paths are redirected into the CFW so the host can observe what

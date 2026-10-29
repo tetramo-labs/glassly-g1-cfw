@@ -602,6 +602,18 @@ pitch 14.6, which is the docked value; the fusion words only move with the
 sensor. Reading the three words through PEEK costs one round trip per
 sample; 2 Hz was comfortable.
 
+### G1CFW/23: view offsets and streamed IMU samples (2026-10-29)
+
+No new hooks. VIEW (`0x14`) adds an offset to the stock panel origins in
+`cfw_flush`; the stock mapping of the phone's height/depth gears was read
+from `cal_panel_canvas_coord` (1.5.60 `0x45678`): row origin
+`(8 - height_gear) * 35`, column shift table for depth gears 1..9 of 22, 8,
+0, -4, -8, -10, -12, -14, -16, negated on the master. The gears live at
+panel+0x354/+0x355 and INFO showed both temples at row 210 / col 0 (gear 2).
+IMU streaming reuses the animation tick: IMU_CONTROL posts the CFW refresh
+message if the tick is idle, and each tick sends one IMU_SAMPLE from the
+attitude words at `0x20007c40`, sleeps the period and re-posts.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

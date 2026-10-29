@@ -44,6 +44,8 @@ typedef uint8_t *(*fw_get_state_fn)(void);
 #define FW_PANEL_COL_OFFSET  0x348   /* int: panel column origin */
 #define FW_PANEL_ROW_OFFSET  0x34c   /* int: panel row origin */
 #define FW_PANEL_POWERED     0x35c   /* int: non-zero while the panel accepts writes */
+#define FW_PANEL_HEIGHT_GEAR 0x354   /* uint8_t raster_height_gear 0-8: row origin = (8 - gear) * 35 */
+#define FW_PANEL_DEPTH_GEAR  0x355   /* uint8_t canvas_distance_gear 1-9 (cal_panel_canvas_coord) */
 #define FW_FRAME_WIDTH       640
 #define FW_FRAME_HEIGHT      200
 #define FW_FRAME_STRIDE      320
@@ -202,4 +204,12 @@ typedef void (*fw_sem_give_fn)(void *sem);
 typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #ifndef FW_ENQUEUE_BT_DATA
 #define FW_ENQUEUE_BT_DATA ((fw_enqueue_fn)0x000184d9)
+#endif
+
+/* IMU attitude (1.5.60): three int32 words in hundredths of a degree kept by
+ * imu_fusion_thread on the master temple (1.6.3 DAT_20008484/88/8c). The
+ * third is the pitch the head-up detector compares; the first behaves as
+ * roll and the second as a drifting yaw. Zero on the non-master temple. */
+#ifndef FW_IMU_ATTITUDE
+#define FW_IMU_ATTITUDE ((volatile int32_t *)0x20007c40u)
 #endif

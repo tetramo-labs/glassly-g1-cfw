@@ -46,6 +46,8 @@ static uint8_t host_event_pending = 0xFF; static int host_enqueues; static uint8
 static int host_enqueue(const void *data, uint32_t len);
 #define FW_EVENT_PENDING (&host_event_pending)
 #define FW_ENQUEUE_BT_DATA host_enqueue
+static int32_t host_imu[3];
+#define FW_IMU_ATTITUDE host_imu
 static uint8_t host_arena[48 * 1024 + 64];
 #define FW_ADDR_OF(ptr) ((uint32_t)((uint8_t *)(ptr) - host_arena))
 #define FW_PTR_OF(addr) (host_arena + (addr))
@@ -164,7 +166,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/22", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/23", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -575,6 +577,61 @@ int main(void)
     CHECK(last_reply[3] == 1 && last_reply[4] == 7 && host_enqueues == 2 && host_sem_gives == 1);
     CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[3] == 0x0C && last_reply[9] == 7 && last_reply[10] == 5 && last_reply[12] == 3);
     CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK);
+
+    /* View offsets: added to the stock origins at flush time. */
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_COL_OFFSET) = 0;
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_ROW_OFFSET) = 210;
+    state[FW_PANEL_OFFSET + FW_PANEL_HEIGHT_GEAR] = 2;
+    state[FW_PANEL_OFFSET + FW_PANEL_DEPTH_GEAR] = 3;
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
+    uint8_t view_get[] = { 0xF0, 0x14, 0x01 };
+    CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[2] == CFW_OK && last_reply_len == 13);
+    CHECK(last_reply[3] == 0 && last_reply[5] == 0 && last_reply[7] == 0 && last_reply[9] == 210 && last_reply[11] == 2 && last_reply[12] == 3);
+    reflash_calls = 0;
+    uint8_t view_set[] = { 0xF0, 0x14, 0x02, 0xF8, 0xFF, 0x23, 0x00 };   /* dx -8, dy +35, push */
+    CHECK(send_packet(view_set, sizeof view_set) == 0 && last_reply[2] == CFW_OK);
+    CHECK(reflash_calls == 1 && last_rect[0] == -8 && last_rect[1] == 245 && last_rect[4] == 640 && last_rect[5] == 199);
+    CHECK(last_reply[3] == 0xF8 && last_reply[4] == 0xFF && last_reply[5] == 0x23 && last_reply[9] == 210);
+    uint8_t view_far[] = { 0xF0, 0x14, 0x00, 0x00, 0x00, 0xE8, 0x03 };   /* dy 1000: out of range, no change */
+    CHECK(send_packet(view_far, sizeof view_far) == 0 && last_reply[2] == CFW_BAD_RECT);
+    CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[3] == 0xF8 && last_reply[5] == 0x23);
+    uint8_t view_short[] = { 0xF0, 0x14, 0x00, 0x01 };
+    CHECK(send_packet(view_short, sizeof view_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    uint8_t view_zero[] = { 0xF0, 0x14, 0x00, 0, 0, 0, 0 };
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
+    uint8_t flush_all[] = { 0xF0, 0x03, 0, 0, 0, 0, 0x80, 0x02, 0xC8, 0x00 };
+    CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK && last_rect[0] == 0 && last_rect[1] == 210);
+
+    /* IMU streaming rides the display-thread tick. */
+    host_imu[0] = 16623; host_imu[1] = -32906; host_imu[2] = 1325;
+    post_calls = 0; sleep_calls = 0;
+    uint8_t imu_go[] = { 0xF0, 0x33, 50, 3, 0 };
+    CHECK(send_packet(imu_go, sizeof imu_go) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 50 && last_reply[5] == 3);
+    CHECK(post_calls == 1 && last_screen == 0x10);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(last_reply_len == 17 && last_reply[1] == 0x34 && last_reply[3] == 0 && last_reply[4] == 0);
+    CHECK(*(int32_t *)(last_reply + 5) == 16623 && *(int32_t *)(last_reply + 9) == -32906 && *(int32_t *)(last_reply + 13) == 1325);
+    CHECK(sleep_calls == 1 && last_sleep == 50 && post_calls == 2);
+    host_imu[2] = -7190;
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(last_reply[3] == 1 && *(int32_t *)(last_reply + 13) == -7190 && post_calls == 3);
+    cfw_display_tick(state, 0x10, 0, 2);          /* third and last sample: no further post */
+    CHECK(last_reply[3] == 2 && post_calls == 3 && sleep_calls == 2);
+    last_reply_len = 0;
+    cfw_display_tick(state, 0x10, 0, 2);          /* idle */
+    CHECK(last_reply_len == 0 && post_calls == 3);
+    uint8_t imu_forever[] = { 0xF0, 0x33, 10, 0xFF, 0xFF };
+    CHECK(send_packet(imu_forever, sizeof imu_forever) == 0 && last_reply[2] == CFW_OK && post_calls == 4);
+    for (int i = 0; i < 5; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(last_reply[1] == 0x34 && last_reply[3] == 7 && post_calls == 9 && last_sleep == 10);
+    uint8_t imu_stop[] = { 0xF0, 0x33, 0, 0, 0 };
+    CHECK(send_packet(imu_stop, sizeof imu_stop) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && *(uint32_t *)(last_reply + 7) == 8);
+    last_reply_len = 0;
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(last_reply_len == 0 && post_calls == 9);
+    uint8_t imu_fast[] = { 0xF0, 0x33, 5, 1, 0 };
+    CHECK(send_packet(imu_fast, sizeof imu_fast) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    CHECK((uint8_t *)cfw_imu_state() + sizeof(cfw_imu) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
 
     guards_intact();
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

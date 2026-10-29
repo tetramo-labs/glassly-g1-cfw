@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 22u
+#define CFW_PROTOCOL 23u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -20,7 +20,9 @@ enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_
        CFW_SHAPES = 0x0D, CFW_STREAM = 0x10, CFW_STATS = 0x11, CFW_PEEK = 0x12,
        CFW_OBJ_PUT = 0x20, CFW_OBJ_SHOW = 0x21, CFW_OBJ_HIDE = 0x22, CFW_OBJ_STATE = 0x23,
        CFW_OBJ_CONTROL = 0x24, CFW_OBJ_ANIM = 0x25, CFW_ANIM_STATE = 0x26,
-       CFW_INPUT_CONTROL = 0x30, CFW_INPUT_STATE = 0x31, CFW_INPUT_EVENT = 0x32 };
+       CFW_VIEW = 0x14,
+       CFW_INPUT_CONTROL = 0x30, CFW_INPUT_STATE = 0x31, CFW_INPUT_EVENT = 0x32,
+       CFW_IMU_CONTROL = 0x33, CFW_IMU_SAMPLE = 0x34 };
 enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_RECT = 0x03,
        CFW_PANEL_OFF = 0x04, CFW_BAD_SEQ = 0x05, CFW_BAD_CRC = 0x06, CFW_TOO_BIG = 0x07,
        CFW_BAD_RECORD = 0x08, CFW_BAD_RLE = 0x09, CFW_BAD_FONT = 0x0A, CFW_NO_MEMORY = 0x0B,
@@ -225,13 +227,32 @@ static uint8_t *cfw_row(uint8_t *panel, uint32_t y, uint32_t x)
     return frame + y * FW_FRAME_STRIDE + x / 2;
 }
 
+/* --- view: where the 640x200 frame lands on the panel -----------------------
+ * The stock UI realises the phone's height gear as the panel row origin
+ * ((8 - gear) * 35 rows; both temples read 210 = gear 2) and the depth gear
+ * as an opposite horizontal shift of the two lenses' content (pos_x table in
+ * cal_panel_canvas_coord: gears 1..9 -> 22, 8, 0, -4, -8, -10, -12, -14, -16,
+ * negated on the master temple). The CFW owns the frame, so both become an
+ * offset added to the stock origins when a rect is pushed. Kept in the
+ * second RAM region after the input state. */
+typedef struct {
+    uint32_t magic;
+    int16_t  dx, dy;           /* added to the panel column / row origin */
+    uint16_t flushes;          /* pushes since boot */
+    uint16_t pad;
+} cfw_view;
+#define CFW_VIEW_MAGIC 0x31574556u  /* "VEW1" */
+static cfw_view *cfw_view_state(void);
+
 static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
 {
     if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
         return CFW_PANEL_OFF;
     }
-    int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
-    int row = *(int *)(panel + FW_PANEL_ROW_OFFSET);
+    cfw_view *v = cfw_view_state();
+    v->flushes++;
+    int col = *(int *)(panel + FW_PANEL_COL_OFFSET) + v->dx;
+    int row = *(int *)(panel + FW_PANEL_ROW_OFFSET) + v->dy;
     /* The stock routine sends (x1 - x0) / 2 bytes per row, so x1 is exclusive
      * in pixels even though y1 is inclusive. Passing x0 + w - 1 would drop the
      * last pixel pair of every row (the stock full-frame caller passes 0x27f
@@ -1337,33 +1358,6 @@ static uint32_t cfw_anim_step(cfw_anims *a, cfw_rect *dirty, int *full)
     return left;
 }
 
-/* Called on the display thread in place of the stock refresh handler. */
-int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode)
-{
-    (void)state; (void)p3; (void)mode;
-    cfw_anims *a = cfw_animation();
-    if (screen != FW_SCREEN_CFW || !a->active) {
-        a->ticking = 0;
-        return 0;
-    }
-    cfw_rect dirty;
-    int full;
-    uint32_t left = cfw_anim_step(a, &dirty, &full);
-    if (full) {
-        a->full_pushes++;
-    }
-    cfw_obj_present(full ? 0 : &dirty);
-    a->ticks++;
-    if (left == 0) {
-        a->active = 0;
-        a->ticking = 0;
-        return 0;
-    }
-    FW_K_MSLEEP(a->period_ms);
-    FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
-    return 0;
-}
-
 /* --- touch input: gesture codes from touch_key_thread ---------------------
  * The stock helper that hands a gesture to key_event_thread is redirected
  * here, so every classified touch passes through the CFW. By default the
@@ -1476,6 +1470,169 @@ static void cfw_input_report(void)
                          (uint8_t)in->events, (uint8_t)(in->events >> 8),
                          (uint8_t)in->events_sent, (uint8_t)(in->events_sent >> 8) };
     cfw_reply(CFW_INPUT_STATE, CFW_OK, body, sizeof body);
+}
+
+static cfw_view *cfw_view_state(void)
+{
+    cfw_view *v = (cfw_view *)((uint8_t *)cfw_input_state() + sizeof(cfw_input));
+    if (v->magic != CFW_VIEW_MAGIC) {
+        uint8_t *p = (uint8_t *)v;
+        for (uint32_t i = 0; i < sizeof *v; i++) {
+            p[i] = 0;
+        }
+        v->magic = CFW_VIEW_MAGIC;
+    }
+    return v;
+}
+
+/* [op][dx:i16][dy:i16]: op 0 sets the offsets (and pushes the whole frame when
+ * bit 1 of op is set), op 1 queries. Reply body:
+ * [dx:i16][dy:i16][stock_col:i16][stock_row:i16][height_gear][depth_gear][flushes:u16]. */
+static void cfw_view_cmd(const uint8_t *p, uint32_t n)
+{
+    cfw_view *v = cfw_view_state();
+    uint8_t *panel = cfw_panel();
+    uint8_t status = CFW_OK;
+    uint32_t want = (n >= 1 && (p[0] & 1)) ? 1u : 5u;
+    if (n != want) {
+        cfw_reply(CFW_VIEW, CFW_BAD_LENGTH, 0, 0);
+        return;
+    }
+    if ((p[0] & 1) == 0) {
+        int dx = rd16s(p + 1), dy = rd16s(p + 3);
+        if (dx < -320 || dx > 320 || dy < -480 || dy > 480) {
+            cfw_reply(CFW_VIEW, CFW_BAD_RECT, 0, 0);
+            return;
+        }
+        v->dx = (int16_t)dx;
+        v->dy = (int16_t)dy;
+        if (p[0] & 2) {
+            cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+            status = cfw_flush(panel, &all);
+        }
+    }
+    int col = *(int *)(panel + FW_PANEL_COL_OFFSET), row = *(int *)(panel + FW_PANEL_ROW_OFFSET);
+    uint8_t body[10] = { (uint8_t)v->dx, (uint8_t)(v->dx >> 8), (uint8_t)v->dy, (uint8_t)(v->dy >> 8),
+                         (uint8_t)col, (uint8_t)(col >> 8), (uint8_t)row, (uint8_t)(row >> 8),
+                         panel[FW_PANEL_HEIGHT_GEAR], panel[FW_PANEL_DEPTH_GEAR] };
+    cfw_reply(CFW_VIEW, status, body, sizeof body);
+}
+
+/* --- IMU streaming: attitude samples sent from the display-thread tick ------ */
+typedef struct {
+    uint32_t magic;
+    uint8_t  active;
+    uint8_t  period_ms;
+    uint16_t remaining;        /* samples left, 0xFFFF = until stopped */
+    uint16_t seq;
+    uint16_t pad;
+    uint32_t sent;
+} cfw_imu;
+#define CFW_IMU_MAGIC 0x31554d49u  /* "IMU1" */
+
+static cfw_imu *cfw_imu_state(void)
+{
+    cfw_imu *m = (cfw_imu *)((uint8_t *)cfw_view_state() + sizeof(cfw_view));
+    if (m->magic != CFW_IMU_MAGIC) {
+        uint8_t *p = (uint8_t *)m;
+        for (uint32_t i = 0; i < sizeof *m; i++) {
+            p[i] = 0;
+        }
+        m->magic = CFW_IMU_MAGIC;
+        m->period_ms = 50;
+    }
+    return m;
+}
+
+/* One IMU_SAMPLE notification: [seq:u16][word0:i32][word1:i32][pitch:i32]. */
+static void cfw_imu_sample(cfw_imu *m)
+{
+    uint8_t body[14];
+    body[0] = (uint8_t)m->seq;
+    body[1] = (uint8_t)(m->seq >> 8);
+    for (uint32_t w = 0; w < 3; w++) {
+        uint32_t x = (uint32_t)FW_IMU_ATTITUDE[w];
+        body[2 + 4 * w] = (uint8_t)x;
+        body[3 + 4 * w] = (uint8_t)(x >> 8);
+        body[4 + 4 * w] = (uint8_t)(x >> 16);
+        body[5 + 4 * w] = (uint8_t)(x >> 24);
+    }
+    cfw_reply(CFW_IMU_SAMPLE, CFW_OK, body, sizeof body);
+    m->seq++;
+    m->sent++;
+    if (m->remaining != 0xFFFF && --m->remaining == 0) {
+        m->active = 0;
+    }
+}
+
+/* [period_ms][count:u16]: start streaming `count` samples (0 stops, 0xFFFF
+ * runs until stopped) every `period_ms` (10-250) on the display-thread tick.
+ * Reply body: [active][period_ms][remaining:u16][sent:u32]. */
+static void cfw_imu_control(const uint8_t *p, uint32_t n)
+{
+    cfw_imu *m = cfw_imu_state();
+    if (n != 3) {
+        cfw_reply(CFW_IMU_CONTROL, CFW_BAD_LENGTH, 0, 0);
+        return;
+    }
+    uint16_t count = rd16(p + 1);
+    if (count == 0) {
+        m->active = 0;
+        m->remaining = 0;
+    } else {
+        if (p[0] < 10 || p[0] > 250) {
+            cfw_reply(CFW_IMU_CONTROL, CFW_BAD_RECORD, 0, 0);
+            return;
+        }
+        m->period_ms = p[0];
+        m->remaining = count;
+        m->active = 1;
+        cfw_anims *a = cfw_animation();
+        if (!a->ticking) {
+            a->ticking = 1;
+            FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+        }
+    }
+    uint8_t body[8] = { m->active, m->period_ms, (uint8_t)m->remaining, (uint8_t)(m->remaining >> 8),
+                        (uint8_t)m->sent, (uint8_t)(m->sent >> 8), (uint8_t)(m->sent >> 16), (uint8_t)(m->sent >> 24) };
+    cfw_reply(CFW_IMU_CONTROL, CFW_OK, body, sizeof body);
+}
+
+/* Called on the display thread in place of the stock refresh handler. */
+int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode)
+{
+    (void)state; (void)p3; (void)mode;
+    cfw_anims *a = cfw_animation();
+    cfw_imu *m = cfw_imu_state();
+    if (screen != FW_SCREEN_CFW || (!a->active && !m->active)) {
+        a->ticking = 0;
+        return 0;
+    }
+    if (m->active) {
+        cfw_imu_sample(m);
+    }
+    uint32_t period = m->period_ms;
+    if (a->active) {
+        cfw_rect dirty;
+        int full;
+        uint32_t left = cfw_anim_step(a, &dirty, &full);
+        if (full) {
+            a->full_pushes++;
+        }
+        cfw_obj_present(full ? 0 : &dirty);
+        a->ticks++;
+        if (left == 0) {
+            a->active = 0;
+        }
+        period = a->period_ms;   /* animation sets the pace while it runs */
+    }
+    if (!a->active && !m->active) {
+        a->ticking = 0;
+        return 0;
+    }
+    FW_K_MSLEEP((int)period);
+    FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+    return 0;
 }
 
 /* Reply body: [active][period_ms][ticks:u32][full_pushes:u32]. */
@@ -1780,6 +1937,12 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_INPUT_STATE:
         cfw_input_report();
+        break;
+    case CFW_VIEW:
+        cfw_view_cmd(data + 2, len - 2);
+        break;
+    case CFW_IMU_CONTROL:
+        cfw_imu_control(data + 2, len - 2);
         break;
     default:
         cfw_reply(data[1], CFW_BAD_COMMAND, 0, 0);
