@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 40u
+#define CFW_PROTOCOL 41u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -52,7 +52,12 @@ typedef struct {
     uint32_t arena;        /* heap arena base (0 until first PUT) */
     uint32_t arena_used;   /* bump pointer */
     uint32_t arena_size;   /* bytes obtained from the stock heap */
-} cfw_ctx;                 /* 32 bytes, then the message buffer, then the directory */
+    uint16_t done_total;   /* length and CRC of the last message that ran, for ONCE */
+    uint16_t done_crc;
+    uint8_t  done_records; /* its records-done count */
+    uint8_t  done_valid;
+    uint16_t pad;
+} cfw_ctx;                 /* 40 bytes, then the message buffer, then the directory */
 
 /* --- asset store: directory in the reclaimed RAM, bytes in a heap arena --- */
 #define CFW_ARENA_MAX    (48u * 1024u)   /* first attempt; halves down to 8 KB */
@@ -3145,6 +3150,7 @@ static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *done)
 
 #define CFW_STREAM_FIRST 0x01u
 #define CFW_STREAM_LAST  0x02u
+#define CFW_STREAM_ONCE  0x04u   /* on the LAST packet: a repeat of the message that ran last is acknowledged, not re-run */
 
 /* STREAM packet: [seq][flags][data]. FIRST data starts with [total:u16][crc:u16].
  * Only the LAST packet (or an error) is answered: [status][seq][records done]. */
@@ -3201,9 +3207,18 @@ static void cfw_stream(const uint8_t *p, uint32_t n)
             status = CFW_BAD_LENGTH;
         } else if (cfw_crc16(buf, c->msg_len) != c->msg_crc) {
             status = CFW_BAD_CRC;
+        } else if ((flags & CFW_STREAM_ONCE) && c->done_valid && c->done_total == c->msg_total && c->done_crc == c->msg_crc) {
+            /* The host lost our reply and sent the message again: answer as
+             * before without restarting its glides (g2flash's request ids). */
+            status = c->last_status;
+            body[1] = c->done_records;
         } else {
             status = cfw_run_message(buf, c->msg_len, &body[1]);
             c->stream_msgs++;
+            c->done_total = c->msg_total;
+            c->done_crc = c->msg_crc;
+            c->done_records = body[1];
+            c->done_valid = 1;
         }
     }
     if (status != CFW_OK) {

@@ -270,7 +270,8 @@ class StreamSender:
             chunks.append((first, (header if first else b'') + chunk))
             first = False
         for i, (is_first, data) in enumerate(chunks):
-            flags = (0x01 if is_first else 0) | (0x02 if i == len(chunks) - 1 else 0)
+            # Bit 2 (G1CFW/41): a repeat of the message that ran last is acknowledged, not re-run.
+            flags = (0x01 if is_first else 0) | (0x06 if i == len(chunks) - 1 else 0)
             packet = bytes([CFW_SID, CFW_STREAM, self.seq, flags]) + data
             await self.link.client.write_gatt_char(self.link.rx, packet, response=False)
             self.seq = (self.seq + 1) & 0xFF

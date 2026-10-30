@@ -274,7 +274,11 @@ All but STATE are valid stream records.
 Multi-packet messages with one reply per message, so the phone can write
 packets back to back. `flags` bit 0 marks the first packet, whose data begins
 with `[total:u16][crc:u16]` (CRC-16/CCITT-FALSE over the whole message); bit 1
-marks the last. `seq` increments by one per packet; a gap, a packet with no
+marks the last; bit 2 (G1CFW/41) on the last packet asks for the message to
+run **once**: when its length and CRC equal the message that ran last, the
+glasses answer with that message's status and record count without running
+it again, so a host whose reply was lost can resend without restarting the
+glides it started (g2flash's repeated request id). `seq` increments by one per packet; a gap, a packet with no
 message in flight, a declared length over 4096, or more data than declared is
 refused with status `05`/`07` and the message is dropped. Mid-message packets
 get no reply. The last packet is answered `F0 10 <status> <seq> <records done>`

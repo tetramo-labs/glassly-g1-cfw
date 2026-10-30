@@ -342,7 +342,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/40", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/41", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -464,6 +464,19 @@ int main(int argc, char **argv)
     uint8_t s1_bad[sizeof s1]; memcpy(s1_bad, s1, sizeof s1); s1_bad[6] ^= 0xFF;
     CHECK(send_packet(s1_bad, sizeof s1_bad) == 0 && last_reply_len == 0);
     CHECK(send_packet(s2, sizeof s2) == 0 && send_packet(s3, sizeof s3) == 0 && last_reply[2] == CFW_BAD_CRC);
+    /* ONCE: the same message sent again with flag bit 2 is acknowledged, not re-run. */
+    memset(frame, 0, 200 * 320);
+    reflash_calls = 0;
+    CHECK(send_packet(s1, sizeof s1) == 0 && send_packet(s2, sizeof s2) == 0 && send_packet(s3, sizeof s3) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
+    uint8_t s3_once[sizeof s3]; memcpy(s3_once, s3, sizeof s3); s3_once[3] = 0x02 | 0x04;
+    uint8_t s1_next[sizeof s1]; memcpy(s1_next, s1, sizeof s1); s1_next[2] = 10;
+    uint8_t s2_next[sizeof s2]; memcpy(s2_next, s2, sizeof s2); s2_next[2] = 11;
+    s3_once[2] = 12;
+    CHECK(send_packet(s1_next, sizeof s1_next) == 0 && send_packet(s2_next, sizeof s2_next) == 0 && send_packet(s3_once, sizeof s3_once) == 0);
+    CHECK(last_reply[2] == CFW_OK && last_reply[3] == 12 && last_reply[4] == 2 && reflash_calls == 1);   /* answered, nothing pushed again */
+    s1_next[2] = 13; s2_next[2] = 14; s3_once[2] = 15; s3_once[3] = 0x02;
+    CHECK(send_packet(s1_next, sizeof s1_next) == 0 && send_packet(s2_next, sizeof s2_next) == 0 && send_packet(s3_once, sizeof s3_once) == 0);
+    CHECK(last_reply[2] == CFW_OK && reflash_calls == 2);                                                  /* without the flag it runs */
     /* Oversized declared length is refused immediately. */
     uint8_t big[] = { 0xF0, 0x10, 1, 0x01, 0x01, 0x20, 0, 0 };
     CHECK(send_packet(big, sizeof big) == 0 && last_reply[2] == CFW_TOO_BIG);
@@ -493,7 +506,7 @@ int main(int argc, char **argv)
 
     /* Stats reflect the traffic above. */
     const uint8_t stats[] = { 0xF0, 0x11 };
-    CHECK(send_packet(stats, sizeof stats) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 3 && last_reply[5] == 5 && last_reply[7] == 2);
+    CHECK(send_packet(stats, sizeof stats) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 5 && last_reply[5] == 5 && last_reply[7] == 2);   /* the ONCE repeat did not count */
 
     /* TEXT: clear box, draw "Hi" with font 0 at (32,32)-(608,59), flush. */
     memset(frame, 0xAA, 200 * 320);

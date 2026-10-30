@@ -1015,6 +1015,16 @@ command), journal deltas (the phone keeps a mirror and the inventory page
 covers resynchronisation), and image or text records inside a shape list
 (objects cover both).
 
+### G1CFW/41: once-only messages (2026-10-30)
+
+g2flash acknowledges a repeated request id without running its motion twice.
+The G1 equivalent is STREAM flag bit 2 on the last packet: when the message's
+length and CRC match the message that ran last, the glasses answer with that
+message's status and record count and run nothing, so a phone whose reply
+notification was lost can resend a frame without restarting its glides.
+`g1flash.py`'s stream sender sets it. Journal deltas stay unported (the phone
+keeps a mirror; OBJ_STATE pages cover a resync). 928 bytes of flash left.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
