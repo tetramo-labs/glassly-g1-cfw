@@ -156,9 +156,12 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    g2flash integer rasterizer, and object kind 4 holds one record whose
    parameters, colour and stroke width tween (OBJ_ANIM entries merge by
    object; `tools/shapes_suite.py` ports the glassly shapes suite and the
-   host test replays its dump). Not yet: filled SVG paths (type 18), rotation
-   (SHOW op 9), image and text records inside a shape list; flash is the
-   limit (2.5 KB left after the wider carve). The **retained object cache**
+   host test replays its dump). G1CFW/39 adds filled SVG paths (asset kind
+   3 compiled on upload, object kind 5) and rotation of shapes and paths as
+   three more tween values, matching g2flash's vector.c; `tools/vector_suite.py`
+   ports its vector cases. Not yet: image and text records inside a shape
+   list; flash is the limit (2.0 KB left after carving through the even-ai
+   task). The **retained object cache**
    (G1CFW/16: PUT/SHOW/HIDE/STATE/CONTROL, 96 descriptors in reclaimed RAM at
    `0x2001bf24`) and **animation** (G1CFW/17: eased glides stepped on the
    display thread via the hooked refresh handler, `k_msleep` and the stock
