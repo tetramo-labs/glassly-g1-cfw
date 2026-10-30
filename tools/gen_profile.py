@@ -43,6 +43,8 @@ STUB = bytes.fromhex('00207047')  # movs r0, #0; bx lr
 STUBS = {
     'display': [
         (0x80d58, 'whole-frame clear and push used on screen exit'),
+        (0x80d12, 'panel_init (every power-up) and screen exit: whole-frame clear and three-part push'),
+        (0x80b2e, 'panel clear callback (stock screen switches): whole-frame clear'),
     ],
 }
 # Stock entry points redirected into blob functions with a B.W (same 4 bytes

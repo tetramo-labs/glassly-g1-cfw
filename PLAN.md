@@ -185,7 +185,10 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
    wear-detection user setting is off; G1CFW/30 keeps that setting on
    (the setting was off on both temples here) and G1CFW/31 classifies the
    word with CFW thresholds, since the stock split never resolves a pair
-   lying unfolded on a table. Next: wakeword and
+   lying unfolded on a table. G1CFW/32-36 make the host's frame survive
+   the switch: draws land in the buffer while the panel is off, and the
+   stock whole-frame clears (in `panel_init` on every power-up and in the
+   screen switcher) are stubbed. Next: wakeword and
    screen-wake takeover, raw PCM or per-microphone selection if the stock
    audio thread allows it.
    Each needs its own trace through the 1.5.60 binary. Out of scope: the

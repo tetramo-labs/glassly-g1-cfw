@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 35u
+#define CFW_PROTOCOL 36u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1488,9 +1488,10 @@ static void cfw_auto_panel(cfw_input *in, int on)
     if (on && !powered) {
         /* Resume callback first (what the stock silent-mode exit uses); it
          * refuses on these units, so the power-on path follows with the
-         * brightness write. On hardware the frame pushed right after the
-         * power-up shows nothing, while the same push a couple of seconds
-         * later does, so the push is repeated on later ticks (fw_abi.h). */
+         * brightness write. Both end in panel_init, whose whole-frame
+         * clear is stubbed (tools/gen_profile.py) so the buffer survives
+         * the power-up; the push is repeated on later ticks in case the
+         * panel is not ready for the first one. */
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_RESUME)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
             FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);

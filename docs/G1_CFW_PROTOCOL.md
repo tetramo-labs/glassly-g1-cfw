@@ -319,10 +319,11 @@ pipeline stubbed nothing asks for the panel when the glasses are put on, so
 unless bit 4 is set the CFW switches it: on through the panel's resume
 callback, falling back to the on callback plus a brightness write when
 resume refuses (it does on these units), then a push of the whole frame
-buffer (the panel comes up blank, the buffer survives), repeated 600 ms and
-1.2 s later on the 200 ms ticks because the push made right after power-up
-shows nothing on hardware (G1CFW/35); off through the suspend callback,
-falling back to the off callback. Two sources
+buffer, repeated 600 ms and 1.2 s later on the 200 ms ticks (G1CFW/35).
+The buffer survives the power-up: the whole-frame clear inside the stock
+`panel_init` and the panel's clear callback are stubbed (G1CFW/36), so the
+panel comes up showing what the host drew last, deferred draws included.
+Off goes through the suspend callback, falling back to the off callback. Two sources
 feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
 and `case closed` (`0b`) only flow while a central is connected (the stock
 wear state machine resets when nothing is). The stock work-mode switch

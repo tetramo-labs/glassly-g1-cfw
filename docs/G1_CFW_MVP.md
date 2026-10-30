@@ -861,6 +861,29 @@ frame again on the third and sixth 200 ms tick (600 ms and 1.2 s later),
 while the panel is still powered. PANEL `06`/`07` expose the driver's own
 suspend/resume pair (`g1flash.py panel --sleep` / `--wake`) for experiments.
 
+Hardware: the automatic pushes at 0, 600 ms and 1.2 s showed nothing; a
+host `draw` seconds later showed. The buffer was then read after a take-off
+and put-on with the pattern known to be in it: the pointer was unchanged
+(`0x20059115`) and the buffer was all zero, so the buffer, not the push, is
+what fails. The 1.5.60 binary says why: `panel_init` (0x4a504, reached
+from both `jbd_panel_resume` and `panel_on`) calls 0x80d12, which memsets
+the 64000-byte frame buffer and pushes it in three parts. Every power-up
+wiped the frame before the CFW pushed it. The stock screen switcher
+(`__panel_related`, 0x37a2c) also clears the whole frame through the
+panel's clear callback (0x80b2e) before drawing a screen.
+
+Also seen: with the wear-detection setting on, the stock checker now moves
+to mode 4 `normal-low-power` a few seconds after a take-off (word 40 on
+the table) and back to 3 when worn again.
+
+### G1CFW/36: the frame survives the power-up (2026-10-29)
+
+Two more display stubs: 0x80d12 (the clear-and-push inside `panel_init`
+and the screen-exit path) and 0x80b2e (the panel clear callback). The
+panel now comes up with whatever the buffer holds, which is what the host
+drew last, including draws deferred while it was off (/32). Switching and
+the repeated pushes stay as in /35.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
