@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from cfw.scene import (CANVAS, ARC, CIRCLE, CIRCLE_FILL, LINE, PIE, RECT, RECT_FILL, ASSET_CLEAR, OBJ_CONTROL, OBJ_HIDE,  # noqa: E402
                        RESET_RECORDS, G1Scene, crc16, diff_scene, easing_code, messages, obj_control_payload,
-                       obj_hide_payload, process_scene, record, resolve_anchors, stream_packets, transition_frames,
+                       obj_hide_payload, process_scene, record, resolve_anchors, stream_packets, svg_path, transition_frames,
                        evaluate_result, jround)
 
 REQUIRED_REVISION = 38
@@ -923,7 +923,8 @@ def parse_revision(identity):
     return int(number) if name == 'G1CFW' and number.isdigit() else None
 
 
-async def open_temples(stack, opts):
+async def open_temples(stack, opts, required=REQUIRED_REVISION):
+    """Connect the temples named by opts.left / opts.right, require G1CFW/`required`, start them clean."""
     import g1flash
     from bleak import BleakClient, BleakScanner
     temples = {}
@@ -947,8 +948,8 @@ async def open_temples(stack, opts):
         body = await link.check(g1flash.CFW_PING)
         identity = body.split(b'\0')[0].decode('ascii', 'replace')
         revision = parse_revision(identity)
-        if revision is None or revision < REQUIRED_REVISION:
-            raise SystemExit(f'{side}: {names[device.address]} answers {identity!r}; this suite needs G1CFW/{REQUIRED_REVISION} or later')
+        if revision is None or revision < required:
+            raise SystemExit(f'{side}: {names[device.address]} answers {identity!r}; this suite needs G1CFW/{required} or later')
         for sub, payload in RESET_COMMANDS:
             await link.check(sub, payload)
         temples[side] = Temple(side, names[device.address], identity, link, g1flash.StreamSender(link))
@@ -1130,6 +1131,16 @@ def self_test_checks():
     eq('budget flush', records[-1], bytes.fromhex('030800 0000 0000 8002 c800'))
     eq('budget resident', scene.resident(), 90)
     eq('budget slot ids', (scene.slot_ids()[89], scene.slot_ids()[90]), ([90], []))
+
+    # G1CFW/39: an svg element is a path asset and a kind-5 object; a rotated shape snaps its rotation after the PUT
+    pipeline, scene = fresh()
+    records = shown(pipeline, scene, [{'type': 'svg', 'id': 'p', 'box': {'x': 10, 'y': 20, 'w': 100, 'h': 50}, 'path': svg_path('M0 0H60V30H0Z'), 'fillRule': 1, 'style': {'color': 9}}])
+    commands = b'\x00' + le(0, 0) + b'\x01' + le(960, 0) + b'\x01' + le(960, 480) + b'\x01' + le(0, 480) + b'\x04'
+    eq('path asset', records[0], bytes.fromhex('081d00 0100 03 00 0100 0000') + commands)
+    eq('path object', records[1], bytes.fromhex('201300 01000100 0501') + struct.pack('<hhHHHBBB', 10, 20, 256, 0, 1, 9, 0, 0))
+    pipeline, scene = fresh()
+    records = shown(pipeline, scene, [{'type': 'rect', 'id': 'bar', 'box': {'x': 300, 'y': 80, 'w': 100, 'h': 20}, 'style': {'fill': True}, 'rotationQ8': 90 * 256}])
+    eq('rotated put snaps the angle about the box centre', records[2], bytes.fromhex('250e00 2101 0100 001c 0001') + le(1440, 350, 90))
 
     # framing, stream packets and the small codecs
     eq('crc16 check value', crc16(b'123456789'), 0x29B1)

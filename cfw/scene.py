@@ -13,6 +13,7 @@ Three layers, all pure Python so tests can run them offline:
   render themselves.
 """
 import math
+import re
 import struct
 import time
 
@@ -37,13 +38,26 @@ STROKED = {LINE, RECT, CIRCLE, TRI, QUAD, BEZIER2, BEZIER3, ARC}
 # Parameters a tween may target per type, as the firmware enforces.
 TWEEN_MASK = {LINE: 0x0F, RECT: 0x1F, RECT_FILL: 0x1F, ARC: 0x1F, PIE: 0x1F, CIRCLE: 0x07, CIRCLE_FILL: 0x07,
               TRI: 0x3F, TRI_FILL: 0x3F, BEZIER2: 0x3F, QUAD: 0xFF, QUAD_FILL: 0xFF, BEZIER3: 0xFF}
-KIND_IMAGE, KIND_TEXT, KIND_RECT, KIND_SHAPES, KIND_SHAPE = range(5)
-ASSET_1BPP, ASSET_4BPP, ASSET_STRING = range(3)
+# Parameters that are canvas lengths (coordinates, sizes, radii): everything but the ARC/PIE angles.
+SHAPE_COORD_MASK = {LINE: 0x0F, RECT: 0x1F, RECT_FILL: 0x1F, ARC: 0x07, PIE: 0x07, CIRCLE: 0x07, CIRCLE_FILL: 0x07,
+                    TRI: 0x3F, TRI_FILL: 0x3F, BEZIER2: 0x3F, QUAD: 0xFF, QUAD_FILL: 0xFF, BEZIER3: 0xFF}
+# Parameters that are x coordinates (the y is the next one): what a move shifts.
+SHAPE_X_PARAMS = {LINE: (0, 2), RECT: (0,), RECT_FILL: (0,), ARC: (0,), PIE: (0,), CIRCLE: (0,), CIRCLE_FILL: (0,),
+                  TRI: (0, 2, 4), TRI_FILL: (0, 2, 4), BEZIER2: (0, 2, 4), QUAD: (0, 2, 4, 6), QUAD_FILL: (0, 2, 4, 6), BEZIER3: (0, 2, 4, 6)}
+KIND_IMAGE, KIND_TEXT, KIND_RECT, KIND_SHAPES, KIND_SHAPE, KIND_PATH = range(6)
+ASSET_1BPP, ASSET_4BPP, ASSET_STRING, ASSET_PATH = range(4)
+# OBJ_ANIM value bits beyond the parameters: colour, stroke width, rotation (angle Q4, pivot x, pivot y).
+COLOR_BIT, WIDTH_BIT, ROTATE_BITS = 0x100, 0x200, 0x1C00
+PATH_TWEEN_MASK = 0x07  # kind 5: x, y, Q8 scale
+PATH_SCALE_MAX = 2048
+ROTATION_NONE = (0, 0, 0)
 
 SHAPE_TYPES = ['rect', 'circle', 'arc', 'pie', 'line', 'triangle', 'quad', 'bezier']
-# What the phone reports for a G1 on the CFW with the vector modes.
-CANVAS = {'width': FRAME_W, 'height': FRAME_H, 'shapes': list(SHAPE_TYPES), 'animation': True, 'maxTextElements': 120}
+# What the phone reports for a G1 on the CFW with the vector modes (G1CFW/39 also fills svg paths).
+CANVAS = {'width': FRAME_W, 'height': FRAME_H, 'shapes': list(SHAPE_TYPES) + ['svg'], 'animation': True, 'maxTextElements': 120}
 MAX_IMAGE_ELEMENTS = 16
+# Element fields the pipeline passes through untouched for the encoder.
+PASSTHROUGH = ('path', 'pathScale', 'fillRule', 'rotationQ8', 'pivotX', 'pivotY', 'depth', 'fontSize')
 
 
 # --- wire ------------------------------------------------------------------
@@ -127,6 +141,134 @@ def text_payload(font, x0, y0, x1, y1, lines, data, clear=False, push=False):
 
 def asset_put_payload(id_, kind, data, append=False, w=0, h=0):
     return struct.pack('<HBBHH', id_, kind, 1 if append else 0, w, h) + data
+
+
+def path_asset_payload(id_, commands, rule=0):
+    """A path asset: compiled Q4 commands in one record, `w` is the fill rule (0 nonzero, 1 even-odd)."""
+    return asset_put_payload(id_, ASSET_PATH, bytes(commands), w=rule)
+
+
+PATH_COORDS = {0: 2, 1: 2, 2: 4, 3: 6, 4: 0}  # M, L, Q, C, Z: int16 coordinates per command
+
+
+def path_commands(commands):
+    """Compiled path bytes as (op, [Q4 coordinates]) items; ValueError when malformed."""
+    out, pos = [], 0
+    while pos < len(commands):
+        op = commands[pos]
+        if op not in PATH_COORDS:
+            raise ValueError(f'unknown path command {op} at {pos}')
+        n = PATH_COORDS[op]
+        if pos + 1 + 2 * n > len(commands):
+            raise ValueError(f'path command {op} at {pos} is truncated')
+        out.append((op, list(struct.unpack_from(f'<{n}h', commands, pos + 1)) if n else []))
+        pos += 1 + 2 * n
+    return out
+
+
+def pack_path_commands(items):
+    return b''.join(bytes([op]) + struct.pack(f'<{len(coords)}h', *coords) for op, coords in items)
+
+
+def path_arena_bytes(commands):
+    """What the glasses keep for a path: a 4-byte header and 16 bytes per flattened edge
+    (a curve is budgeted at 16 edges)."""
+    edges = sum(16 if op in (2, 3) else 1 for op, _ in path_commands(commands) if op != 0)
+    return 4 + 16 * edges
+
+
+def rotation_q4(rotation_q8):
+    """The engine's degrees*256 as the firmware's degrees*16, clamped to the int16 the object holds."""
+    return max(-32768, min(32767, jround(rotation_q8 / 16)))
+
+
+def svg_path(d):
+    """Compile the SVG `d` subset M L H V Q C S T Z (absolute and relative, implicit
+    repetitions) to the firmware's Q4 commands; port of g2flash's svgPath, same
+    errors. Every filled contour must close explicitly."""
+    number_re = r'[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?'
+    tokens = re.findall(r'[a-zA-Z]|' + number_re, d)
+    residue = re.sub(r'[a-zA-Z]|' + number_re, '', d)
+    if re.search(r'[^\s,]', residue):
+        raise ValueError('Invalid SVG path syntax')
+    state = {'i': 0}
+    out = bytearray()
+
+    def emit(op, *coords):
+        out.append(op)
+        for v in coords:
+            q4 = jround(v * 16)
+            if not -32768 <= q4 <= 32767:
+                raise ValueError(f'Q4 coordinate outside -32768..32767: {q4}')
+            out.extend(struct.pack('<h', q4))
+
+    def number():
+        if state['i'] >= len(tokens) or re.fullmatch(r'[a-zA-Z]', tokens[state['i']]):
+            raise ValueError('Missing SVG coordinate')
+        token = tokens[state['i']]
+        state['i'] += 1
+        try:
+            value = float(token)
+        except ValueError:
+            raise ValueError('Invalid number') from None
+        if not math.isfinite(value):
+            raise ValueError('Invalid number')
+        return value
+
+    cmd, x, y, sx, sy, is_open, previous = '', 0.0, 0.0, 0.0, 0.0, False, ''
+    cx, cy = 0.0, 0.0
+    while state['i'] < len(tokens):
+        if re.fullmatch(r'[a-zA-Z]', tokens[state['i']]):
+            cmd = tokens[state['i']]
+            state['i'] += 1
+        if not cmd or cmd.upper() not in 'MLHVQCSTZ':
+            raise ValueError(f'Unsupported SVG command: {cmd}')
+        op, rel = cmd.upper(), cmd != cmd.upper()
+
+        def pair():
+            px = number() + (x if rel else 0)
+            return px, number() + (y if rel else 0)
+
+        if op == 'Z':
+            if not is_open:
+                raise ValueError('Z without an open contour')
+            emit(4)
+            x, y, is_open, previous, cmd = sx, sy, False, 'Z', ''
+            continue
+        if op != 'M' and not is_open:
+            raise ValueError('Path must start with M')
+        if op == 'M':
+            if is_open:
+                raise ValueError('Filled contours must close with Z before another M')
+            x, y = pair()
+            sx, sy, is_open = x, y, True
+            emit(0, x, y)
+            cmd = 'l' if rel else 'L'
+        elif op in ('L', 'H', 'V'):
+            if op == 'L':
+                x, y = pair()
+            elif op == 'H':
+                x = number() + (x if rel else 0)
+            else:
+                y = number() + (y if rel else 0)
+            emit(1, x, y)
+        elif op in ('Q', 'T'):
+            c = pair() if op == 'Q' else ((2 * x - cx, 2 * y - cy) if previous in ('Q', 'T') else (x, y))
+            end = pair()
+            emit(2, *c, *end)
+            cx, cy = c
+            x, y = end
+        else:
+            a = pair() if op == 'C' else ((2 * x - cx, 2 * y - cy) if previous in ('C', 'S') else (x, y))
+            b = pair()
+            end = pair()
+            emit(3, *a, *b, *end)
+            cx, cy = b
+            x, y = end
+        previous = op
+    if is_open or not out:
+        raise ValueError('Expected explicitly closed filled path')
+    return bytes(out)
 
 
 def obj_put_payload(id_, version, kind, x, y, w, h, asset=0, level=15, font=0, lines=0, visible=True):
@@ -362,6 +504,9 @@ def process_scene(elements, caps):
             degraded = True
         kind = el['type']
         base = {'id': el.get('id'), 'type': kind, 'box': clamped, 'style': el.get('style')}
+        for key in PASSTHROUGH:
+            if key in el:
+                base[key] = el[key]
         if transition:
             base['transition'] = transition
         if kind not in ('text', 'image', 'rect'):
@@ -376,6 +521,8 @@ def process_scene(elements, caps):
             if kind in ('arc', 'pie'):
                 base['startDeg'], base['endDeg'] = el.get('startDeg'), el.get('endDeg')
                 hashed['startDeg'], hashed['endDeg'] = el.get('startDeg'), el.get('endDeg')
+            if kind == 'svg':
+                hashed['data'] = f"{js_str(el.get('pathScale'))}|{js_str(el.get('fillRule'))}|{bytes(el.get('path') or b'').hex()}"
             out.append({**base, 'contentHash': element_content_hash(hashed)})
             continue
         if kind == 'image':
@@ -466,8 +613,9 @@ def idiv(a, b):
 
 
 class Slot:
-    """One drawable of an element: a kind-4 shape (type, colour, width, p0..p7) or a
-    kind-1 text object (params x, y, w, h, font, lines over the string bytes)."""
+    """One drawable of an element: a kind-4 shape (type, colour, width, p0..p7), a
+    kind-1 text object (params x, y, w, h, font, lines over the string bytes) or a
+    kind-5 path (type is the fill rule; params x, y, Q8 scale over the command bytes)."""
 
     def __init__(self, kind, type_, color, width, params, text=b''):
         self.kind = kind
@@ -494,17 +642,22 @@ def shape_slot(type_, color, width, params):
     return Slot(KIND_SHAPE, type_, color, width, params)
 
 
-def tween_entry(id_, old, new, frames, easing):
-    """An OBJ_ANIM entry from the slot the glasses show to the next one, or None when the
-    change is not a pure geometry / colour / stroke change of the same type. The mask
-    covers every tweenable parameter, not just the changed ones: an unmasked parameter
-    keeps the object's current value, which is mid-flight while an earlier tween runs."""
+def tween_mask(old, new):
+    """The OBJ_ANIM mask that takes the slot the glasses show to the next one, or None
+    when the change is not a pure geometry / colour / stroke change of the same type.
+    The mask covers every tweenable parameter, not just the changed ones: an unmasked
+    parameter keeps the object's current value, which is mid-flight while an earlier
+    tween runs."""
     if old.kind != new.kind or old.type != new.type or old.text != new.text:
         return None
     if new.kind == KIND_TEXT:
         if old.params[2:] != new.params[2:] or old.color != new.color:
             return None
-        return anim_entry(id_, 0x03, frames, easing, new.params[:2])
+        return 0x03
+    if new.kind == KIND_PATH:
+        if old.params[3:] != new.params[3:]:
+            return None
+        return PATH_TWEEN_MASK | COLOR_BIT
     mask = TWEEN_MASK[new.type]
     for k in range(8):
         if old.params[k] != new.params[k] and not mask & (1 << k):
@@ -512,13 +665,38 @@ def tween_entry(id_, old, new, frames, easing):
     stroked = new.type in STROKED
     if old.width != new.width and not stroked:
         return None
-    values = [new.params[k] for k in range(8) if mask & (1 << k)]
-    mask |= 0x100
-    values.append(new.color)
-    if stroked:
-        mask |= 0x200
-        values.append(new.width)
-    return anim_entry(id_, mask, frames, easing, values)
+    return mask | COLOR_BIT | (WIDTH_BIT if stroked else 0)
+
+
+def slot_values(slot, mask, rotation=ROTATION_NONE):
+    """The target values for a mask, low bit first: p0..p7, colour, width, angle, pivot x, pivot y."""
+    values = list(slot.params) + [slot.color, slot.width] + list(rotation)
+    return [values[k] for k in range(13) if mask & (1 << k)]
+
+
+def tween_entry(id_, old, new, frames, easing):
+    mask = tween_mask(old, new)
+    return None if mask is None else anim_entry(id_, mask, frames, easing, slot_values(new, mask))
+
+
+def rotation_entry(id_, angle_q4, px, py, frames=0, easing=0):
+    """Rotate a kind-4 or kind-5 object about a canvas pixel; frames 0 snaps."""
+    return anim_entry(id_, ROTATE_BITS, frames, easing, [angle_q4, px, py])
+
+
+def rotation_masks(held, want, frames):
+    """How to take an object from the rotation it holds to `want`: (snap mask, glide mask).
+    The pivot is a tween value like the angle, so gliding both at once rotates the shape
+    about a pivot still on its way (from the origin after a PUT) and swings it off screen.
+    While the angle is 0 the pivot is moot, so it is snapped first and only the angle
+    glides; a pivot that moves while the shape is already rotated interpolates with it."""
+    if frames == 0:
+        return ROTATE_BITS, 0
+    if held[1:] == want[1:]:
+        return 0, 0x400
+    if held[0] == 0:
+        return 0x1800, 0x400
+    return 0, ROTATE_BITS
 
 
 class Retained:
@@ -529,6 +707,7 @@ class Retained:
         self.version = 0
         self.definition = None   # the slot the resident version defines
         self.state = None        # what the glasses show now; None after a hide mid-tween
+        self.rotation = ROTATION_NONE  # (angle Q4, pivot x, pivot y) the glasses hold; a PUT resets it
         self.asset_id = None
         self.asset_bytes = 0
         self.anim_ends_at = 0.0
@@ -610,7 +789,7 @@ class G1Scene:
     def _plan(self, frame, allow_overflow=False):
         m = self.mirror
         now = time.monotonic()
-        records, directs, anims, visible, ids = [], [], [], [], []
+        records, directs, snaps, anims, visible, ids = [], [], [], [], [], []
         sets = tweens = refs = deletes = direct = 0
         anim_frames = 0
         changed = False
@@ -621,6 +800,7 @@ class G1Scene:
             changed = True
         for el in frame:
             key = element_key(el)
+            dx = self._shift(el)
             slots = self._slots_for(el)
             transition = el.get('transition') or {}
             frames = transition_frames(transition.get('durationMs') or 0)
@@ -654,29 +834,50 @@ class G1Scene:
                 objs = m.retained[key] = []
             mine = []
             for k, slot in enumerate(slots):
+                # One ANIM entry at most per object: a geometry tween, a rotation
+                # change, or both in one mask. A PUT resets the rotation on the
+                # glasses, so a rotated slot that was PUT snaps it back (frames 0).
+                mask, entry_frames = 0, frames
                 if k < len(objs):
                     obj = objs[k]
                     if obj.state is not None and obj.state == slot:
                         refs += 1
                     else:
-                        entry = tween_entry(obj.object_id, obj.state, slot, frames, easing) if obj.state is not None and frames else None
-                        if entry is not None:
-                            anims.append(entry)
+                        mask = tween_mask(obj.state, slot) if obj.state is not None and frames else None
+                        if mask is not None:
                             tweens += 1
                             refs += 1
-                            anim_frames = max(anim_frames, frames)
-                            obj.anim_ends_at = now + frames * ANIM_PERIOD_MS / 1000
                             obj.state = slot
                         else:
+                            mask = 0
                             records += self._put(obj, slot, allow_overflow)
                             sets += 1
+                            entry_frames = 0
                         changed = True
                 else:
                     obj = Retained(m.free_objects.pop())
                     objs.append(obj)
                     records += self._put(obj, slot, allow_overflow)
                     sets += 1
+                    entry_frames = 0
                     changed = True
+                rotation = self._rotation(el, dx) if slot.kind in (KIND_SHAPE, KIND_PATH) else ROTATION_NONE
+                if rotation[0] == 0:
+                    rotation = (0,) + obj.rotation[1:]   # the pivot is moot at angle 0: keep the glasses' value
+                if rotation != obj.rotation:
+                    snap_mask, glide_mask = rotation_masks(obj.rotation, rotation, entry_frames)
+                    if snap_mask and entry_frames:
+                        # the pivot lands before the angle starts gliding: its own record, applied first
+                        snaps.append(anim_entry(obj.object_id, snap_mask, 0, 0, slot_values(slot, snap_mask, rotation)))
+                        snap_mask = 0
+                    mask |= snap_mask | glide_mask
+                    obj.rotation = rotation
+                    changed = True
+                if mask:
+                    anims.append(anim_entry(obj.object_id, mask, entry_frames, easing, slot_values(slot, mask, rotation)))
+                    if entry_frames:
+                        anim_frames = max(anim_frames, entry_frames)
+                        obj.anim_ends_at = now + entry_frames * ANIM_PERIOD_MS / 1000
                 visible.append(obj.object_id)
                 mine.append(obj.object_id)
             ids.append(mine)
@@ -689,8 +890,9 @@ class G1Scene:
         if directs:
             records += directs
             records.append(record(FLUSH, rect_payload(0, 0, FRAME_W, FRAME_H)))
-        for i in range(0, len(anims), ANIM_MAX_ENTRIES):
-            records.append(record(OBJ_ANIM, obj_anim_payload(anims[i:i + ANIM_MAX_ENTRIES])))
+        for entries in (snaps, anims):
+            for i in range(0, len(entries), ANIM_MAX_ENTRIES):
+                records.append(record(OBJ_ANIM, obj_anim_payload(entries[i:i + ANIM_MAX_ENTRIES])))
         m.shown_ids = visible
         return records
 
@@ -705,27 +907,36 @@ class G1Scene:
         return record(OBJ_CONTROL, obj_control_payload(obj.object_id))
 
     def _put(self, obj, slot, allow_overflow):
-        """Define or replace the object (version + 1); a text slot gets its string asset
-        first when the bytes changed. The text level is not drawn by the stock font
-        engine, so it is always 15."""
+        """Define or replace the object (version + 1); a text or path slot gets its asset
+        first when the bytes (or the fill rule) changed. The text level is not drawn by
+        the stock font engine, so it is always 15."""
         m = self.mirror
         out = []
-        if slot.kind == KIND_TEXT:
+        if slot.kind in (KIND_TEXT, KIND_PATH):
             if obj.asset_id is None:
                 obj.asset_id = m.free_assets.pop()
-            same = obj.definition is not None and obj.definition.kind == KIND_TEXT and obj.definition.text == slot.text
+            same = (obj.definition is not None and obj.definition.kind == slot.kind
+                    and obj.definition.type == slot.type and obj.definition.text == slot.text)
             if not same:
+                size = len(slot.text) if slot.kind == KIND_TEXT else path_arena_bytes(slot.text)
                 # Bytes of a replaced asset are only reclaimed when it was the newest.
                 reclaim = obj.asset_bytes if m.newest_asset == obj.asset_id else 0
-                if not allow_overflow and m.arena_used - reclaim + len(slot.text) > self.arena_capacity:
+                if not allow_overflow and m.arena_used - reclaim + size > self.arena_capacity:
                     raise ArenaFull()
-                m.arena_used += len(slot.text) - reclaim
+                m.arena_used += size - reclaim
                 m.newest_asset = obj.asset_id
-                obj.asset_bytes = len(slot.text)
-                out.append(record(ASSET_PUT, asset_put_payload(obj.asset_id, ASSET_STRING, slot.text)))
+                obj.asset_bytes = size
+                if slot.kind == KIND_TEXT:
+                    out.append(record(ASSET_PUT, asset_put_payload(obj.asset_id, ASSET_STRING, slot.text)))
+                else:
+                    out.append(record(ASSET_PUT, path_asset_payload(obj.asset_id, slot.text, slot.type)))
             obj.version = (obj.version + 1) & 0xFFFF or 1
-            x, y, w, h, font, lines = slot.params[:6]
-            out.append(record(OBJ_PUT, obj_put_payload(obj.object_id, obj.version, KIND_TEXT, x, y, w, h, obj.asset_id, 15, font, lines)))
+            if slot.kind == KIND_TEXT:
+                x, y, w, h, font, lines = slot.params[:6]
+                out.append(record(OBJ_PUT, obj_put_payload(obj.object_id, obj.version, KIND_TEXT, x, y, w, h, obj.asset_id, 15, font, lines)))
+            else:
+                x, y, scale = slot.params[:3]
+                out.append(record(OBJ_PUT, obj_put_payload(obj.object_id, obj.version, KIND_PATH, x, y, scale, 0, obj.asset_id, slot.color)))
         else:
             if obj.asset_id is not None:
                 m.free_assets.append(obj.asset_id)
@@ -734,11 +945,13 @@ class G1Scene:
             obj.version = (obj.version + 1) & 0xFFFF or 1
             out.append(record(OBJ_PUT, obj_put_shape_payload(obj.object_id, obj.version, slot.record())))
         obj.definition = obj.state = slot
+        obj.rotation = ROTATION_NONE
         obj.anim_ends_at = 0
         return out
 
     def _direct(self, slots):
-        """Records that draw the slots straight into the frame (after the SHOW)."""
+        """Records that draw the slots straight into the frame (after the SHOW). A path
+        has no direct record (and nothing direct rotates), so those slots are left out."""
         out, shapes = [], []
 
         def flush_shapes():
@@ -751,10 +964,29 @@ class G1Scene:
                 flush_shapes()
                 x, y, w, h, font, lines = slot.params[:6]
                 out.append(record(TEXT, text_payload(font, x, y, x + w, y + h - 1, lines, slot.text)))
-            else:
+            elif slot.kind == KIND_SHAPE:
                 shapes.append(slot.record())
         flush_shapes()
         return out
+
+    def _shift(self, el):
+        """An element's `depth` moves it this many columns on this lens."""
+        return math.trunc(el.get('depth') or 0) * self.lens_sign
+
+    def _rotation(self, el, dx):
+        """(angle Q4, pivot x, pivot y) for an element's `rotationQ8` and `pivotX`/`pivotY`
+        (canvas pixels, default the box centre); ROTATION_NONE when it is not rotated."""
+        angle = rotation_q4(el.get('rotationQ8') or 0)
+        if angle == 0:
+            return ROTATION_NONE
+        box = el['box']
+        px = el.get('pivotX')
+        py = el.get('pivotY')
+        if px is None:
+            px = box['x'] + idiv(math.trunc(box['w']), 2)
+        if py is None:
+            py = box['y'] + idiv(math.trunc(box['h']), 2)
+        return (angle, clamp_coord(px + dx), clamp_coord(py))
 
     def _slots_for(self, el):
         style = el.get('style') or {}
@@ -766,7 +998,7 @@ class G1Scene:
             border = style.get('width')
         border = math.trunc(border or 0)
         stroke = max(1, min(255, border))
-        dx = math.trunc(el.get('depth') or 0) * self.lens_sign
+        dx = self._shift(el)
         box = el['box']
         x, y = clamp_coord(box['x'] + dx), clamp_coord(box['y'])
         w, h = clamp_dim(box['w']), clamp_dim(box['h'])
@@ -824,6 +1056,15 @@ class G1Scene:
             if slot is not None:
                 out.append(slot)
             return out
+        if kind == 'svg':
+            # A compiled path (the engine's svgPath output) filled at the box origin.
+            commands = bytes(el.get('path') or b'')
+            if not commands:
+                return []
+            scale = el.get('pathScale')
+            scale = max(0, min(PATH_SCALE_MAX, math.trunc(256 if scale is None else scale)))
+            rule = 1 if el.get('fillRule') in (1, 'evenodd') else 0
+            return [Slot(KIND_PATH, rule, gray, 0, [x, y, scale], commands)]
         return []
 
     def _text_slot(self, el, dx):
