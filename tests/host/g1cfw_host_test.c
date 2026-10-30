@@ -218,7 +218,8 @@ static void write_pgm(const char *dir, int index, const char *label)
 /* Replay a tools/shapes_suite.py --dump stream: [1][len:u16][message] goes out
  * as STREAM packets and must be accepted; [2][ms:u32] runs the display thread
  * for that long while tweens are in flight (and writes a PGM of the frame when
- * `dir` is given); [3][len][label] names the following snapshots. */
+ * `dir` is given); [3][len][label] names the following snapshots; [4][x:u16]
+ * [y:u16][level] probes one pixel; [5] writes a snapshot. */
 static int replay(const char *path, const char *dir)
 {
     FILE *f = fopen(path, "rb");
@@ -285,6 +286,19 @@ static int replay(const char *path, const char *dir)
                 write_pgm(dir, shots, label);
             }
             shots++;
+        } else if (tag == 4 && pos + 5 <= n) {
+            /* pixel probe: [x:u16][y:u16][level], checked against the frame as composed */
+            int x = d[pos] | d[pos + 1] << 8, y = d[pos + 2] | d[pos + 3] << 8, want = d[pos + 4];
+            pos += 5;
+            if (x < 0 || x >= 640 || y < 0 || y >= 200 || px(x, y) != want) {
+                printf("replay: probe (%d,%d) in %s is %d, expected %d\n", x, y, label, (x >= 0 && x < 640 && y >= 0 && y < 200) ? px(x, y) : -1, want);
+                errors++;
+            }
+        } else if (tag == 5) {
+            if (dir) {
+                write_pgm(dir, shots, label);
+            }
+            shots++;
         } else if (tag == 3 && pos + 1 <= n) {
             uint32_t len = d[pos++];
             memcpy(label, d + pos, len);
@@ -328,7 +342,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/38", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/39", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -649,7 +663,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(o1, sizeof o1) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(o2, sizeof o2) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(o3, sizeof o3) == 0 && last_reply[2] == CFW_OK);
-    CHECK(memcmp(host_ram2 + 32, "OBJ3", 4) == 0 && host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
+    CHECK(memcmp(host_ram2 + 32, "OBJ4", 4) == 0 && host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
     memset(frame, 0x33, 200 * 320);
     utf_calls = 0; reflash_calls = 0;
     uint8_t show[] = { 0xF0, 0x21, 0x03, 3, 1, 0, 2, 0, 3, 0 };
@@ -731,7 +745,7 @@ int main(int argc, char **argv)
     uint8_t o6_bad[sizeof o6];
     memcpy(o6_bad, o6, sizeof o6); o6_bad[8] = 14;                       /* record type 14 */
     CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
-    memcpy(o6_bad, o6, sizeof o6); o6_bad[6] = 5;                        /* kind 5 */
+    memcpy(o6_bad, o6, sizeof o6); o6_bad[6] = 6;                        /* kind 6 */
     CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     uint8_t show6[] = { 0xF0, 0x21, 0x03, 1, 6, 0 };
     reflash_calls = 0;
@@ -801,6 +815,86 @@ int main(int argc, char **argv)
     CHECK(send_packet(clear_all, sizeof clear_all) == 0 && last_reply[2] == CFW_OK);
     CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
     guards_intact();
+
+    /* Paths (asset kind 3): commands in Q4 compiled on PUT; a square with a
+     * same-winding square hole fills even-odd with the hole, nonzero without. */
+    uint8_t path_cmds[2 * (4 * 5 + 1)];
+    {
+        int n = 0;
+        int16_t sq[2][8] = { { 100, 20, 260, 20, 260, 180, 100, 180 }, { 140, 60, 220, 60, 220, 140, 140, 140 } };
+        for (int c = 0; c < 2; c++) {
+            for (int v = 0; v < 4; v++) {
+                path_cmds[n++] = v == 0 ? 0 : 1;
+                int16_t x = (int16_t)(sq[c][2 * v] * 16), y = (int16_t)(sq[c][2 * v + 1] * 16);
+                path_cmds[n++] = (uint8_t)x; path_cmds[n++] = (uint8_t)(x >> 8);
+                path_cmds[n++] = (uint8_t)y; path_cmds[n++] = (uint8_t)(y >> 8);
+            }
+            path_cmds[n++] = 4;
+        }
+        CHECK(n == (int)sizeof path_cmds);
+    }
+    uint8_t path_put[10 + sizeof path_cmds] = { 0xF0, 0x08, 30, 0, 0x03, 0x00, 1, 0, 0, 0 };   /* asset 30, even-odd */
+    memcpy(path_put + 10, path_cmds, sizeof path_cmds);
+    CHECK(send_packet(path_put, sizeof path_put) == 0 && last_reply[2] == CFW_OK);
+    path_put[2] = 31; path_put[6] = 0;                                                         /* asset 31, nonzero */
+    CHECK(send_packet(path_put, sizeof path_put) == 0 && last_reply[2] == CFW_OK);
+    path_put[2] = 32; path_put[5] = 1;                                                         /* append: not for paths */
+    CHECK(send_packet(path_put, sizeof path_put) == 0 && last_reply[2] == CFW_BAD_ASSET);
+    path_put[5] = 0;
+    CHECK(send_packet(path_put, sizeof path_put - 1) == 0 && last_reply[2] == CFW_BAD_ASSET);   /* unclosed */
+    path_put[10] = 7;
+    CHECK(send_packet(path_put, sizeof path_put) == 0 && last_reply[2] == CFW_BAD_ASSET);       /* unknown command */
+    path_put[10] = 0;
+
+    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[2] == CFW_OK);
+    int assets_before = last_reply[3];
+    uint8_t o9[] = { 0xF0, 0x20, 9, 0, 1, 0, 5, 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 30, 0, 0x0F, 0, 0 };    /* path 30 at 1x */
+    CHECK(send_packet(o9, sizeof o9) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show9[] = { 0xF0, 0x21, 0x03, 1, 9, 0 };
+    CHECK(send_packet(show9, sizeof show9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(px(120, 40) == 15 && px(180, 100) == 0 && px(90, 40) == 0 && px(100, 20) == 15 && px(259, 179) == 15 && px(260, 180) == 0);
+    o9[16] = 31;                                                                                 /* nonzero: no hole */
+    CHECK(send_packet(o9, sizeof o9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(show9, sizeof show9) == 0 && last_reply[2] == CFW_OK && px(180, 100) == 15);
+    o9[16] = 30; o9[8] = 100; o9[12] = 128; o9[13] = 0;                                          /* even-odd at half size, 100 px right */
+    CHECK(send_packet(o9, sizeof o9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(show9, sizeof show9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(px(160, 20) == 15 && px(190, 50) == 0 && px(229, 89) == 15 && px(230, 90) == 0 && px(120, 40) == 0);
+    o9[16] = 9;                                                                                  /* a string asset is not a path */
+    CHECK(send_packet(o9, sizeof o9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(show9, sizeof show9) == 0 && last_reply[2] == CFW_BAD_ASSET);
+    o9[16] = 30;
+    CHECK(send_packet(o9, sizeof o9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(ainfo, sizeof ainfo) == 0 && last_reply[3] == assets_before);
+
+    /* Rotation rides the tween engine: angle (Q4 degrees) and pivot are
+     * values 10-12. A horizontal bar snapped a quarter turn stands up. */
+    uint8_t o10[] = { 0xF0, 0x20, 10, 0, 1, 0, 4, 0x01, 3, 1, 15, 0, 0x2C, 0x01, 80, 0, 100, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  /* rect fill (300,80) 100x20 */
+    CHECK(send_packet(o10, sizeof o10) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show10[] = { 0xF0, 0x21, 0x03, 1, 10, 0 };
+    CHECK(send_packet(show10, sizeof show10) == 0 && last_reply[2] == CFW_OK && px(310, 90) == 15 && px(350, 50) == 0);
+    uint8_t rot90[] = { 0xF0, 0x25, 0, 1, 10, 0, 0x00, 0x1C, 0, 0, 0xA0, 0x05, 0x5E, 0x01, 90, 0 };   /* angle 1440 (90 deg), pivot (350,90), snap */
+    reflash_calls = 0;
+    CHECK(send_packet(rot90, sizeof rot90) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[4] == 640);
+    CHECK(px(350, 50) == 15 && px(350, 130) == 15 && px(350, 30) == 0 && px(310, 90) == 0 && px(380, 90) == 0 && px(345, 90) == 15);
+    uint8_t rot_back[] = { 0xF0, 0x25, 0, 1, 10, 0, 0x00, 0x04, 2, 0, 0, 0 };                      /* angle back to 0 over 2 frames */
+    CHECK(send_packet(rot_back, sizeof rot_back) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);                                                           /* 45 degrees */
+    CHECK(px(350, 90) == 15 && px(320, 60) == 15 && px(310, 90) == 0 && px(350, 50) == 0);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(px(310, 90) == 15 && px(350, 50) == 0 && px(320, 60) == 0);
+    CHECK(send_packet(o1, sizeof o1) == 0 && last_reply[2] == CFW_OK);
+    uint8_t rot_rect[] = { 0xF0, 0x25, 0, 1, 1, 0, 0x00, 0x04, 0, 0, 0, 0 };                       /* a kind-2 rect cannot rotate */
+    CHECK(send_packet(rot_rect, sizeof rot_rect) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    uint8_t rot_path[] = { 0xF0, 0x25, 0, 1, 9, 0, 0x00, 0x1E, 0, 0, 0, 0, 0xA0, 0x05, 190, 0, 50, 0 }; /* path: scale 0?? no: mask bits 1,2 invalid with 0x200 */
+    CHECK(send_packet(rot_path, sizeof rot_path) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    uint8_t rot_path_ok[] = { 0xF0, 0x25, 0, 1, 9, 0, 0x00, 0x1C, 0, 0, 0xA0, 0x05, 190, 0, 50, 0 };  /* the half-size path a quarter turn about its centre */
+    CHECK(send_packet(show9, sizeof show9) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(rot_path_ok, sizeof rot_path_ok) == 0 && last_reply[2] == CFW_OK);
+    CHECK(px(160, 20) == 15 && px(190, 50) == 0 && px(229, 89) == 15);
+    CHECK(send_packet(clear_all, sizeof clear_all) == 0 && last_reply[2] == CFW_OK);
+    guards_intact();
+    CHECK(host_ram3[0] == 0 && host_ram3[31] == 0 && host_ram3[sizeof host_ram3 - 1] == 0);
 
     /* Touch gestures: the redirected stock helper hands codes to the stock
      * semaphore by default, reports them when asked, and can swallow them. */

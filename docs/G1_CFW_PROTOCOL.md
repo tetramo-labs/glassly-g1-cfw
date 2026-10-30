@@ -130,14 +130,24 @@ Assets live in an arena taken from the stock heap on first use (48 KB is
 requested first, falling back in 8 KB steps to 8 KB; on the glasses the heap
 refused 48 KB), with a 56-entry directory in the CFW RAM. ASSET_INFO reports
 the size obtained. Kinds: 0 = 1bpp image (rows padded to
-bytes), 1 = 4bpp image, 2 = UTF-8 string (up to 240 bytes).
+bytes), 1 = 4bpp image, 2 = UTF-8 string (up to 240 bytes), 3 = path
+(G1CFW/39).
 
 - `08` ASSET_PUT `[id:u16][kind][flags][w:u16][h:u16][data...]`: `flags`
   bit 0 appends to the still-open asset with this id (images close when all
   their bytes have arrived; the newest asset is the only one that can grow);
   otherwise it creates the asset, replacing any entry with that id (bytes are
   reclaimed only when the replaced asset was the newest). Use STREAM records
-  for images larger than one packet.
+  for images larger than one packet. A **path** (kind 3) is uploaded in one
+  record (no append) as compiled commands in Q4 (1/16 pixel) signed int16
+  coordinates: `0` M x y, `1` L x y, `2` Q cx cy x y, `3` C c0x c0y c1x c1y x y,
+  `4` Z; every contour starts with M and closes with Z (`demos/vector-protocol.ts`
+  in g2flash compiles the SVG `d` subset M L H V Q C S T Z, absolute and
+  relative). `w` is the fill rule (0 nonzero, 1 even-odd), `h` 0. The glasses
+  flatten the curves once (De Casteljau, at most 8 levels, half a pixel of
+  flatness) and keep at most 128 edges per path, 16 bytes each behind a
+  4-byte header; an unclosed contour, an unknown command, a curve that
+  needs more edges or an append is `0D`, a full arena `0B`.
 - `09` ASSET_DRAW `[id:u16][flags][x:u16][y:u16]`: blit a complete image
   asset; `flags` as BLIT (bit 1 flush, high nibble grey level for 1bpp).
 - `0A` ASSET_TEXT `[id:u16][font][flags][x0][y0][x1][y1][max_lines]`: TEXT
@@ -198,8 +208,13 @@ engine or shape records, so showing a scene again costs one SHOW.
   coordinates; x,y,w,h unused). Kind 4 (G1CFW/38) SHAPE carries one 20-byte
   SHAPES record (26 bytes in all; the record's own flags byte is ignored):
   a single geometric primitive whose parameters, colour and stroke width can
-  be animated. A PUT stops any animation of that object. A wrong kind, a
-  record type outside 1-13 or a body shorter than the kind needs is `08`/`01`.
+  be animated. Kind 5 (G1CFW/39) PATH uses the kinds 0-3 body: a path asset
+  drawn at `x`,`y` with `w` as a Q8 scale (256 = 1x, up to 2048) and grey
+  `level`, filled by its own rule. Kinds 4 and 5 also carry a rotation
+  (angle in Q4 degrees about a pivot in canvas pixels, animated through
+  OBJ_ANIM values 10-12 below); a PUT resets it to 0. A PUT stops any
+  animation of that object. A wrong kind, a record type outside 1-13 or a
+  body shorter than the kind needs is `08`/`01`.
 - `21` OBJ_SHOW `[flags][count][ids:u16...]`: compose the listed objects in
   order; bit 0 clears the frame first, bit 1 pushes it afterwards. An unknown
   id refuses the whole SHOW before drawing.
@@ -215,9 +230,15 @@ engine or shape records, so showing a scene again costs one SHOW.
   valid: LINE `0x0F`, RECT/RECT_FILL/ARC/PIE `0x1F`, CIRCLE/CIRCLE_FILL
   `0x07`, TRI/TRI_FILL/BEZIER2 `0x3F`, QUAD/QUAD_FILL/BEZIER3 `0xFF`) or, for
   kinds 0-2, bit 0 x, bit 1 y, bit 2 w, bit 3 h (w/h only for text and
-  rect). Bit 8 (`0x100`) is the colour nibble (kind 4) or `level` (kinds 0
-  and 2; the stock text drawer has no level), bit 9 (`0x200`) the stroke
-  width (kind 4 only). Each entry interpolates its object from its current
+  rect) or, for kind 5, bit 0 x, bit 1 y, bit 2 the Q8 scale. Bit 8
+  (`0x100`) is the colour nibble (kinds 4 and 5) or `level` (kinds 0 and 2;
+  the stock text drawer has no level), bit 9 (`0x200`) the stroke width
+  (kind 4 only), bits 10-12 (`0x400`, `0x800`, `0x1000`) the rotation angle
+  in Q4 degrees (16 per degree, so 1440 is a quarter turn; unwrapped, so
+  5760 is a full turn) and the pivot x and y in canvas pixels (kinds 4 and
+  5 only). A rotated primitive is drawn as a contour (rounded rectangles,
+  rings and arcs become polylines, strokes stay `width` wide) and pushes the
+  whole frame. Each entry interpolates its object from its current
   values (mid-flight if it was already animating) to the targets over
   `frames` frames, `period_ms` apart (10-250; 0 keeps the current period);
   `frames` 0 applies the targets at once. Entries merge into the running

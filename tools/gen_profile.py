@@ -34,17 +34,23 @@ HOOK_OLD = bytes.fromhex('ebf7cbfd')
 # entered at its start (from ui_DashBoard_task); a 4-byte stub there returns 0
 # and the rest of the body becomes the injected blob (tools/g1carve.py). From
 # G1CFW/38 the region runs on through the dashboard UI task, the quick-note
-# task and the mic start helper only they use (0x3d7a4..0x3e7a8); the five
-# `bl` sites outside the region that enter it (tools/g1carve.py 0x3d7a4
-# 0x3e7a8) become `movs r0, #0; nop`, so the whole range is one blob.
+# task and the mic start helper only they use (0x3d7a4..0x3e7a8); G1CFW/39
+# through the even-ai task's helper, ui_even_ai_task and the screen helper
+# at 0x3f588 (..0x3f7a0). Every "pointer" tools/g1carve.py reports into
+# those tasks is an instruction word that happens to look like a Thumb
+# address (mvn r0,#3 = 0x0003f06f, orn r0,r1,r3 = 0x0003ea61, ...), so the
+# only real entries are the seven `bl` sites below; each becomes
+# `movs r0, #0; nop` and the whole range is one blob.
 CARVES = {
-    'dashboard': {'stub': 0x399e0, 'region': (0x399e4, 0x3e7a8), 'name': 'DashBoard_Reflash..ui_QuickNote_task',
+    'dashboard': {'stub': 0x399e0, 'region': (0x399e4, 0x3f7a0), 'name': 'DashBoard_Reflash..ui_even_ai_task',
                   'callers': [
                       (0x4580e, 0x3d7a4, 'ui_raster_height_task -> dashboard helper'),
                       (0x457be, 0x3d904, 'ui_raster_height_task -> ui_DashBoard_task'),
                       (0x45834, 0x3d904, 'ui_raster_height_task -> ui_DashBoard_task'),
                       (0x4bc88, 0x3d904, 'ui_refalsh_warp -> ui_DashBoard_task'),
                       (0x4bcc0, 0x3e288, 'ui_refalsh_warp -> ui_QuickNote_task'),
+                      (0x4bd08, 0x3e970, 'ui_refalsh_warp -> ui_even_ai_task'),
+                      (0x4bc0a, 0x3f588, 'ui_refalsh_warp -> even-ai screen helper'),
                   ]},
 }
 STUB = bytes.fromhex('00207047')  # movs r0, #0; bx lr

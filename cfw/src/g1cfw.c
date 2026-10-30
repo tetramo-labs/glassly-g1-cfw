@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 38u
+#define CFW_PROTOCOL 39u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -58,7 +58,7 @@ typedef struct {
 #define CFW_ARENA_MAX    (48u * 1024u)   /* first attempt; halves down to 8 KB */
 #define CFW_ARENA_MIN    (8u * 1024u)
 #define CFW_ASSET_MAX    56u   /* 16-byte entries after the 4 KB message buffer */
-enum { CFW_ASSET_1BPP = 0, CFW_ASSET_4BPP = 1, CFW_ASSET_STRING = 2 };
+enum { CFW_ASSET_1BPP = 0, CFW_ASSET_4BPP = 1, CFW_ASSET_STRING = 2, CFW_ASSET_PATH = 3 };
 
 typedef struct {
     uint16_t id;
@@ -583,6 +583,25 @@ static uint8_t cfw_copy(const uint8_t *p, uint32_t n)
     return (p[0] & CFW_FLAG_FLUSH) ? cfw_flush(panel, &dst) : CFW_OK;
 }
 
+/* Path assets are flattened into the third CFW RAM region (see the vector section). */
+#define CFW_PATH_MAX_EDGES 128u
+#define CFW_PATH_HDR       4u
+#define CFW_ANGLE_TURN     (360 * 16)      /* angles are degrees in Q4 */
+typedef struct { int32_t x0, y0, x1, y1; } cfw_edge;
+typedef struct {
+    cfw_edge edges[CFW_PATH_MAX_EDGES];
+    int32_t  xs[CFW_PATH_MAX_EDGES];
+    int8_t   winds[CFW_PATH_MAX_EDGES];
+} cfw_vwork;
+_Static_assert(sizeof(cfw_vwork) <= FW_CFW_RAM3_SIZE, "third CFW RAM region: the path edge workspace");
+
+static cfw_vwork *cfw_vector_work(void)
+{
+    return (cfw_vwork *)FW_CFW_RAM3;
+}
+
+static int cv_compile(cfw_vwork *w, const uint8_t *src, uint32_t len);
+
 /* [id:u16][kind][flags][w:u16][h:u16][data...]: store an asset. flags bit 0
  * appends to the open asset with this id (same kind/size), otherwise a new
  * asset replaces any entry with the same id. Only the newest asset can grow.
@@ -598,11 +617,22 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
     uint32_t w = rd16(p + 4), h = rd16(p + 6);
     const uint8_t *data = p + 8;
     uint32_t len = n - 8;
-    if (kind > CFW_ASSET_STRING) {
+    if (kind > CFW_ASSET_PATH || (kind == CFW_ASSET_PATH && ((flags & 1u) || w > 1))) {
         return CFW_BAD_ASSET;
     }
-    if (kind != CFW_ASSET_STRING && (w == 0 || h == 0 || (w & 1u) || w > FW_FRAME_WIDTH || h > FW_FRAME_HEIGHT)) {
+    if (kind <= CFW_ASSET_4BPP && (w == 0 || h == 0 || (w & 1u) || w > FW_FRAME_WIDTH || h > FW_FRAME_HEIGHT)) {
         return CFW_BAD_RECT;
+    }
+    int edges = 0;
+    if (kind == CFW_ASSET_PATH) {
+        /* [w] is the fill rule (0 nonzero, 1 even-odd); the data are the path
+         * commands, flattened here into the workspace before anything is
+         * allocated, so a bad path costs nothing. */
+        edges = cv_compile(cfw_vector_work(), data, len);
+        if (edges < 0) {
+            return CFW_BAD_ASSET;
+        }
+        len = CFW_PATH_HDR + 16u * (uint32_t)edges;
     }
     if (!c->arena) {
         /* The stock heap also holds the 64 KB frame buffer and the upload
@@ -657,19 +687,35 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
         a->offset = c->arena_used;
     }
     uint32_t limit = (kind == CFW_ASSET_STRING) ? CFW_TEXT_MAX : cfw_asset_expected(a);
-    if (a->bytes + len > limit) {
+    if (kind != CFW_ASSET_PATH && a->bytes + len > limit) {
         return CFW_BAD_ASSET;
     }
     if (c->arena_used + len > c->arena_size) {
         return CFW_NO_MEMORY;
     }
     uint8_t *dst = cfw_asset_bytes(c, a) + a->bytes;
-    for (uint32_t i = 0; i < len; i++) {
-        dst[i] = data[i];
+    if (kind == CFW_ASSET_PATH) {
+        const cfw_vwork *vw = cfw_vector_work();
+        dst[0] = (uint8_t)edges; dst[1] = (uint8_t)(edges >> 8); dst[2] = (uint8_t)w; dst[3] = 0;
+        for (int i = 0; i < edges; i++) {
+            const int32_t *c4 = &vw->edges[i].x0;
+            for (int k = 0; k < 4; k++) {
+                uint32_t v = (uint32_t)c4[k];
+                dst[CFW_PATH_HDR + 16 * i + 4 * k] = (uint8_t)v;
+                dst[CFW_PATH_HDR + 16 * i + 4 * k + 1] = (uint8_t)(v >> 8);
+                dst[CFW_PATH_HDR + 16 * i + 4 * k + 2] = (uint8_t)(v >> 16);
+                dst[CFW_PATH_HDR + 16 * i + 4 * k + 3] = (uint8_t)(v >> 24);
+            }
+        }
+        a->open = 0;
+    } else {
+        for (uint32_t i = 0; i < len; i++) {
+            dst[i] = data[i];
+        }
     }
     a->bytes += len;
     c->arena_used += len;
-    if (kind != CFW_ASSET_STRING && a->bytes == limit) {
+    if (kind <= CFW_ASSET_4BPP && a->bytes == limit) {
         a->open = 0;
     }
     return CFW_OK;
@@ -1304,19 +1350,320 @@ static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
     return CFW_OK;
 }
 
+/* --- filled paths and rotation (ported from g2flash patches/vector.c) -------
+ * A path asset (kind 3) is uploaded as compiled commands in Q4 (1/16 px):
+ * 0 M(x,y), 1 L(x,y), 2 Q(cx,cy,x,y), 3 C(c0,c1,x,y), 4 Z; every contour
+ * closes with Z. ASSET_PUT flattens it into at most 128 edges stored in the
+ * arena behind a [count:u16][rule][pad] header. A kind-5 object draws the
+ * asset scaled (p2, Q8), translated (p0, p1) and rotated about its pivot,
+ * filled nonzero or even-odd. Rotated kind-4 primitives become contours too.
+ * The edge workspace is the third CFW RAM region, which the view shift only
+ * uses during a push, never while a frame is being composed. */
+static int cv_edge(cfw_vwork *w, uint32_t *n, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    if (x0 == x1 && y0 == y1) return 1;
+    if (*n >= CFW_PATH_MAX_EDGES) return 0;
+    w->edges[*n].x0 = x0; w->edges[*n].y0 = y0; w->edges[*n].x1 = x1; w->edges[*n].y1 = y1;
+    ++*n;
+    return 1;
+}
+
+/* De Casteljau subdivision of a cubic (p0, c0, c1, p1 in Q4), at most 8 levels
+ * and half a pixel of flatness. */
+static int cv_curve(cfw_vwork *w, uint32_t *n, const int32_t *p, uint32_t depth)
+{
+    int32_t ux = 3 * p[2] - 2 * p[0] - p[6], uy = 3 * p[3] - 2 * p[1] - p[7];
+    int32_t vx = 3 * p[4] - 2 * p[6] - p[0], vy = 3 * p[5] - 2 * p[7] - p[1];
+    if (ux >= -16 && ux <= 16 && uy >= -16 && uy <= 16 && vx >= -16 && vx <= 16 && vy >= -16 && vy <= 16) {
+        return cv_edge(w, n, p[0], p[1], p[6], p[7]);
+    }
+    if (depth == 8) return 0;
+    int32_t a[8], b[8];
+    for (uint32_t k = 0; k < 2; k++) {
+        int32_t ab = (p[k] + p[k + 2]) / 2, bc = (p[k + 2] + p[k + 4]) / 2, cd = (p[k + 4] + p[k + 6]) / 2;
+        int32_t abc = (ab + bc) / 2, bcd = (bc + cd) / 2, mid = (abc + bcd) / 2;
+        a[k] = p[k]; a[k + 2] = ab; a[k + 4] = abc; a[k + 6] = mid;
+        b[k] = mid; b[k + 2] = bcd; b[k + 4] = cd; b[k + 6] = p[k + 6];
+    }
+    return cv_curve(w, n, a, depth + 1) && cv_curve(w, n, b, depth + 1);
+}
+
+/* Raise a quadratic (p0, c, p1 in p[0..5]) to the cubic in p[0..7]. */
+static void cv_quad_to_cubic(int32_t *p)
+{
+    p[6] = p[4]; p[7] = p[5];
+    for (uint32_t k = 0; k < 2; k++) {
+        p[k + 4] = (p[k + 6] + 2 * p[k + 2]) / 3;
+        p[k + 2] = (p[k] + 2 * p[k + 2]) / 3;
+    }
+}
+
+/* Flatten a command list into the workspace; returns the edge count or -1. */
+static int cv_compile(cfw_vwork *w, const uint8_t *src, uint32_t len)
+{
+    uint32_t pos = 0, n = 0;
+    int open = 0;
+    int32_t x = 0, y = 0, sx = 0, sy = 0;
+    if (!len) return -1;
+    while (pos < len) {
+        uint8_t op = src[pos++];
+        if (op > 4) return -1;
+        uint32_t pairs = op == 4 ? 0 : (op == 2 ? 2 : (op == 3 ? 3 : 1));
+        if (len - pos < pairs * 4) return -1;
+        int32_t p[8];
+        p[0] = x; p[1] = y;
+        for (uint32_t k = 2; k < 8; k++) p[k] = k - 2 < pairs * 2 ? rd16s(src + pos + 2 * (k - 2)) : 0;
+        pos += pairs * 4;
+        if (op == 0) {
+            if (open) return -1;
+            x = sx = p[2]; y = sy = p[3]; open = 1;
+        } else {
+            if (!open) return -1;
+            if (op == 4) {
+                if (!cv_edge(w, &n, x, y, sx, sy)) return -1;
+                x = sx; y = sy; open = 0;
+            } else if (op == 1) {
+                if (!cv_edge(w, &n, x, y, p[2], p[3])) return -1;
+                x = p[2]; y = p[3];
+            } else {
+                if (op == 2) cv_quad_to_cubic(p);
+                if (!cv_curve(w, &n, p, 0)) return -1;
+                x = p[6]; y = p[7];
+            }
+        }
+    }
+    return open ? -1 : (int)n;
+}
+
+/* sin of a Q4-degree angle, Q15, interpolated between whole degrees. */
+static int32_t cv_sin(int32_t a)
+{
+    a %= CFW_ANGLE_TURN;
+    if (a < 0) a += CFW_ANGLE_TURN;
+    int32_t deg = a / 16, f = a % 16;
+    int32_t v = deg == 90 ? 32768 : (deg == 270 ? -32768 : cfw_sin_deg(deg));
+    int32_t next = deg + 1 == 90 ? 32768 : (deg + 1 == 270 ? -32768 : cfw_sin_deg(deg + 1));
+    return v + ((next - v) * f) / 16;
+}
+
+/* Rotate every edge about the Q4 pivot; a whole number of turns is a no-op.
+ * Coordinates are clamped to +-16384 so the Q15 products stay in 32 bits. */
+static void cv_transform(cfw_vwork *w, uint32_t n, int32_t angle, int32_t px, int32_t py)
+{
+    if (angle % CFW_ANGLE_TURN == 0) return;
+    int32_t sn = cv_sin(angle), cs = cv_sin(angle + 90 * 16);
+    for (uint32_t i = 0; i < n; i++) {
+        int32_t *c = &w->edges[i].x0;
+        for (int e = 0; e < 4; e += 2) {
+            int32_t dx = cfw_clamp(c[e] - px, -16384, 16384), dy = cfw_clamp(c[e + 1] - py, -16384, 16384);
+            c[e] = px + ((dx * cs - dy * sn + 16384) >> 15);
+            c[e + 1] = py + ((dx * sn + dy * cs + 16384) >> 15);
+        }
+    }
+}
+
+static void cv_swap(cfw_vwork *w, uint32_t a, uint32_t b)
+{
+    int32_t x = w->xs[a]; w->xs[a] = w->xs[b]; w->xs[b] = x;
+    int8_t k = w->winds[a]; w->winds[a] = w->winds[b]; w->winds[b] = k;
+}
+
+static void cv_sift(cfw_vwork *w, uint32_t root, uint32_t count)
+{
+    while (root * 2 + 1 < count) {
+        uint32_t child = root * 2 + 1;
+        if (child + 1 < count && w->xs[child + 1] > w->xs[child]) child++;
+        if (w->xs[root] >= w->xs[child]) break;
+        cv_swap(w, root, child);
+        root = child;
+    }
+}
+
+/* Scanline fill of the workspace edges, nonzero (rule 0) or even-odd. */
+static void cv_fill(const cfw_raster *r, cfw_vwork *w, uint32_t n, uint8_t rule, uint8_t color)
+{
+    int32_t ymin = FW_FRAME_HEIGHT * 16, ymax = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        cfw_edge *e = &w->edges[i];
+        for (int k = 0; k < 4; k++) {
+            int32_t *c = &e->x0 + k;
+            *c = cfw_clamp(*c, -16384, 16384);
+        }
+        if (e->y0 < ymin) ymin = e->y0;
+        if (e->y1 < ymin) ymin = e->y1;
+        if (e->y0 > ymax) ymax = e->y0;
+        if (e->y1 > ymax) ymax = e->y1;
+    }
+    int32_t first = cfw_clamp(cfw_div_floor(ymin, 16), r->y0, r->y1);
+    int32_t last = cfw_clamp(cfw_div_floor(ymax, 16), r->y0 - 1, r->y1 - 1);
+    for (int32_t row = first; row <= last; row++) {
+        int32_t yc = row * 16 + 8;
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            cfw_edge e = w->edges[i];
+            int8_t winding = 1;
+            if (e.y0 == e.y1) continue;
+            if (e.y0 > e.y1) {
+                int32_t v = e.x0; e.x0 = e.x1; e.x1 = v;
+                v = e.y0; e.y0 = e.y1; e.y1 = v;
+                winding = -1;
+            }
+            if (yc < e.y0 || yc >= e.y1) continue;
+            w->xs[k] = e.x0 + cfw_div_floor((yc - e.y0) * (e.x1 - e.x0), e.y1 - e.y0);
+            w->winds[k++] = winding;
+        }
+        for (uint32_t i = k / 2; i > 0; i--) cv_sift(w, i - 1, k);
+        for (uint32_t i = k; i > 1; i--) { cv_swap(w, 0, i - 1); cv_sift(w, 0, i - 1); }
+        int32_t winding = 0, start = 0;
+        for (uint32_t i = 0; i < k;) {
+            int32_t x = w->xs[i], delta = 0;
+            uint32_t hits = 0;
+            do { delta += w->winds[i++]; hits++; } while (i < k && w->xs[i] == x);
+            int before = rule ? (winding & 1) : (winding != 0);
+            winding = rule ? (winding ^ (int32_t)(hits & 1)) : (winding + delta);
+            int after = rule ? (winding & 1) : (winding != 0);
+            if (!before && after) start = x;
+            if (before && !after) {
+                int32_t a, b;
+                if (rs_span_pixels(start, x, &a, &b)) rs_hspan(r, a, b, row, color);
+            }
+        }
+    }
+}
+
+/* Draw a compiled path asset: [count:u16][rule][pad][edges], scaled by p[2]
+ * (Q8) about its origin, moved by (p[0], p[1]) pixels, rotated. */
+static void cv_path_draw(const cfw_raster *r, cfw_vwork *w, const uint8_t *asset, const int16_t *p,
+                         int32_t angle, int32_t px, int32_t py, uint8_t color)
+{
+    uint32_t count = rd16(asset);
+    int32_t scale = cfw_clamp(p[2], 0, 2048);
+    if (count > CFW_PATH_MAX_EDGES) count = CFW_PATH_MAX_EDGES;
+    const uint8_t *src = asset + CFW_PATH_HDR;
+    for (uint32_t i = 0; i < count; i++) {
+        int32_t *c = &w->edges[i].x0;
+        for (int k = 0; k < 4; k++) {
+            int32_t v = (int32_t)((uint32_t)src[4 * k] | (uint32_t)src[4 * k + 1] << 8 | (uint32_t)src[4 * k + 2] << 16 | (uint32_t)src[4 * k + 3] << 24);
+            c[k] = v * scale / 256 + (int32_t)p[k & 1] * 16;
+        }
+        src += 16;
+    }
+    cv_transform(w, count, angle, px, py);
+    cv_fill(r, w, count, asset[2], color);
+}
+
+/* Arc contour in Q4 about (cx, cy): optional pie spokes, closed for a full turn. */
+static void cv_ellipse(cfw_vwork *w, uint32_t *n, int32_t cx, int32_t cy, int32_t rad, int32_t a0, int32_t span, int pie)
+{
+    int32_t px = cx + ((rad * cv_sin((a0 + 90) * 16)) >> 15);
+    int32_t py = cy + ((rad * cv_sin(a0 * 16)) >> 15);
+    int32_t sx = px, sy = py;
+    if (pie) cv_edge(w, n, cx, cy, px, py);
+    uint32_t seg = (uint32_t)(span < 0 ? -span : span) / 4 + 1;
+    for (uint32_t i = 1; i <= seg; i++) {
+        int32_t a = a0 * 16 + span * 16 * (int32_t)i / (int32_t)seg;
+        int32_t nx = cx + ((rad * cv_sin(a + 90 * 16)) >> 15);
+        int32_t ny = cy + ((rad * cv_sin(a)) >> 15);
+        cv_edge(w, n, px, py, nx, ny);
+        px = nx; py = ny;
+    }
+    if (pie) cv_edge(w, n, px, py, cx, cy);
+    else if (span == 360 || span == -360) cv_edge(w, n, px, py, sx, sy);
+}
+
+static void cv_roundrect(cfw_vwork *w, uint32_t *n, int32_t x, int32_t y, int32_t ww, int32_t hh, int32_t rad)
+{
+    if (ww <= 0 || hh <= 0) return;
+    rad = cfw_clamp(rad, 0, (ww < hh ? ww : hh) / 2);
+    int32_t cx[4] = { x + ww - rad, x + ww - rad, x + rad, x + rad };
+    int32_t cy[4] = { y + rad, y + hh - rad, y + hh - rad, y + rad };
+    int32_t px = x + ww - rad, py = y, sx = px, sy = py;
+    for (int k = 0; k < 4; k++) {
+        for (int j = 0; j <= 15; j++) {
+            int32_t a = (-90 + k * 90 + j * 6) * 16;
+            int32_t nx = cx[k] + ((rad * cv_sin(a + 90 * 16)) >> 15);
+            int32_t ny = cy[k] + ((rad * cv_sin(a)) >> 15);
+            cv_edge(w, n, px, py, nx, ny);
+            px = nx; py = ny;
+        }
+    }
+    cv_edge(w, n, px, py, sx, sy);
+}
+
+/* A rotated primitive: contours filled even-odd, or stroked edge by edge. */
+static void cv_shape_draw(const cfw_raster *r, cfw_vwork *w, const cfw_shape *s, int32_t angle, int32_t px, int32_t py)
+{
+    uint32_t n = 0;
+    int fill = 0;
+    int32_t p[8];
+    for (uint32_t i = 0; i < 8; i++) p[i] = (int32_t)cfw_clamp(s->p[i], CFW_COORD_MIN, CFW_COORD_MAX) * 16 + 8;
+    int32_t wd = s->width ? s->width : 1;
+    switch (s->type) {
+    case CFW_SHAPE_RECT:
+    case CFW_SHAPE_RECT_FILL: {
+        int32_t x = p[0] - 8, y = p[1] - 8;
+        int32_t ww = cfw_clamp(s->p[2], 0, CFW_DIM_MAX) * 16, hh = cfw_clamp(s->p[3], 0, CFW_DIM_MAX) * 16;
+        int32_t rad = cfw_clamp(s->p[4], 0, CFW_DIM_MAX) * 16;
+        cv_roundrect(w, &n, x, y, ww, hh, rad);
+        if (s->type == CFW_SHAPE_RECT) cv_roundrect(w, &n, x + wd * 16, y + wd * 16, ww - wd * 32, hh - wd * 32, rad - wd * 16);
+        fill = 1;
+        break;
+    }
+    case CFW_SHAPE_CIRCLE:
+    case CFW_SHAPE_CIRCLE_FILL: {
+        int32_t rad = cfw_clamp(s->p[2], 0, CFW_COORD_MAX) * 16 + 8;
+        cv_ellipse(w, &n, p[0], p[1], rad, 0, 360, 0);
+        if (s->type == CFW_SHAPE_CIRCLE && rad > wd * 16) cv_ellipse(w, &n, p[0], p[1], rad - wd * 16, 0, 360, 0);
+        fill = 1;
+        break;
+    }
+    case CFW_SHAPE_ARC:
+    case CFW_SHAPE_PIE: {
+        int32_t span = cfw_clamp((int32_t)s->p[4] - s->p[3], -360, 360);
+        cv_ellipse(w, &n, p[0], p[1], cfw_clamp(s->p[2], 0, CFW_COORD_MAX) * 16, s->p[3] % 360, span, s->type == CFW_SHAPE_PIE);
+        fill = s->type == CFW_SHAPE_PIE;
+        break;
+    }
+    case CFW_SHAPE_BEZIER2:
+        cv_quad_to_cubic(p);
+        /* fall through */
+    case CFW_SHAPE_BEZIER3:
+        if (!cv_curve(w, &n, p, 0)) return;
+        break;
+    default: {
+        uint32_t vertices = s->type == CFW_SHAPE_LINE ? 2 : ((s->type == CFW_SHAPE_TRI || s->type == CFW_SHAPE_TRI_FILL) ? 3 : 4);
+        for (uint32_t i = 1; i < vertices; i++) cv_edge(w, &n, p[2 * i - 2], p[2 * i - 1], p[2 * i], p[2 * i + 1]);
+        if (vertices > 2) cv_edge(w, &n, p[2 * vertices - 2], p[2 * vertices - 1], p[0], p[1]);
+        fill = s->type == CFW_SHAPE_TRI_FILL || s->type == CFW_SHAPE_QUAD_FILL;
+        break;
+    }
+    }
+    cv_transform(w, n, angle, px, py);
+    if (fill) {
+        cv_fill(r, w, n, 1, s->color);
+        return;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const cfw_edge *e = &w->edges[i];
+        rs_line_q4(r, cfw_clamp(e->x0, -16384, 16384), cfw_clamp(e->y0, -16384, 16384),
+                   cfw_clamp(e->x1, -16384, 16384), cfw_clamp(e->y1, -16384, 16384), wd, s->color);
+    }
+}
+
 typedef struct cfw_anims cfw_anims;
 static cfw_anims *cfw_animation(void);
 
 /* --- animation: tweens stepped on the display thread ---------------------- */
 #define CFW_ANIM_MAX    16u
-#define CFW_ANIM_VALUES 10u          /* p0..p7, then level (colour), then width */
+#define CFW_ANIM_VALUES 13u          /* p0..p7, level (colour), width, angle, pivot x, pivot y */
 #define CFW_ANIM_LEVEL_BIT 0x100u
 #define CFW_ANIM_WIDTH_BIT 0x200u
+#define CFW_ANIM_ROTATE_BITS 0x1C00u   /* angle (Q4 degrees), pivot x, pivot y */
 typedef struct {
     uint16_t id, mask;         /* mask: one bit per animated value */
     uint8_t  frames, frame, easing, pad;
     int16_t  from[CFW_ANIM_VALUES], to[CFW_ANIM_VALUES];
-} cfw_anim;                    /* 48 bytes; finished when frame >= frames */
+} cfw_anim;                    /* 60 bytes; finished when frame >= frames */
 
 struct cfw_anims {
     uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
@@ -1337,8 +1684,8 @@ struct cfw_anims {
  * assets, the font engine or shape records. SHOW composes an ordered list of
  * object ids into a cleared frame and pushes it. */
 #define CFW_OBJ_MAX    96u
-#define CFW_OBJ_MAGIC  0x334a424fu  /* "OBJ3" */
-enum { CFW_OBJ_IMAGE = 0, CFW_OBJ_TEXT = 1, CFW_OBJ_RECT = 2, CFW_OBJ_SHAPES = 3, CFW_OBJ_SHAPE = 4 };
+#define CFW_OBJ_MAGIC  0x344a424fu  /* "OBJ4" */
+enum { CFW_OBJ_IMAGE = 0, CFW_OBJ_TEXT = 1, CFW_OBJ_RECT = 2, CFW_OBJ_SHAPES = 3, CFW_OBJ_SHAPE = 4, CFW_OBJ_PATH = 5 };
 
 typedef struct {
     uint16_t id, version;
@@ -1348,7 +1695,8 @@ typedef struct {
     uint8_t  level, font;      /* grey level (kind 4: colour) / text font */
     uint8_t  lines, type;      /* text lines / kind 4 record type */
     uint8_t  width, pad;       /* kind 4 stroke width */
-} cfw_obj;                     /* 30 bytes */
+    int16_t  angle, px, py;    /* kinds 4 and 5: rotation in Q4 degrees about the pivot (canvas pixels) */
+} cfw_obj;                     /* 36 bytes */
 
 typedef struct {
     uint32_t magic;
@@ -1431,20 +1779,25 @@ static void cfw_anim_clear(void)
 /* The tween values of an object: p0..p7, then level, then width. */
 static int16_t cfw_obj_value(const cfw_obj *obj, uint32_t k)
 {
-    if (k < CFW_SHAPE_PARAMS) {
-        return obj->p[k];
+    switch (k) {
+    case 8:  return obj->level;
+    case 9:  return obj->width;
+    case 10: return obj->angle;
+    case 11: return obj->px;
+    case 12: return obj->py;
+    default: return obj->p[k];
     }
-    return k == CFW_SHAPE_PARAMS ? obj->level : obj->width;
 }
 
 static void cfw_obj_set_value(cfw_obj *obj, uint32_t k, int32_t v)
 {
-    if (k < CFW_SHAPE_PARAMS) {
-        obj->p[k] = (int16_t)v;
-    } else if (k == CFW_SHAPE_PARAMS) {
-        obj->level = (uint8_t)(v & 0xF);
-    } else {
-        obj->width = (uint8_t)cfw_clamp(v, 0, 255);
+    switch (k) {
+    case 8:  obj->level = (uint8_t)(v & 0xF); break;
+    case 9:  obj->width = (uint8_t)cfw_clamp(v, 0, 255); break;
+    case 10: obj->angle = (int16_t)v; break;
+    case 11: obj->px = (int16_t)v; break;
+    case 12: obj->py = (int16_t)v; break;
+    default: obj->p[k] = (int16_t)v; break;
     }
 }
 
@@ -1455,7 +1808,8 @@ static uint32_t cfw_obj_tween_mask(const cfw_obj *obj)
     case CFW_OBJ_IMAGE: return 0x003u | CFW_ANIM_LEVEL_BIT;
     case CFW_OBJ_TEXT:  return 0x00Fu;
     case CFW_OBJ_RECT:  return 0x00Fu | CFW_ANIM_LEVEL_BIT;
-    case CFW_OBJ_SHAPE: return cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT | CFW_ANIM_WIDTH_BIT;
+    case CFW_OBJ_SHAPE: return cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT | CFW_ANIM_WIDTH_BIT | CFW_ANIM_ROTATE_BITS;
+    case CFW_OBJ_PATH:  return 0x007u | CFW_ANIM_LEVEL_BIT | CFW_ANIM_ROTATE_BITS;
     default:            return 0;
     }
 }
@@ -1470,9 +1824,10 @@ static void cfw_obj_shape(const cfw_obj *obj, cfw_shape *s)
     }
 }
 
-/* [id:u16][version:u16][kind][flags] then, for kinds 0-3,
+/* [id:u16][version:u16][kind][flags] then, for kinds 0-3 and 5,
  * [x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines] (19 bytes in
- * all) or, for kind 4, one 20-byte SHAPES record (26 bytes in all). */
+ * all; kind 5: w is the Q8 scale) or, for kind 4, one 20-byte SHAPES record
+ * (26 bytes in all). A PUT resets the rotation. */
 static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
@@ -1481,7 +1836,7 @@ static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
     }
     uint16_t id = rd16(p);
     uint8_t kind = p[4];
-    if (kind > CFW_OBJ_SHAPE) {
+    if (kind > CFW_OBJ_PATH) {
         return CFW_BAD_RECORD;
     }
     if (n < (kind == CFW_OBJ_SHAPE ? 6u + CFW_SHAPE_RECORD : 19u)) {
@@ -1506,6 +1861,7 @@ static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
     }
     obj->asset = 0;
     obj->font = obj->lines = obj->type = obj->width = obj->pad = 0;
+    obj->angle = obj->px = obj->py = 0;
     if (kind == CFW_OBJ_SHAPE) {
         cfw_shape s;
         cfw_shape_decode(p + 6, &s);
@@ -1536,8 +1892,14 @@ static int cfw_obj_bbox(const cfw_obj *obj, cfw_rect *r)
     int x0 = obj->p[0], y0 = obj->p[1], w = obj->p[2], h = obj->p[3];
     if (obj->kind == CFW_OBJ_SHAPE) {
         cfw_shape s;
+        if (obj->angle % CFW_ANGLE_TURN) {
+            return 0;
+        }
         cfw_obj_shape(obj, &s);
         return cfw_shape_box(&s, r);
+    }
+    if (obj->kind == CFW_OBJ_PATH) {
+        return 0;
     }
     if (obj->kind == CFW_OBJ_IMAGE) {
         cfw_ctx *c = cfw_context();
@@ -1652,7 +2014,25 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
         cfw_raster r = { cfw_row(cfw_panel(), 0, 0), cy0, cy1 };
         cfw_shape s;
         cfw_obj_shape(obj, &s);
-        cfw_shape_draw(&r, &s);
+        if (obj->angle % CFW_ANGLE_TURN) {
+            cv_shape_draw(&r, cfw_vector_work(), &s, obj->angle, obj->px * 16 + 8, obj->py * 16 + 8);
+        } else {
+            cfw_shape_draw(&r, &s);
+        }
+        return CFW_OK;
+    }
+    case CFW_OBJ_PATH: {
+        cfw_ctx *c = cfw_context();
+        cfw_asset *a = c->arena ? cfw_asset_find(c, obj->asset) : 0;
+        if (!a) {
+            return CFW_NO_ASSET;
+        }
+        if (a->kind != CFW_ASSET_PATH || a->bytes < CFW_PATH_HDR) {
+            return CFW_BAD_ASSET;
+        }
+        cfw_raster r = { cfw_row(cfw_panel(), 0, 0), cy0, cy1 };
+        cv_path_draw(&r, cfw_vector_work(), cfw_asset_bytes(c, a), obj->p, obj->angle, obj->px * 16 + 8, obj->py * 16 + 8,
+                     (uint8_t)(obj->level & 0xF));
         return CFW_OK;
     }
     case CFW_OBJ_SHAPES: {

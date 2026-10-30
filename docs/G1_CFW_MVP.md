@@ -953,6 +953,42 @@ the glassly shapes test suite (`tools/shapes_suite.py`, ported from
   9), g2flash's `vector.c`; text colour tweens (the stock text drawer has no
   level); cubic-bezier easing curves (the four easing codes stay).
 
+### G1CFW/39: filled SVG paths and rotation (2026-10-30)
+
+The rest of g2flash's vector contract (`patches/vector.c`), on the same
+object model:
+
+- Asset kind 3 is a path: the compiled Q4 command list (`demos/vector-protocol.ts`
+  `svgPath`, also what glassly's engine produces) is flattened on PUT into
+  at most 128 edges held in the arena; the workspace is the third CFW RAM
+  region, which the view shift only uses during a push. Object kind 5
+  draws a path asset translated, scaled (Q8) and filled nonzero or
+  even-odd. Rotation is three more tween values on kinds 4 and 5 (angle in
+  Q4 degrees, pivot x and y), so a SHOW-time snap and an eased spin are the
+  same OBJ_ANIM entry; rotated primitives are drawn as contours exactly as
+  g2flash does (`cv_shape_draw`), stroked ones edge by edge.
+- Differences from g2flash: angles are int16 Q4 (about +/-2047 degrees, 5
+  turns) instead of i32 Q8 with 100 turns; 128 edges per path instead of
+  512 and no scene-wide edge budget; rotation runs on the frame clock
+  (frames x period) like every other tween rather than on elapsed time; no
+  64-bit arithmetic (coordinates are clamped to +/-1024 px, which keeps the
+  Q4 products in 32 bits).
+- Flash: the blob is 22,036 bytes, so the carve now runs through
+  `ui_even_ai_task` and its two helpers (`0x399e4..0x3f7a0`, 23,996 bytes,
+  1,960 left). Every pointer `tools/g1carve.py` reports into those tasks is
+  an instruction word that happens to carry the Thumb bit (`mvn r0,#3` is
+  `0x0003f06f`, `orn r0,r1,r3` is `0x0003ea61`, `add.w r0,sb,r3` is
+  `0x0003eb09`...), checked one by one with `tools/g1dis.py`; the real entries
+  are two more `bl` sites in `ui_refalsh_warp`, neutralised like the others.
+  The next block (`not_disturb_sync_data`, the IPC helper at `0x3f858`) has
+  callers all over the firmware, so this is the end of the contiguous
+  region; further growth means trimming (COPY, PEEK, the state replies) or a
+  second blob segment.
+- Host test: path compile and fill (even-odd hole, nonzero, half scale),
+  bad paths, a quarter-turn snap of a bar, an eased spin back, rotation of a
+  path, mask validation; `--replay` understands pixel probes (tag 4) and
+  snapshots (tag 5) from the vector suite dump.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
