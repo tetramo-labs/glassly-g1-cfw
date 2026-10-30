@@ -990,9 +990,15 @@ object model:
   tweens (g2flash's FREEZE and FINISH ops). Flash after these: 1,492 bytes.
 - Host test: path compile and fill (even-odd hole, nonzero, half scale),
   bad paths, a quarter-turn snap of a bar, an eased spin back, rotation of a
-  path, mask validation, text dimming, freeze and finish; `--replay`
-  understands pixel probes (tag 4) and snapshots (tag 5) from the vector
-  suite dump.
+  path, mask validation, text dimming, freeze and finish, and the lit area
+  of a ring at twelve angles (the first contour port cut a ring's inner
+  contour at the 128-edge workspace and filled it as a half disc; contours
+  now use 8-degree segments and a shape that still does not fit draws
+  nothing); `--replay` understands pixel probes (tag 4) and snapshots (tag
+  5) from the vector suite dump. `tools/vector_suite.py --dump` replays its
+  24 steps with every g2flash probe passing.
+- Pivot values in a tween entry apply at once: a glide that also moved the
+  pivot swung the shape in from the old pivot (found by the suite port).
 
 ## References and remaining work
 
