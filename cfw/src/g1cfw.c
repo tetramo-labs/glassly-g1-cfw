@@ -2147,12 +2147,42 @@ static void cfw_obj_state(void)
     cfw_reply(CFW_OBJ_STATE, CFW_OK, body, n);
 }
 
-/* [op][id:u16]: op 0 drops every object, op 1 drops one object. */
+static uint8_t cfw_obj_present(const cfw_rect *dirty);
+
+/* [op][id:u16]: op 0 drops every object, op 1 drops one object; op 2 freezes
+ * and op 3 finishes the tweens of one object, or of every object when the id
+ * is 0xFFFF or absent. */
 static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
     if (n < 1) {
         return CFW_BAD_LENGTH;
+    }
+    if (p[0] == 2 || p[0] == 3) {
+        cfw_anims *a = cfw_animation();
+        uint16_t id = n >= 3 ? rd16(p + 1) : 0xFFFF;
+        int finished = 0;
+        for (uint32_t i = 0; i < a->count; i++) {
+            cfw_anim *g = &a->items[i];
+            if (g->frame >= g->frames || (id != 0xFFFF && g->id != id)) {
+                continue;
+            }
+            cfw_obj *obj = cfw_obj_find(o, g->id);
+            if (p[0] == 3 && obj) {
+                for (uint32_t k = 0; k < CFW_ANIM_VALUES; k++) {
+                    if (g->mask & (1u << k)) {
+                        cfw_obj_set_value(obj, k, g->to[k]);
+                    }
+                }
+                finished = 1;
+            }
+            g->frames = 0;
+        }
+        o->revision++;
+        if (finished) {
+            cfw_obj_present(0);
+        }
+        return CFW_OK;
     }
     if (p[0] == 0) {
         o->count = 0;

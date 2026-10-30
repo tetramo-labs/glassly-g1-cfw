@@ -789,11 +789,25 @@ int main(int argc, char **argv)
     uint8_t snap[] = { 0xF0, 0x25, 0, 1, 8, 0, 0x00, 0x01, 0, 0, 3, 0 };           /* level 3 now */
     CHECK(send_packet(snap, sizeof snap) == 0 && last_reply[2] == CFW_OK && post_calls == 0 && reflash_calls == 1);
     CHECK(px(20, 155) == 3 && last_rect[3] == 149 && last_rect[5] == 160);
+    /* Freeze leaves an object where its tween reached it; finish jumps to the targets. */
+    CHECK(send_packet(tween_a, sizeof tween_a) == 0 && last_reply[2] == CFW_OK);     /* disc cx -> 100 in 4 */
+    cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 400 */
+    uint8_t freeze6[] = { 0xF0, 0x24, 2, 6, 0 };
+    CHECK(send_packet(freeze6, sizeof freeze6) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0 && px(400, 100) == 8);
+    CHECK(send_packet(tween_a, sizeof tween_a) == 0 && last_reply[2] == CFW_OK);     /* cx 400 -> 100 in 4 */
+    cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 325 */
+    reflash_calls = 0;
+    uint8_t finish_all[] = { 0xF0, 0x24, 3 };
+    CHECK(send_packet(finish_all, sizeof finish_all) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && px(100, 100) == 8 && px(325, 100) == 0);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0);
     /* A PUT or a HIDE stops the object's tween; the set holds 16 objects. */
     CHECK(send_packet(tween_a, sizeof tween_a) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(o6, sizeof o6) == 0 && last_reply[2] == CFW_OK);             /* redefined: tween gone */
     cfw_display_tick(state, 0x10, 0, 2);
-    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0 && px(500, 100) == 8);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0 && px(100, 100) == 8);
     CHECK(send_packet(show68, sizeof show68) == 0 && last_reply[2] == CFW_OK && px(100, 100) == 15 && px(500, 100) == 0);
     uint8_t many[2 + 2 + 17 * 8];
     many[0] = 0xF0; many[1] = 0x25; many[2] = 0; many[3] = 17;

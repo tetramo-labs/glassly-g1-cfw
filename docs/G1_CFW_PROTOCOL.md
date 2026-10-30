@@ -223,7 +223,9 @@ engine or shape records, so showing a scene again costs one SHOW.
   animation; objects stay.
 - `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`.
 - `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects (and animations),
-  op 1 drops one object (and its animation).
+  op 1 drops one object (and its animation); op 2 freezes and op 3 finishes
+  (jumps to the targets and pushes the frame) the tweens of object `id`, or
+  of every object when `id` is `FFFF` or absent (G1CFW/39).
 - `25` OBJ_ANIM `[period_ms][count][entries...]` (tween form from G1CFW/38):
   each entry is `[id:u16][mask:u16][frames][easing]` followed by one `i16`
   target value per set mask bit, low bit first. Mask bits 0-7 name the
