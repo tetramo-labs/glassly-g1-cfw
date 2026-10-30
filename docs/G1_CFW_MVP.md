@@ -984,10 +984,15 @@ object model:
   callers all over the firmware, so this is the end of the contiguous
   region; further growth means trimming (COPY, PEEK, the state replies) or a
   second blob segment.
+- Also in this revision: text objects scale the glyphs the stock drawer
+  wrote to their `level`, so captions fade like shapes (g2flash's inline
+  text colour), and OBJ_CONTROL ops 2 and 3 freeze or finish running
+  tweens (g2flash's FREEZE and FINISH ops). Flash after these: 1,492 bytes.
 - Host test: path compile and fill (even-odd hole, nonzero, half scale),
   bad paths, a quarter-turn snap of a bar, an eased spin back, rotation of a
-  path, mask validation; `--replay` understands pixel probes (tag 4) and
-  snapshots (tag 5) from the vector suite dump.
+  path, mask validation, text dimming, freeze and finish; `--replay`
+  understands pixel probes (tag 4) and snapshots (tag 5) from the vector
+  suite dump.
 
 ## References and remaining work
 
