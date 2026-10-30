@@ -769,6 +769,24 @@ setting byte itself (`wear_word`, `wear_detect`), and `peek` gained
 `--samples/--interval` and repeatable `--addr` for traces like the one
 above.
 
+**Hardware result.** With the setting on the word reports a real value:
+25-26 folded in the case (mode 5, panel off), 62-74 on a head (mode 3,
+panel on, the frame buffer empty after the reboot so the lenses looked
+dark until the pattern was drawn again), and 47-50 lying unfolded on the
+table for minutes on end. The stock split (worn at 51 and up, not worn
+below 40) never resolves the table case, so the mode stays 3 and the
+lenses stay lit.
+
+### G1CFW/31: CFW wear thresholds (2026-10-29)
+
+While the stock mode says worn (2 or 3) the CFW classifies the radio-link
+word itself: panel on at or above `wear_on` (default 56), off at or below
+`wear_off` (default 53), unchanged in between, and a word of 0 (no
+statistics yet after boot) trusts the mode. INPUT_CONTROL takes the pair
+as two extra bytes and echoes it; `g1flash.py touch control --wear-on
+--wear-off`. The word is refreshed by the network core about every six
+seconds, so the lenses follow a take-off within roughly that.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

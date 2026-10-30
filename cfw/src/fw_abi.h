@@ -245,6 +245,9 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
  * pass while it manages the panel. */
 #define FW_STATE_WEAR_DETECT 0x109d
 #define FW_WEAR_WORD_ADDR 0x20006b88
+#ifndef FW_WEAR_WORD
+#define FW_WEAR_WORD() (*(volatile uint32_t *)FW_WEAR_WORD_ADDR)
+#endif
 /* global_system_suspend (1.5.60 0x2d78c): push {r3, r4, r5, lr} and
  * ldrb.w r3, [r0, #0xfea] are displaced (the detour covers 4 of their 6
  * bytes; the orphaned half-word at 0x2d790 is never executed), resume at

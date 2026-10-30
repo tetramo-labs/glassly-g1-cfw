@@ -506,8 +506,15 @@ async def run_cfw_command(client, args, checkpoint):
                 flags = ((0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
                          | (0x04 if args.notify_events else 0) | (0x08 if args.swallow_events else 0)
                          | (0x10 if args.no_auto_panel else 0))
-                await link.check(CFW_INPUT_CONTROL, bytes([flags]))
+                payload = bytes([flags])
+                if args.wear_on is not None or args.wear_off is not None:
+                    if args.wear_on is None or args.wear_off is None or not 0 <= args.wear_off < args.wear_on <= 255:
+                        raise FirmwareError('--wear-on and --wear-off go together, with on above off (0-255)')
+                    payload += bytes([args.wear_on, args.wear_off])
+                echoed = await link.check(CFW_INPUT_CONTROL, payload)
                 result = input_state(await link.check(CFW_INPUT_STATE))
+                if len(echoed) >= 3:
+                    result['wear_on'], result['wear_off'] = echoed[1], echoed[2]
             else:
                 flags = 0x01 | 0x04 | (0x02 if args.swallow else 0) | (0x08 if args.swallow_events else 0) | (0x10 if args.no_auto_panel else 0)
                 await link.check(CFW_INPUT_CONTROL, bytes([flags]))
@@ -895,6 +902,8 @@ def arguments(argv=None):
             child.add_argument('--swallow-events', action='store_true', help='keep stock events from the phone path while set')
             child.add_argument('--no-auto-panel', action='store_true', help='leave panel power to the host instead of following wear events')
             child.add_argument('--keep', action='store_true', help='watch: leave notify/swallow set after returning')
+            child.add_argument('--wear-on', type=int, help='control: wear word at or above this means worn (default 56)')
+            child.add_argument('--wear-off', type=int, help='control: wear word at or below this means not worn (default 53)')
         if command == 'imu':
             child.add_argument('--samples', type=int, default=1, help='attitude samples to read (right temple holds the IMU)')
             child.add_argument('--interval', type=float, default=0.5, help='seconds between samples')

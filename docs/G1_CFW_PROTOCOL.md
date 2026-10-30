@@ -289,8 +289,12 @@ the glasses sense:
   from the stock handler (no dashboard, mic or temple sync), bit 2 report
   stock events, bit 3 keep stock events from the phone path, bit 4 leave
   panel power to the host. All off at boot, so a bare host sees no
-  unsolicited traffic and the panel follows wear. Reply body `[flags]`; an
-  unknown bit is `bad-record`.
+  unsolicited traffic and the panel follows wear. Since G1CFW/31 the body
+  may be `[flags][wear_on][wear_off]`: the CFW's own wear thresholds on the
+  radio-link word (worn at or above `wear_on`, not worn at or below
+  `wear_off`, defaults 56 and 53, `wear_on` must exceed `wear_off`). Reply
+  body `[flags][wear_on][wear_off]`; an unknown bit or a bad pair is
+  `bad-record`.
 - `31` INPUT_STATE: reply `[flags][last_gesture][gestures:u16]
   [gestures_passed:u16][last_event][events:u16][events_sent:u16]
   [panel_autos][work_mode][last_mode][mode_changes][checks][suspends_skipped]`
@@ -322,9 +326,15 @@ every six seconds; the checker classifies the fourth word, `>= 0x33` worn,
 (worn) whenever the wear-detection user setting is off, so a pair with the
 setting off never leaves normal standby. The 200 ms pass turns the setting
 on while the CFW manages the panel. `g1flash.py touch state` reads the
-live word and the setting alongside INPUT_STATE through PEEK. With bit 4
-set everything stands down and the stock suspend works again. PANEL
-(`05`) still works for manual control.
+live word and the setting alongside INPUT_STATE through PEEK. The stock
+thresholds leave a pair lying unfolded on a table (word 47-50 measured
+here; on a head 62-74, folded in the case 25) in a dead band for ever, so
+from G1CFW/31 the CFW classifies the word itself while the stock mode says
+worn: panel on at or above `wear_on`, off at or below `wear_off`, unchanged
+in between, and a word of 0 (no statistics yet after boot) trusts the
+mode. `g1flash.py touch control --wear-on N --wear-off M` sets the pair.
+With bit 4 set everything stands down and the stock suspend works again.
+PANEL (`05`) still works for manual control.
 - `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
   gesture, class 1 stock event, from the temple that produced it. The host
   tool (`g1flash.py touch watch`) sets bits 0 and 2, prints events for a

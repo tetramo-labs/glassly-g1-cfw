@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 30u
+#define CFW_PROTOCOL 31u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1441,12 +1441,20 @@ typedef struct {
     uint16_t events;        /* stock events seen since boot */
     uint16_t events_sent;   /* stock events forwarded to the stock path */
     uint8_t  last_mode;     /* last work mode asked of change_work_mode */
-    uint8_t  reserved;
+    uint8_t  wear_on;       /* wear word at or above this: worn, panel on */
     uint16_t mode_changes;  /* change_work_mode entries seen since boot */
     uint16_t checks;        /* check_work_mode passes seen (one per 200 ms) */
     uint16_t suspends_skipped; /* stock display suspends the CFW refused */
+    uint8_t  wear_off;      /* wear word at or below this: not worn, panel off */
+    uint8_t  reserved;
 } cfw_input;
-#define CFW_INPUT_MAGIC 0x35504e49u  /* "INP5" */
+#define CFW_INPUT_MAGIC 0x36504e49u  /* "INP6" */
+/* The stock classification (>= 0x33 worn, < 0x28 not worn) leaves a pair
+ * lying unfolded on a table (47-50 here) in its dead band for ever; on a
+ * head the word read 62-74, folded in the case 25. Defaults sit between
+ * head and table, with hysteresis. */
+#define CFW_WEAR_ON_DEFAULT  56u
+#define CFW_WEAR_OFF_DEFAULT 53u
 #define CFW_INPUT_NOTIFY        0x01u
 #define CFW_INPUT_SWALLOW       0x02u
 #define CFW_INPUT_NOTIFY_EVENT  0x04u
@@ -1486,6 +1494,8 @@ static cfw_input *cfw_input_state(void)
             p[i] = 0;
         }
         in->magic = CFW_INPUT_MAGIC;
+        in->wear_on = CFW_WEAR_ON_DEFAULT;
+        in->wear_off = CFW_WEAR_OFF_DEFAULT;
     }
     return in;
 }
@@ -1553,12 +1563,18 @@ int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
 static void cfw_input_control(const uint8_t *p, uint32_t n)
 {
     cfw_input *in = cfw_input_state();
-    if (n != 1 || (p[0] & ~CFW_INPUT_FLAGS)) {
-        cfw_reply(CFW_INPUT_CONTROL, n != 1 ? CFW_BAD_LENGTH : CFW_BAD_RECORD, 0, 0);
+    if ((n != 1 && n != 3) || (p[0] & ~CFW_INPUT_FLAGS) || (n == 3 && p[1] <= p[2])) {
+        cfw_reply(CFW_INPUT_CONTROL, (n != 1 && n != 3) ? CFW_BAD_LENGTH : CFW_BAD_RECORD, 0, 0);
         return;
     }
     in->flags = p[0];
-    cfw_reply(CFW_INPUT_CONTROL, CFW_OK, &in->flags, 1);
+    if (n == 3) {
+        /* [flags][wear_on][wear_off]: the CFW's own wear thresholds, on > off. */
+        in->wear_on = p[1];
+        in->wear_off = p[2];
+    }
+    uint8_t body[3] = { in->flags, in->wear_on, in->wear_off };
+    cfw_reply(CFW_INPUT_CONTROL, CFW_OK, body, sizeof body);
 }
 
 /* Reply body: [flags][last_code][count:u16][stock_passed:u16][last_event][events:u16][events_sent:u16]
@@ -1590,7 +1606,15 @@ static void cfw_panel_for_mode(cfw_input *in, uint32_t mode)
         return;
     }
     if (mode == 2 || mode == 3) {
-        cfw_auto_panel(in, 1);
+        /* Stock says worn, but its dead band is wide (fw_abi.h): classify
+         * the radio-link word with the CFW thresholds. 0 means no
+         * statistics yet (first seconds after boot): trust the mode. */
+        uint32_t word = FW_WEAR_WORD();
+        if (word == 0 || word >= in->wear_on) {
+            cfw_auto_panel(in, 1);
+        } else if (word <= in->wear_off) {
+            cfw_auto_panel(in, 0);
+        }
     } else if ((mode >= 4 && mode <= 6) || mode == 8) {
         cfw_auto_panel(in, 0);
     }

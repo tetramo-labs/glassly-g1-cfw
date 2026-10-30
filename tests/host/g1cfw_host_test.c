@@ -13,6 +13,8 @@ static int host_reflash(int col, int row, int x0, int y0, int x1, int y1);
 #define FW_GET_CTX host_get_ctx
 #define FW_SPEC_BLE_COMMAND_HOOK host_hook
 #define FW_GET_STATE host_get_state
+static uint32_t host_wear_word;
+#define FW_WEAR_WORD() host_wear_word
 #define FW_REFLASH_FB host_reflash
 #define FW_SEND_OF(ctx) host_send
 #define FW_SYSTEM_SUSPEND host_suspend
@@ -173,7 +175,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/30", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/31", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -642,6 +644,32 @@ int main(void)
     cfw_work_mode_tick();                   /* host owns the panel: no switch, setting left alone */
     CHECK(panel_cb_calls == 4 && cfw_suspend_gate(state) == 0 && state[FW_STATE_WEAR_DETECT] == 0);
     CHECK(send_packet(in_release, sizeof in_release) == 0 && last_reply[2] == CFW_OK);
+    CHECK(last_reply[3] == 0 && last_reply[4] == 56 && last_reply[5] == 53);   /* default thresholds echoed */
+
+    /* While stock says worn, the radio-link wear word decides with the CFW
+     * thresholds: on a table it sits in the stock dead band. */
+    state[FW_STATE_WORK_MODE] = 3;
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
+    host_wear_word = 48;                    /* unfolded on the table */
+    cfw_work_mode_tick();
+    CHECK(panel_cb_calls == 5 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    host_wear_word = 55;                    /* between the thresholds: unchanged */
+    cfw_work_mode_tick();
+    CHECK(panel_cb_calls == 5);
+    host_wear_word = 66;                    /* on a head */
+    cfw_work_mode_tick();
+    CHECK(panel_cb_calls == 6 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
+    uint8_t in_thresholds[] = { 0xF0, 0x30, 0x00, 70, 66 };
+    CHECK(send_packet(in_thresholds, sizeof in_thresholds) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 70 && last_reply[5] == 66);
+    cfw_work_mode_tick();                   /* 66 is now at the off threshold */
+    CHECK(panel_cb_calls == 7 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    uint8_t in_bad_thresholds[] = { 0xF0, 0x30, 0x00, 50, 60 };
+    CHECK(send_packet(in_bad_thresholds, sizeof in_bad_thresholds) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    uint8_t in_defaults[] = { 0xF0, 0x30, 0x00, 56, 53 };
+    CHECK(send_packet(in_defaults, sizeof in_defaults) == 0 && last_reply[2] == CFW_OK);
+    host_wear_word = 0;                     /* no statistics yet: the mode decides */
+    cfw_work_mode_tick();
+    CHECK(panel_cb_calls == 8 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
     host_frame[7] = 0;
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
 
