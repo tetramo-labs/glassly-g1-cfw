@@ -342,7 +342,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/39", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/40", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -789,6 +789,28 @@ int main(int argc, char **argv)
     uint8_t snap[] = { 0xF0, 0x25, 0, 1, 8, 0, 0x00, 0x01, 0, 0, 3, 0 };           /* level 3 now */
     CHECK(send_packet(snap, sizeof snap) == 0 && last_reply[2] == CFW_OK && post_calls == 0 && reflash_calls == 1);
     CHECK(px(20, 155) == 3 && last_rect[3] == 149 && last_rect[5] == 160);
+    /* Cubic-bezier easing: a linear curve matches code 0, an ease-in curve starts slower. */
+    uint8_t cur_lin[] = { 0xF0, 0x25, 0, 1, 6, 0, 0x01, 0x00, 4, 0x80, 100, 0, 0, 0, 255, 255 };     /* disc cx 500 -> 100, curve (0,0,255,255) */
+    CHECK(send_packet(cur_lin, sizeof cur_lin) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(px(400, 100) == 8 && px(358, 100) == 0 && px(443, 100) == 0);                              /* 500 - 400/4 within a pixel, r 40 */
+    for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(px(100, 100) == 8 && px(400, 100) == 0);
+    uint8_t cur_in[] = { 0xF0, 0x25, 0, 1, 6, 0, 0x01, 0x00, 4, 0x80, 0xF4, 0x01, 107, 0, 255, 255 }; /* cx 100 -> 500, ease-in */
+    CHECK(send_packet(cur_in, sizeof cur_in) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(px(130, 100) == 8 && px(200, 100) == 0);                                                   /* well short of the linear 200 */
+    for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(px(500, 100) == 8 && px(130, 100) == 0);
+    CHECK(send_packet(cur_in, sizeof cur_in - 2) == 0 && last_reply[2] == CFW_BAD_LENGTH);          /* curve cut short */
+    uint8_t cur_bad[] = { 0xF0, 0x25, 0, 1, 6, 0, 0x01, 0x00, 4, 7, 100, 0 };                        /* easing 7: unknown */
+    CHECK(send_packet(cur_bad, sizeof cur_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    /* OBJ_STATE with a page lists the object table four at a time. */
+    uint8_t ostate_page[] = { 0xF0, 0x23, 0 };
+    CHECK(send_packet(ostate_page, sizeof ostate_page) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 4 + 4 * 4);
+    CHECK(last_reply[4] == 1 && last_reply[8] == 5 && last_reply[12] == 6 && last_reply[16] == 8);      /* the table in definition order */
+    ostate_page[2] = 1;
+    CHECK(send_packet(ostate_page, sizeof ostate_page) == 0 && last_reply[2] == CFW_OK && last_reply_len == 4);
     /* Freeze leaves an object where its tween reached it; finish jumps to the targets. */
     CHECK(send_packet(tween_a, sizeof tween_a) == 0 && last_reply[2] == CFW_OK);     /* disc cx -> 100 in 4 */
     cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 400 */

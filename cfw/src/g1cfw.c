@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 39u
+#define CFW_PROTOCOL 40u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1667,11 +1667,13 @@ static cfw_anims *cfw_animation(void);
 #define CFW_ANIM_LEVEL_BIT 0x100u
 #define CFW_ANIM_WIDTH_BIT 0x200u
 #define CFW_ANIM_ROTATE_BITS 0x1C00u   /* angle (Q4 degrees), pivot x, pivot y */
+#define CFW_EASE_CURVE 0x80u         /* easing byte: a CSS cubic-bezier (4 bytes) follows the values */
 typedef struct {
     uint16_t id, mask;         /* mask: one bit per animated value */
     uint8_t  frames, frame, easing, pad;
+    uint8_t  curve[4];         /* x1 y1 x2 y2 in 0..255 when easing is CFW_EASE_CURVE */
     int16_t  from[CFW_ANIM_VALUES], to[CFW_ANIM_VALUES];
-} cfw_anim;                    /* 60 bytes; finished when frame >= frames */
+} cfw_anim;                    /* 64 bytes; finished when frame >= frames */
 
 struct cfw_anims {
     uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
@@ -2139,11 +2141,25 @@ static uint8_t cfw_obj_hide(const uint8_t *p, uint32_t n)
 }
 
 /* Reply body: [revision:u16][count][shown][id,version pairs of the first 4 shown]. */
-static void cfw_obj_state(void)
+static void cfw_obj_state(const uint8_t *p, uint32_t n_in)
 {
     cfw_objs *o = cfw_objects();
     uint8_t body[4 + 4 * 4];
     uint32_t n = 4;
+    if (n_in >= 1) {
+        /* [page]: four (id, version) pairs of the object table from index page * 4,
+         * whether shown or not. Reply body [page][pairs]. */
+        uint32_t page = p[0];
+        n = 1;
+        body[0] = (uint8_t)page;
+        for (uint32_t i = page * 4; i < o->count && i < page * 4 + 4; i++) {
+            cfw_obj *obj = &cfw_obj_table()[i];
+            body[n++] = (uint8_t)obj->id; body[n++] = (uint8_t)(obj->id >> 8);
+            body[n++] = (uint8_t)obj->version; body[n++] = (uint8_t)(obj->version >> 8);
+        }
+        cfw_reply(CFW_OBJ_STATE, CFW_OK, body, n);
+        return;
+    }
     body[0] = (uint8_t)o->revision; body[1] = (uint8_t)(o->revision >> 8);
     body[2] = (uint8_t)o->count;
     body[3] = (uint8_t)o->shown_count;
@@ -2220,13 +2236,39 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
     return CFW_BAD_COMMAND;
 }
 
-/* Eased interpolation of `t` in [0, frames]; returns 0..1024. */
-static int32_t cfw_ease(uint8_t easing, int32_t t, int32_t frames)
+/* One axis of a cubic bezier from (0,0) to (1,1), Q10: 3(1-t)^2 t p1 + 3(1-t) t^2 p2 + t^3. */
+static int32_t cfw_ease_axis(int32_t t, int32_t p1, int32_t p2)
 {
+    int32_t mt = 1024 - t;
+    int32_t a = (((3 * mt * mt) >> 10) * t) >> 10;
+    int32_t b = (((3 * mt * t) >> 10) * t) >> 10;
+    int32_t c = (((t * t) >> 10) * t) >> 10;
+    return (a * p1 + b * p2 + (c << 10)) >> 10;
+}
+
+/* Progress along a CSS cubic-bezier(x1, y1, x2, y2) at time u (Q10): solve
+ * x(t) = u by bisection, then take y(t). */
+static int32_t cfw_ease_curve(int32_t u, const uint8_t *curve)
+{
+    int32_t lo = 0, hi = 1024;
+    for (int i = 0; i < 10; i++) {
+        int32_t mid = (lo + hi) >> 1;
+        if (cfw_ease_axis(mid, curve[0] * 1024 / 255, curve[2] * 1024 / 255) < u) lo = mid; else hi = mid;
+    }
+    return cfw_clamp(cfw_ease_axis((lo + hi) >> 1, curve[1] * 1024 / 255, curve[3] * 1024 / 255), 0, 1024);
+}
+
+/* Eased interpolation of `t` in [0, frames]; returns 0..1024. */
+static int32_t cfw_ease(const cfw_anim *g, int32_t t, int32_t frames)
+{
+    uint8_t easing = g->easing;
     if (frames <= 0 || t >= frames) {
         return 1024;
     }
     int32_t u = t * 1024 / frames;            /* linear 0..1024 */
+    if (easing == CFW_EASE_CURVE) {
+        return cfw_ease_curve(u, g->curve);
+    }
     if (easing == 1) {                        /* smoothstep: 3u^2 - 2u^3 */
         return (3 * u * u - 2 * u * u / 1024 * u) / 1024;
     }
@@ -2294,7 +2336,7 @@ static uint32_t cfw_anim_step(cfw_anims *a, cfw_rect *dirty, int *full)
             continue;
         }
         g->frame++;
-        int32_t k = cfw_ease(g->easing, g->frame, g->frames);
+        int32_t k = cfw_ease(g, g->frame, g->frames);
         cfw_obj *obj = cfw_obj_find(o, g->id);
         if (obj) {
             cfw_anim_touch(obj, dirty, full);
@@ -2924,8 +2966,16 @@ static uint32_t cfw_popcount(uint32_t v)
     return n;
 }
 
+/* Bytes of one entry: header, one i16 per mask bit, a 4-byte curve when the
+ * easing byte asks for one. */
+static uint32_t cfw_anim_entry_len(const uint8_t *e)
+{
+    return 6 + 2 * cfw_popcount(rd16(e + 2)) + (e[5] == CFW_EASE_CURVE ? 4u : 0u);
+}
+
 /* [period_ms][count][entries]: entry [id:u16][mask:u16][frames][easing] then
- * one i16 target per set mask bit (bits 0-7 p0..p7, 8 level, 9 width).
+ * one i16 target per set mask bit (bits 0-7 p0..p7, 8 level, 9 width,
+ * 10-12 rotation) and, for easing 0x80, the CSS cubic-bezier control bytes.
  * Tweens start from the object's current values and merge into the running
  * set by id; frames 0 applies the targets at once. The display thread
  * renders the frames. */
@@ -2951,13 +3001,13 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
             return CFW_NO_OBJECT;
         }
         uint32_t mask = rd16(p + pos + 2);
-        if (mask == 0 || (mask & ~cfw_obj_tween_mask(obj))) {
+        if (mask == 0 || (mask & ~cfw_obj_tween_mask(obj)) || (p[pos + 5] > 3 && p[pos + 5] != CFW_EASE_CURVE)) {
             return CFW_BAD_RECORD;
         }
         if (p[pos + 4] && !cfw_anim_find(a, obj->id)) {
             fresh++;
         }
-        pos += 6 + 2 * cfw_popcount(mask);
+        pos += cfw_anim_entry_len(p + pos);
         if (pos > n) {
             return CFW_BAD_LENGTH;
         }
@@ -3018,9 +3068,12 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
             g->frames = frames;
             g->frame = 0;
             g->easing = e[5];
+            if (e[5] == CFW_EASE_CURVE) {
+                for (int k = 0; k < 4; k++) g->curve[k] = v[k];
+            }
             started = 1;
         }
-        pos += 6 + 2 * cfw_popcount(mask);
+        pos += cfw_anim_entry_len(e);
     }
     o->revision++;
     if (snapped.w || full) {
@@ -3262,7 +3315,7 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         cfw_reply(data[1], cfw_run_record(data[1], data + 2, len - 2), 0, 0);
         break;
     case CFW_OBJ_STATE:
-        cfw_obj_state();
+        cfw_obj_state(data + 2, len - 2);
         break;
     case CFW_ANIM_STATE:
         cfw_anim_state();

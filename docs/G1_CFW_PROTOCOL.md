@@ -221,7 +221,10 @@ engine or shape records, so showing a scene again costs one SHOW.
   id refuses the whole SHOW before drawing.
 - `22` OBJ_HIDE `[flags]`: blank the frame (bit 1 pushes) and stop every
   animation; objects stay.
-- `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`.
+- `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`
+  of the shown list; with a `[page]` byte (G1CFW/40) the reply is
+  `[page][id,version x up to 4]` for object-table entries `page*4` onward,
+  shown or not, so a host can read the whole inventory back.
 - `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects (and animations),
   op 1 drops one object (and its animation); op 2 freezes and op 3 finishes
   (jumps to the targets and pushes the frame) the tweens of object `id`, or
@@ -249,9 +252,12 @@ engine or shape records, so showing a scene again costs one SHOW.
   `frames` 0 applies the targets at once. Entries merge into the running
   set by object id, so an ANIM for one object never disturbs another's
   glide; up to 16 objects animate at a time (`0B` when the set is full).
-  Easing 0 linear, 1 smoothstep, 2 ease-out, 3 ease-in. An unknown id is
-  `0E`, a mask bit the kind cannot animate is `08`, a truncated entry list
-  `01`. The glasses render the frames themselves on the display thread: the
+  Easing 0 linear, 1 smoothstep, 2 ease-out, 3 ease-in, or `80` (G1CFW/40)
+  for a CSS cubic-bezier whose four control bytes `x1 y1 x2 y2` (0-255 for
+  0.0-1.0, g2flash's curve encoding: ease `40 1A 40 FF`, ease-in-out
+  `6B 00 94 FF`, ease-out `00 00 94 FF`, ease-in `6B 00 FF FF`) follow the
+  entry's values. An unknown id is `0E`, a mask bit the kind cannot animate
+  or an unknown easing byte is `08`, a truncated entry list `01`. The glasses render the frames themselves on the display thread: the
   stubbed stock refresh handler is redirected to the CFW tick, which
   re-composes the SHOW list, pushes the frame, sleeps the period and
   re-posts the stock refresh message until every tween has settled. Each

@@ -1000,6 +1000,21 @@ object model:
 - Pivot values in a tween entry apply at once: a glide that also moved the
   pivot swung the shape in from the old pivot (found by the suite port).
 
+### G1CFW/40: cubic-bezier easing and the object inventory (2026-10-30)
+
+The last two protocol gaps against g2flash's object cache that fit the
+flash: an OBJ_ANIM entry may carry a CSS cubic-bezier (easing byte `80`
+followed by the four control bytes g2flash's `EASE` table uses), solved by
+bisection in Q10 integer math, so the phone's named easings land as the
+same curves on both glasses; and OBJ_STATE takes a page byte and lists the
+object table four entries at a time. The four easing codes stay valid.
+Blob 23,056 bytes, 940 left. Not ported, by choice: g2flash's request-id
+replay protection (the G1's STREAM replies are per message on a
+write-with-response link, so a lost reply is a failed write, not a replayed
+command), journal deltas (the phone keeps a mirror and the inventory page
+covers resynchronisation), and image or text records inside a shape list
+(objects cover both).
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
