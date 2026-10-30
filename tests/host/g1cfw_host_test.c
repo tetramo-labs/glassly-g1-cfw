@@ -61,6 +61,9 @@ static uint8_t host_arena[48 * 1024 + 64];
 #define FW_CFW_RAM (host_ram + 32)
 static int host_panel_on(uint8_t *panel);
 static int host_panel_off(uint8_t *panel);
+static int brightness_writes, last_brightness;
+static int host_write_brightness(uint32_t level) { brightness_writes++; last_brightness = (int)level; return 0; }
+#define FW_PANEL_WRITE_BRIGHTNESS host_write_brightness
 static int host_suspend(uint8_t *s);
 static int host_resume(uint8_t *s);
 #define FW_FRAME_OF(panel) ((void)(panel), host_frame)
@@ -175,7 +178,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/32", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/33", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -619,8 +622,11 @@ int main(void)
     panel_cb_calls = 0;
     host_frame[7] = 0xA5;
     pushed_row[7] = 0;
-    cfw_work_mode(3);                       /* normal standby: worn, panel on and frame pushed */
+    panel[FW_PANEL_BRIGHTNESS_LEVEL] = 0x15;
+    brightness_writes = 0;
+    cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness programmed, frame pushed */
     CHECK(panel_cb_calls == 1 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5);
+    CHECK(brightness_writes == 1 && last_brightness == 0x15);
     cfw_work_mode(2);                       /* normal run: already on */
     CHECK(panel_cb_calls == 1);
     cfw_work_mode(4);                       /* taken off: panel off */

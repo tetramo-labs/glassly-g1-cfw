@@ -802,6 +802,21 @@ host reports the draw as deferred instead of failing. The frame goes out
 whole when the panel comes on (`cfw_auto_panel`), so a host can load the
 display of a pair lying on the table.
 
+**Hardware result.** With the pattern deferred into both frame buffers the
+CFW thresholds did their job: on the head the word read 60-74 and both
+panels powered on within a few seconds (right 13.8 s, left 9.6 s after the
+recording started), on the table it fell to 43-45 and both powered off
+within a second of the next statistics message. The lenses stayed dark
+throughout. `panel_on` (the on callback) powers the panel and runs
+`panel_init` but never programs the brightness register; the stock
+`panel_resume` follows its init with the register write (`0x49eac`) using
+the stored level at panel+0x369. Our path came up at the reset brightness.
+
+### G1CFW/33: brightness after power-on (2026-10-29)
+
+`cfw_auto_panel` writes the stored brightness level to the panel right after
+the on callback, before the frame push.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

@@ -308,8 +308,10 @@ the glasses sense:
 **Panel follows wear (G1CFW/27, reworked in /28).** With the stock refresh
 pipeline stubbed nothing asks for the panel when the glasses are put on, so
 unless bit 4 is set the CFW switches it: on through the panel's own
-callback followed by a push of the whole frame buffer (the panel comes up
-blank, the buffer survives), off through the off callback. Two sources
+callback, then the stored brightness level is written to the panel (the
+on callback alone leaves it dark, G1CFW/33), then a push of the whole
+frame buffer (the panel comes up blank, the buffer survives); off through
+the off callback. Two sources
 feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
 and `case closed` (`0b`) only flow while a central is connected (the stock
 wear state machine resets when nothing is). The stock work-mode switch

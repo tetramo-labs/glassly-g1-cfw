@@ -85,6 +85,16 @@ typedef int (*fw_system_power_fn)(uint8_t *state);
 typedef int (*fw_panel_cb_fn)(uint8_t *panel);
 #define FW_PANEL_CB_OFF 0x0c
 #define FW_PANEL_CB_ON  0x10
+/* panel_on (0x49e48) powers the panel and runs panel_init but leaves the
+ * brightness register at its reset value, which is dark; panel_resume
+ * (0x49f28) follows its init with 0x49eac(level), the register write, using
+ * the stored level at panel+0x369 (state+0xed5, the user setting, 0x15
+ * after clear_user_settings). The CFW does the same after the on callback. */
+#define FW_PANEL_BRIGHTNESS_LEVEL 0x369
+typedef int (*fw_level_fn)(uint32_t level);
+#ifndef FW_PANEL_WRITE_BRIGHTNESS
+#define FW_PANEL_WRITE_BRIGHTNESS ((fw_level_fn)0x00049ead)
+#endif
 #ifndef FW_PANEL_CB_OF
 #define FW_PANEL_CB_OF(panel, slot) ((fw_panel_cb_fn)(uintptr_t)(*(uint32_t *)((panel) + (slot))))
 #endif

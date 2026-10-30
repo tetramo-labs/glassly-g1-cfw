@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 32u
+#define CFW_PROTOCOL 33u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1476,6 +1476,8 @@ static void cfw_auto_panel(cfw_input *in, int on)
     int powered = *(int *)(panel + FW_PANEL_POWERED) != 0;
     if (on && !powered) {
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
+        /* panel_on leaves the brightness register dark (fw_abi.h). */
+        FW_PANEL_WRITE_BRIGHTNESS(panel[FW_PANEL_BRIGHTNESS_LEVEL]);
         in->panel_autos++;
         cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
         cfw_flush(panel, &all);
