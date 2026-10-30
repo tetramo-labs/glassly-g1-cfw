@@ -1552,49 +1552,56 @@ static void cv_path_draw(const cfw_raster *r, cfw_vwork *w, const uint8_t *asset
     cv_fill(r, w, count, asset[2], color);
 }
 
-/* Arc contour in Q4 about (cx, cy): optional pie spokes, closed for a full turn. */
-static void cv_ellipse(cfw_vwork *w, uint32_t *n, int32_t cx, int32_t cy, int32_t rad, int32_t a0, int32_t span, int pie)
+/* Arc contour in Q4 about (cx, cy): optional pie spokes, closed for a full
+ * turn. 8 degrees per segment keeps a ring (two contours) and its stroke
+ * within the 128-edge workspace; returns 0 when it would not fit. */
+static int cv_ellipse(cfw_vwork *w, uint32_t *n, int32_t cx, int32_t cy, int32_t rad, int32_t a0, int32_t span, int pie)
 {
     int32_t px = cx + ((rad * cv_sin((a0 + 90) * 16)) >> 15);
     int32_t py = cy + ((rad * cv_sin(a0 * 16)) >> 15);
     int32_t sx = px, sy = py;
-    if (pie) cv_edge(w, n, cx, cy, px, py);
-    uint32_t seg = (uint32_t)(span < 0 ? -span : span) / 4 + 1;
+    int ok = 1;
+    if (pie) ok &= cv_edge(w, n, cx, cy, px, py);
+    uint32_t seg = (uint32_t)(span < 0 ? -span : span) / 8 + 1;
     for (uint32_t i = 1; i <= seg; i++) {
         int32_t a = a0 * 16 + span * 16 * (int32_t)i / (int32_t)seg;
         int32_t nx = cx + ((rad * cv_sin(a + 90 * 16)) >> 15);
         int32_t ny = cy + ((rad * cv_sin(a)) >> 15);
-        cv_edge(w, n, px, py, nx, ny);
+        ok &= cv_edge(w, n, px, py, nx, ny);
         px = nx; py = ny;
     }
-    if (pie) cv_edge(w, n, px, py, cx, cy);
-    else if (span == 360 || span == -360) cv_edge(w, n, px, py, sx, sy);
+    if (pie) ok &= cv_edge(w, n, px, py, cx, cy);
+    else if (span == 360 || span == -360) ok &= cv_edge(w, n, px, py, sx, sy);
+    return ok;
 }
 
-static void cv_roundrect(cfw_vwork *w, uint32_t *n, int32_t x, int32_t y, int32_t ww, int32_t hh, int32_t rad)
+/* Rounded rectangle contour, eight segments per corner. */
+static int cv_roundrect(cfw_vwork *w, uint32_t *n, int32_t x, int32_t y, int32_t ww, int32_t hh, int32_t rad)
 {
-    if (ww <= 0 || hh <= 0) return;
+    if (ww <= 0 || hh <= 0) return 1;
     rad = cfw_clamp(rad, 0, (ww < hh ? ww : hh) / 2);
     int32_t cx[4] = { x + ww - rad, x + ww - rad, x + rad, x + rad };
     int32_t cy[4] = { y + rad, y + hh - rad, y + hh - rad, y + rad };
     int32_t px = x + ww - rad, py = y, sx = px, sy = py;
+    int ok = 1;
     for (int k = 0; k < 4; k++) {
-        for (int j = 0; j <= 15; j++) {
-            int32_t a = (-90 + k * 90 + j * 6) * 16;
+        for (int j = 1; j <= 8; j++) {
+            int32_t a = (-90 + k * 90 + j * 90 / 8) * 16;
             int32_t nx = cx[k] + ((rad * cv_sin(a + 90 * 16)) >> 15);
             int32_t ny = cy[k] + ((rad * cv_sin(a)) >> 15);
-            cv_edge(w, n, px, py, nx, ny);
+            ok &= cv_edge(w, n, px, py, nx, ny);
             px = nx; py = ny;
         }
     }
-    cv_edge(w, n, px, py, sx, sy);
+    return ok & cv_edge(w, n, px, py, sx, sy);
 }
 
-/* A rotated primitive: contours filled even-odd, or stroked edge by edge. */
+/* A rotated primitive: contours filled even-odd, or stroked edge by edge.
+ * A shape whose contours would not fit the workspace draws nothing. */
 static void cv_shape_draw(const cfw_raster *r, cfw_vwork *w, const cfw_shape *s, int32_t angle, int32_t px, int32_t py)
 {
     uint32_t n = 0;
-    int fill = 0;
+    int fill = 0, ok = 1;
     int32_t p[8];
     for (uint32_t i = 0; i < 8; i++) p[i] = (int32_t)cfw_clamp(s->p[i], CFW_COORD_MIN, CFW_COORD_MAX) * 16 + 8;
     int32_t wd = s->width ? s->width : 1;
@@ -1604,23 +1611,23 @@ static void cv_shape_draw(const cfw_raster *r, cfw_vwork *w, const cfw_shape *s,
         int32_t x = p[0] - 8, y = p[1] - 8;
         int32_t ww = cfw_clamp(s->p[2], 0, CFW_DIM_MAX) * 16, hh = cfw_clamp(s->p[3], 0, CFW_DIM_MAX) * 16;
         int32_t rad = cfw_clamp(s->p[4], 0, CFW_DIM_MAX) * 16;
-        cv_roundrect(w, &n, x, y, ww, hh, rad);
-        if (s->type == CFW_SHAPE_RECT) cv_roundrect(w, &n, x + wd * 16, y + wd * 16, ww - wd * 32, hh - wd * 32, rad - wd * 16);
+        ok &= cv_roundrect(w, &n, x, y, ww, hh, rad);
+        if (s->type == CFW_SHAPE_RECT) ok &= cv_roundrect(w, &n, x + wd * 16, y + wd * 16, ww - wd * 32, hh - wd * 32, rad - wd * 16);
         fill = 1;
         break;
     }
     case CFW_SHAPE_CIRCLE:
     case CFW_SHAPE_CIRCLE_FILL: {
         int32_t rad = cfw_clamp(s->p[2], 0, CFW_COORD_MAX) * 16 + 8;
-        cv_ellipse(w, &n, p[0], p[1], rad, 0, 360, 0);
-        if (s->type == CFW_SHAPE_CIRCLE && rad > wd * 16) cv_ellipse(w, &n, p[0], p[1], rad - wd * 16, 0, 360, 0);
+        ok &= cv_ellipse(w, &n, p[0], p[1], rad, 0, 360, 0);
+        if (s->type == CFW_SHAPE_CIRCLE && rad > wd * 16) ok &= cv_ellipse(w, &n, p[0], p[1], rad - wd * 16, 0, 360, 0);
         fill = 1;
         break;
     }
     case CFW_SHAPE_ARC:
     case CFW_SHAPE_PIE: {
         int32_t span = cfw_clamp((int32_t)s->p[4] - s->p[3], -360, 360);
-        cv_ellipse(w, &n, p[0], p[1], cfw_clamp(s->p[2], 0, CFW_COORD_MAX) * 16, s->p[3] % 360, span, s->type == CFW_SHAPE_PIE);
+        ok &= cv_ellipse(w, &n, p[0], p[1], cfw_clamp(s->p[2], 0, CFW_COORD_MAX) * 16, s->p[3] % 360, span, s->type == CFW_SHAPE_PIE);
         fill = s->type == CFW_SHAPE_PIE;
         break;
     }
@@ -1628,7 +1635,7 @@ static void cv_shape_draw(const cfw_raster *r, cfw_vwork *w, const cfw_shape *s,
         cv_quad_to_cubic(p);
         /* fall through */
     case CFW_SHAPE_BEZIER3:
-        if (!cv_curve(w, &n, p, 0)) return;
+        ok = cv_curve(w, &n, p, 0);
         break;
     default: {
         uint32_t vertices = s->type == CFW_SHAPE_LINE ? 2 : ((s->type == CFW_SHAPE_TRI || s->type == CFW_SHAPE_TRI_FILL) ? 3 : 4);
@@ -1638,6 +1645,7 @@ static void cv_shape_draw(const cfw_raster *r, cfw_vwork *w, const cfw_shape *s,
         break;
     }
     }
+    if (!ok) return;
     cv_transform(w, n, angle, px, py);
     if (fill) {
         cv_fill(r, w, n, 1, s->color);
@@ -2995,9 +3003,14 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
             }
             for (uint32_t k = 0; k < CFW_ANIM_VALUES; k++) {
                 if (mask & (1u << k)) {
-                    g->from[k] = cfw_obj_value(obj, k);
                     g->to[k] = rd16s(v);
                     v += 2;
+                    if (k >= 11) {
+                        /* The pivot is where the object turns, not a value
+                         * to glide: it moves at once. */
+                        cfw_obj_set_value(obj, k, g->to[k]);
+                    }
+                    g->from[k] = cfw_obj_value(obj, k);
                 }
             }
             g->id = obj->id;

@@ -240,9 +240,10 @@ engine or shape records, so showing a scene again costs one SHOW.
   (kind 4 only), bits 10-12 (`0x400`, `0x800`, `0x1000`) the rotation angle
   in Q4 degrees (16 per degree, so 1440 is a quarter turn; unwrapped, so
   5760 is a full turn) and the pivot x and y in canvas pixels (kinds 4 and
-  5 only). A rotated primitive is drawn as a contour (rounded rectangles,
-  rings and arcs become polylines, strokes stay `width` wide) and pushes the
-  whole frame. Each entry interpolates its object from its current
+  5 only; the pivot moves at once when its entry applies, only the angle
+  glides). A rotated primitive is drawn as a contour (rounded rectangles,
+  rings and arcs become polylines of 8-degree segments, strokes stay
+  `width` wide) and pushes the whole frame. Each entry interpolates its object from its current
   values (mid-flight if it was already animating) to the targets over
   `frames` frames, `period_ms` apart (10-250; 0 keeps the current period);
   `frames` 0 applies the targets at once. Entries merge into the running

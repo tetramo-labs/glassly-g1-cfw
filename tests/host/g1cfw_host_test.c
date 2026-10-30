@@ -913,6 +913,22 @@ int main(int argc, char **argv)
     CHECK(px(350, 90) == 15 && px(320, 60) == 15 && px(310, 90) == 0 && px(350, 50) == 0);
     cfw_display_tick(state, 0x10, 0, 2);
     CHECK(px(310, 90) == 15 && px(350, 50) == 0 && px(320, 60) == 0);
+    /* A rotated ring is still a ring: its lit area barely depends on the angle. */
+    uint8_t o12[] = { 0xF0, 0x20, 12, 0, 1, 0, 4, 0x01, 4, 1, 15, 6, 0x40, 0x01, 100, 0, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  /* ring r 40 w 6 at (320,100) */
+    CHECK(send_packet(o12, sizeof o12) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show12[] = { 0xF0, 0x21, 0x03, 1, 12, 0 };
+    CHECK(send_packet(show12, sizeof show12) == 0 && last_reply[2] == CFW_OK);
+    int ring0 = count_level(270, 50, 371, 151, 15);
+    CHECK(ring0 > 1300 && ring0 < 1550);
+    for (int deg = 30; deg < 360; deg += 30) {
+        uint8_t spin[] = { 0xF0, 0x25, 0, 1, 12, 0, 0x00, 0x1C, 0, 0, (uint8_t)(deg * 16), (uint8_t)((deg * 16) >> 8), 0x40, 0x01, 100, 0 };
+        CHECK(send_packet(spin, sizeof spin) == 0 && last_reply[2] == CFW_OK);
+        int lit = count_level(270, 50, 371, 151, 15);
+        if (lit < ring0 - ring0 / 8 || lit > ring0 + ring0 / 8) {
+            printf("rotated ring at %d degrees lights %d pixels, unrotated %d\n", deg, lit, ring0);
+            failures++;
+        }
+    }
     CHECK(send_packet(o1, sizeof o1) == 0 && last_reply[2] == CFW_OK);
     uint8_t rot_rect[] = { 0xF0, 0x25, 0, 1, 1, 0, 0x00, 0x04, 0, 0, 0, 0 };                       /* a kind-2 rect cannot rotate */
     CHECK(send_packet(rot_rect, sizeof rot_rect) == 0 && last_reply[2] == CFW_BAD_RECORD);
