@@ -884,6 +884,15 @@ panel now comes up with whatever the buffer holds, which is what the host
 drew last, including draws deferred while it was off (/32). Switching and
 the repeated pushes stay as in /35.
 
+Hardware: the pattern was drawn while the glasses lay on the table (panel
+off, deferred), and it lit up by itself when they were put on; the panel
+goes off on take-off and on again when worn, on both temples. The wear
+detection works end to end. Open: in the automatically pushed frame the
+first few and last few pixel rows of the pattern sit slightly left of the
+rest, and the whole display lights; a host `draw` right after (band pushes
+from the BLE handler) is the comparison for whether the whole-frame push
+from the 200 ms tick is what shifts them.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
