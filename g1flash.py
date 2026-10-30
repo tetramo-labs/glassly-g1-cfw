@@ -234,6 +234,19 @@ def record(cmd, payload):
     return bytes([cmd]) + struct.pack('<H', len(payload)) + payload
 
 
+def shape_record(kind, color, width, *params):
+    """One 20-byte SHAPES record (G1CFW/38): [type][flags][color][width][p0..p7 as int16]."""
+    params = list(params) + [0] * (8 - len(params))
+    return bytes([kind, 0, color & 0xF, width & 0xFF]) + struct.pack('<8h', *params)
+
+
+def anim_entry(oid, mask, frames, easing, *values):
+    """One OBJ_ANIM tween entry: [id][mask][frames][easing] then an int16 target per set mask bit."""
+    if bin(mask).count('1') != len(values):
+        raise FirmwareError(f'tween mask {mask:#x} needs {bin(mask).count("1")} values, got {len(values)}')
+    return struct.pack('<HHBB', oid, mask, frames, easing) + struct.pack(f'<{len(values)}h', *values)
+
+
 class StreamSender:
     """Pipelined multi-packet messages: packets go out without waiting; only
     the last packet of a message is answered."""
@@ -396,33 +409,39 @@ async def run_cfw_command(client, args, checkpoint):
                 await link.check(CFW_ASSET_TEXT, struct.pack('<HBBHHHHB', args.id, args.font, flags, x0, y0, x1, y1, args.lines))
                 result = {'id': args.id, 'font': args.font, 'box': args.box}
         elif args.command == 'shapes':
-            def shape(kind, fill, level, width, *pts):
-                pts = list(pts) + [0] * (6 - len(pts))
-                return bytes([kind, 1 if fill else 0, level, width]) + struct.pack('<6h', *pts)
             if args.demo:
-                recs = [shape(1, True, 0, 1, 0, 0, 639, 199),
-                        shape(1, False, 15, 2, 4, 4, 635, 195),
-                        shape(2, True, 15, 1, 120, 100, 60),
-                        shape(2, False, 8, 4, 120, 100, 80),
-                        shape(0, False, 15, 3, 240, 20, 620, 180),
-                        shape(0, False, 15, 1, 240, 180, 620, 20),
-                        shape(3, True, 10, 1, 430, 30, 520, 30, 475, 110),
-                        shape(3, False, 15, 2, 300, 150, 420, 150, 360, 60)]
+                recs = [shape_record(2, 15, 2, 4, 4, 632, 192, 12),          # rounded frame
+                        shape_record(5, 15, 0, 120, 100, 60),               # disc
+                        shape_record(4, 8, 4, 120, 100, 80),                # ring
+                        shape_record(1, 15, 3, 240, 20, 620, 180),          # 3 px line
+                        shape_record(1, 15, 1, 240, 180, 620, 20),          # hairline
+                        shape_record(7, 10, 0, 430, 30, 520, 30, 475, 110), # filled triangle
+                        shape_record(6, 15, 2, 300, 150, 420, 150, 360, 60),
+                        shape_record(3, 12, 0, 240, 70, 100, 40, 14),       # rounded fill
+                        shape_record(12, 15, 4, 560, 100, 40, 135, 405),    # gauge arc
+                        shape_record(13, 9, 0, 560, 100, 25, -90, 135),     # sector
+                        shape_record(11, 15, 2, 250, 140, 320, 90, 400, 190, 470, 140)]
             else:
                 recs = []
                 for spec in args.shape:
-                    kind, fill, level, width, *pts = (int(v) for v in spec.split(','))
-                    recs.append(shape(kind, fill, level, width, *pts))
+                    kind, color, width, *pts = (int(v) for v in spec.split(','))
+                    recs.append(shape_record(kind, color, width, *pts))
             payload = bytes([0 if args.no_flush else 0x02, len(recs)]) + b''.join(recs)
             await link.check(CFW_SHAPES, payload)
             result = {'shapes': len(recs), 'flushed': not args.no_flush}
         elif args.command == 'obj':
-            kinds = {'image': 0, 'text': 1, 'rect': 2, 'shapes': 3}
+            kinds = {'image': 0, 'text': 1, 'rect': 2, 'shapes': 3, 'shape': 4}
             if args.action == 'put':
                 if args.id is None:
                     raise FirmwareError('obj put needs --id')
-                payload = struct.pack('<HHBBhhHHHBBB', args.id, args.version, kinds[args.kind], 1 if not args.hidden else 0,
-                                      args.at[0], args.at[1], args.size[0], args.size[1], args.asset, args.level, args.font, args.lines)
+                if args.kind == 'shape':
+                    if not args.record:
+                        raise FirmwareError('obj put --kind shape needs --record type,color,width,p0,...')
+                    kind, color, width, *pts = (int(v) for v in args.record.split(','))
+                    payload = struct.pack('<HHBB', args.id, args.version, 4, 1 if not args.hidden else 0) + shape_record(kind, color, width, *pts)
+                else:
+                    payload = struct.pack('<HHBBhhHHHBBB', args.id, args.version, kinds[args.kind], 1 if not args.hidden else 0,
+                                          args.at[0], args.at[1], args.size[0], args.size[1], args.asset, args.level, args.font, args.lines)
                 await link.check(CFW_OBJ_PUT, payload)
                 result = {'id': args.id, 'kind': args.kind, 'at': args.at}
             elif args.action == 'show':
@@ -443,7 +462,10 @@ async def run_cfw_command(client, args, checkpoint):
                     oid, target, rest = spec.split(':', 2) if spec.count(':') >= 2 else (*spec.split(':', 1), '8')
                     tx, ty = (int(v) for v in target.split(','))
                     frames, _, ease = rest.partition(':')
-                    moves.append(struct.pack('<HhhBB', int(oid), tx, ty, int(frames), int(ease or 0)))
+                    moves.append(anim_entry(int(oid), 0x03, int(frames), int(ease or 0), tx, ty))
+                for spec in args.tween:
+                    oid, mask, frames, ease, values = spec.split(':', 4)
+                    moves.append(anim_entry(int(oid), int(mask, 0), int(frames), int(ease), *(int(v) for v in values.split(','))))
                 before = await link.check(CFW_ANIM_STATE)
                 started = asyncio.get_running_loop().time()
                 await link.check(CFW_OBJ_ANIM, bytes([args.period, len(moves)]) + b''.join(moves))
@@ -889,11 +911,14 @@ def arguments(argv=None):
         if command == 'obj':
             child.add_argument('action', choices=('put', 'show', 'hide', 'state', 'drop', 'anim'))
             child.add_argument('--move', action='append', default=[], help='anim: id:tx,ty:frames[:easing] (0 linear, 1 smooth, 2 out, 3 in)')
+            child.add_argument('--tween', action='append', default=[],
+                               help='anim: id:mask:frames:easing:v0,v1,... (mask bits 0-7 params, 0x100 colour, 0x200 width)')
+            child.add_argument('--record', default=None, help='put --kind shape: type,color,width,p0,... (a SHAPES record)')
             child.add_argument('--period', type=int, default=20, help='anim: ms per frame (1-250; 0 keeps current). 20 gives about 30 fps')
             child.add_argument('--wait', action='store_true', help='anim: wait for the glides to finish and report frames per second')
             child.add_argument('--id', type=int, default=None)
             child.add_argument('--version', type=int, default=1)
-            child.add_argument('--kind', choices=('image', 'text', 'rect', 'shapes'), default='rect')
+            child.add_argument('--kind', choices=('image', 'text', 'rect', 'shapes', 'shape'), default='rect')
             child.add_argument('--at', type=lambda v: tuple(int(x) for x in v.split(',')), default=(0, 0))
             child.add_argument('--size', type=lambda v: tuple(int(x) for x in v.split(',')), default=(0, 0), help='w,h for rect/text boxes')
             child.add_argument('--asset', type=int, default=0)
@@ -938,7 +963,8 @@ def arguments(argv=None):
         if command == 'shapes':
             child.add_argument('--demo', action='store_true', help='Draw a built-in shapes demo')
             child.add_argument('--shape', action='append', default=[],
-                               help='kind,fill,level,width,p0,...  kinds: 0 line x0,y0,x1,y1; 1 rect; 2 circle cx,cy,r; 3 triangle')
+                               help='type,color,width,p0,...  types: 1 line x0,y0,x1,y1; 2 rect x,y,w,h,r; 3 rect fill; 4 circle cx,cy,r; '
+                                    '5 disc; 6 triangle; 7 triangle fill; 8 quad; 9 quad fill; 10 quadratic; 11 cubic; 12 arc cx,cy,r,a0,a1; 13 pie')
         if command in ('fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'obj'):
             child.add_argument('--no-flush', action='store_true', help='Write the frame buffer only; do not push to the panel')
         if command == 'draw':
