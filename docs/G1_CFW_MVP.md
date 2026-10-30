@@ -324,7 +324,8 @@ to the application image, g2flash-style, and hook one stock call site:
   carve has an explicit stub list. `DashBoard_Reflash` (`0x399e0`, 15,828
   bytes, called only from `ui_DashBoard_task`) is the first region: a 4-byte
   `movs r0,#0; bx lr` stub at its entry and the blob at `0x399e4`, leaving the
-  image at the stock size. Further candidates from the map: the UI task block
+  image at the stock size. G1CFW/38 extends the region to `0x3e7a8` and
+  neutralises the five outside callers (see the G1CFW/38 entry below). Further candidates from the map: the UI task block
   `0x399e0..0x42da8` (about 38 KB, 80 entry points), notification parsing
   (about 10 KB), navigation map rendering (about 4 KB), factory tests (about
   2 KB). The `gui_utf_*` text drawers (about 10 KB) are worth keeping for a
@@ -905,6 +906,52 @@ the 280 panel rows outside the 200-row canvas (row origin plus the view
 input state in the second RAM region and restored. A draw landing in row 0
 during those pushes (one stock push per row, about 1 ms each) is overwritten
 by the restore; that window is accepted.
+
+### G1CFW/38: the g2flash shape set, parameter tweens, a wider carve (2026-10-30)
+
+Parity pass with g2flash's shape rasterizer (`patches/shapes.c`), driven by
+the glassly shapes test suite (`tools/shapes_suite.py`, ported from
+`g2flash/demos/shapes-suite.ts`):
+
+- SHAPES and shapes assets take g2flash's 20-byte records, types 1-13:
+  lines with square-capped strokes, rounded rectangles (filled and
+  outlined), circles and rings, triangles and quads (filled and stroked),
+  quadratic and cubic beziers, arcs and pie sectors. The rasterizer is the
+  g2flash one in integer math: an integer square root scan-converts
+  circles and corners per row, an even-odd scanline filler in 1/16 pixel
+  units handles every polygon, and coordinates are clamped to +/-1024 so
+  products stay within 32 bits. Pixel-exact checks for every type are in
+  `tests/host/g1cfw_host_test.c`.
+- Object kind 4 holds one such record, so a shape's parameters, colour and
+  stroke width can be animated: OBJ_ANIM entries are tweens
+  `[id][mask][frames][easing][targets]` that start from the object's
+  current values and merge into the running set by id (a tween for one
+  object never cancels another's; a retarget restarts from the value
+  reached; `frames` 0 snaps). Kind 4 objects have a type-aware bounding box,
+  so their frames push only the union of the old and new boxes. A PUT or a
+  HIDE stops the object's tween. The old 8-byte glide entry is mask `0x03`.
+- VIEW set now blanks every panel row outside the new canvas and pushes
+  the whole frame when the panel is powered. Before this a host that moved
+  the canvas on connect (the dashboard height setting) left the stock boot
+  screens lit on the rows the canvas no longer covered; that was the
+  "the rest of the display never cleared" report against G1CFW/37.
+- Fix: G1CFW/37 parked frame row 0 during the margin blank at the address
+  of the view state (`cfw_input_state() + sizeof(cfw_input)`), wiping the
+  view, IMU and mic states on every panel power-up (the view fell back to
+  the stock origin). The row now has its own slot after the mic state and
+  the static assert covers the whole second RAM region.
+- Flash: the blob grew to 17,440 bytes, so the carve runs on from
+  `DashBoard_Reflash` through `ui_DashBoard_task`, `ui_QuickNote_task` and
+  the `dmic_record_start` helper only they call (`0x399e4..0x3e7a8`, 19,908
+  bytes, 2,468 left). `tools/g1carve.py 0x3d7a4 0x3e7a8` lists five `bl`
+  sites outside the range (three in `ui_raster_height_task`, two in
+  `ui_refalsh_warp`); `tools/gen_profile.py` rewrites each to
+  `movs r0, #0; nop` after decoding the branch and checking its target. The
+  cluster of two-byte callbacks at `0x3e882..0x3e912` referenced from the
+  hardware-id and SPI code is the hard stop for this region.
+- Not ported (yet): filled SVG paths (record type 18) and rotation (SHOW op
+  9), g2flash's `vector.c`; text colour tweens (the stock text drawer has no
+  level); cubic-bezier easing curves (the four easing codes stay).
 
 ## References and remaining work
 

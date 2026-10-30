@@ -32,11 +32,35 @@ HOOK_SITE = 0x2338e
 HOOK_OLD = bytes.fromhex('ebf7cbfd')
 # Stock code the CFW replaces. DashBoard_Reflash (0x399e0..0x3d7a4) is only
 # entered at its start (from ui_DashBoard_task); a 4-byte stub there returns 0
-# and the rest of the body becomes the injected blob (tools/g1carve.py).
+# and the rest of the body becomes the injected blob (tools/g1carve.py). From
+# G1CFW/38 the region runs on through the dashboard UI task, the quick-note
+# task and the mic start helper only they use (0x3d7a4..0x3e7a8); the five
+# `bl` sites outside the region that enter it (tools/g1carve.py 0x3d7a4
+# 0x3e7a8) become `movs r0, #0; nop`, so the whole range is one blob.
 CARVES = {
-    'dashboard': {'stub': 0x399e0, 'region': (0x399e4, 0x3d7a4), 'name': 'DashBoard_Reflash'},
+    'dashboard': {'stub': 0x399e0, 'region': (0x399e4, 0x3e7a8), 'name': 'DashBoard_Reflash..ui_QuickNote_task',
+                  'callers': [
+                      (0x4580e, 0x3d7a4, 'ui_raster_height_task -> dashboard helper'),
+                      (0x457be, 0x3d904, 'ui_raster_height_task -> ui_DashBoard_task'),
+                      (0x45834, 0x3d904, 'ui_raster_height_task -> ui_DashBoard_task'),
+                      (0x4bc88, 0x3d904, 'ui_refalsh_warp -> ui_DashBoard_task'),
+                      (0x4bcc0, 0x3e288, 'ui_refalsh_warp -> ui_QuickNote_task'),
+                  ]},
 }
 STUB = bytes.fromhex('00207047')  # movs r0, #0; bx lr
+CALL_STUB = bytes.fromhex('002000bf')  # movs r0, #0; nop (in place of a bl)
+
+
+def bl_target(code, addr):
+    """Target of the Thumb-2 `bl` encoded in the 4 bytes `code` at `addr`."""
+    hw1, hw2 = struct.unpack('<HH', code)
+    assert (hw1 >> 11) == 0x1e and (hw2 >> 14) == 0x3 and (hw2 >> 12) & 1, f'not a bl at {addr:#x}'
+    s, j1, j2 = (hw1 >> 10) & 1, (hw2 >> 13) & 1, (hw2 >> 11) & 1
+    i1, i2 = ~(j1 ^ s) & 1, ~(j2 ^ s) & 1
+    imm = (s << 24) | (i1 << 23) | (i2 << 22) | ((hw1 & 0x3ff) << 12) | ((hw2 & 0x7ff) << 1)
+    if s:
+        imm -= 1 << 25
+    return addr + 4 + imm
 # Stock functions silenced so the stock display path never touches the frame
 # buffer or panel again (g2flash's framebuffer lease, by removal). Each is only
 # entered at its start (tools/g1carve.py) and its return value is unused.
@@ -112,6 +136,11 @@ def main():
                         'new': STUB.hex(), 'description': f'{carve["name"]}: stub entry (return 0); body reused for CFW code'})
         patches.append({'offset': region_file, 'old': stock[region_file:region_file + len(blob)].hex(), 'new': blob.hex(),
                         'description': f'CFW blob over {carve["name"]} body at {lo:#x}'})
+        for site, target, why in carve.get('callers', []):
+            off = site - SLOT_BASE
+            assert bl_target(stock[off:off + 4], site) == target, f'caller {site:#x} does not bl {target:#x}'
+            patches.append({'offset': off, 'old': stock[off:off + 4].hex(), 'new': CALL_STUB.hex(),
+                            'description': f'caller {site:#x}: {why} ({target:#x}) returns 0 without the call'})
     else:
         place = (original.signed_end + 3) & ~3
         append = bytes(place - original.signed_end) + blob

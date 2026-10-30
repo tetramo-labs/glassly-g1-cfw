@@ -176,7 +176,134 @@ static int send_packet(const uint8_t *packet, uint32_t len)
     return cfw_rx(packet, len);
 }
 
-int main(void)
+static int32_t rd32le(const uint8_t *p)
+{
+    int32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+/* Grey nibble of canvas pixel (x, y). */
+static int px(int x, int y)
+{
+    uint8_t b = frame[y * 320 + x / 2];
+    return (x & 1) ? (b & 0xF) : (b >> 4);
+}
+
+static int count_level(int x0, int y0, int x1, int y1, int level)
+{
+    int n = 0;
+    for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) if (px(x, y) == level) n++;
+    return n;
+}
+
+static void write_pgm(const char *dir, int index, const char *label)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/%03d-%s.pgm", dir, index, label);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        perror(path);
+        return;
+    }
+    fprintf(f, "P5\n640 200\n255\n");
+    for (int y = 0; y < 200; y++) {
+        for (int x = 0; x < 640; x++) {
+            fputc(px(x, y) * 17, f);
+        }
+    }
+    fclose(f);
+}
+
+/* Replay a tools/shapes_suite.py --dump stream: [1][len:u16][message] goes out
+ * as STREAM packets and must be accepted; [2][ms:u32] runs the display thread
+ * for that long while tweens are in flight (and writes a PGM of the frame when
+ * `dir` is given); [3][len][label] names the following snapshots. */
+static int replay(const char *path, const char *dir)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = malloc((size_t)n + 1);
+    if (fread(d, 1, (size_t)n, f) != (size_t)n) {
+        fclose(f);
+        return 1;
+    }
+    fclose(f);
+    char label[300] = "start";
+    int shots = 0, msgs = 0, errors = 0;
+    uint8_t seq = 0;
+    for (long pos = 0; pos < n;) {
+        uint8_t tag = d[pos++];
+        if (tag == 1 && pos + 2 <= n) {
+            uint32_t len = (uint32_t)(d[pos] | d[pos + 1] << 8);
+            pos += 2;
+            if (pos + (long)len > n) {
+                errors++;
+                break;
+            }
+            const uint8_t *m = d + pos;
+            pos += len;
+            uint16_t crc = cfw_crc16(m, len);
+            uint32_t sent = 0;
+            int first = 1;
+            while (first || sent < len) {
+                uint8_t pkt[255];
+                uint32_t k = 4;
+                pkt[0] = 0xF0; pkt[1] = 0x10; pkt[2] = seq++;
+                if (first) {
+                    pkt[4] = (uint8_t)len; pkt[5] = (uint8_t)(len >> 8); pkt[6] = (uint8_t)crc; pkt[7] = (uint8_t)(crc >> 8);
+                    k = 8;
+                }
+                uint32_t take = len - sent < sizeof pkt - k ? len - sent : (uint32_t)(sizeof pkt - k);
+                memcpy(pkt + k, m + sent, take);
+                sent += take;
+                k += take;
+                pkt[3] = (uint8_t)((first ? 1 : 0) | (sent >= len ? 2 : 0));
+                first = 0;
+                send_packet(pkt, k);
+            }
+            msgs++;
+            if (last_reply_len < 5 || last_reply[1] != 0x10 || (last_reply[2] != CFW_OK && last_reply[2] != CFW_PANEL_OFF)) {
+                printf("replay: message %d (%s, %u bytes) refused: status %d after %d records\n", msgs, label, len, last_reply[2], last_reply[4]);
+                errors++;
+            }
+        } else if (tag == 2 && pos + 4 <= n) {
+            uint32_t ms = (uint32_t)rd32le(d + pos);
+            pos += 4;
+            cfw_anims *a = cfw_animation();
+            uint32_t period = a->period_ms ? a->period_ms : 20;
+            for (uint32_t t = 0; t <= ms / period && a->active; t++) {
+                cfw_display_tick(state, 0x10, 0, 2);
+            }
+            if (dir) {
+                write_pgm(dir, shots, label);
+            }
+            shots++;
+        } else if (tag == 3 && pos + 1 <= n) {
+            uint32_t len = d[pos++];
+            memcpy(label, d + pos, len);
+            label[len] = 0;
+            for (uint32_t i = 0; i < len; i++) if (label[i] == '/' || label[i] == ' ') label[i] = '_';
+            pos += len;
+        } else {
+            printf("replay: bad tag %d at offset %ld\n", tag, pos - 1);
+            errors++;
+            break;
+        }
+    }
+    free(d);
+    guards_intact();
+    printf("replay: %d messages, %d snapshots, %d errors%s\n", msgs, shots, errors, failures ? ", guard failures" : "");
+    return (errors || failures) ? 1 : 0;
+}
+
+int main(int argc, char **argv)
 {
     host_frame = frame = frame_store + GUARD + 5;
     memset(frame_store, 0xA5, sizeof frame_store);
@@ -186,6 +313,9 @@ int main(void)
     *(int *)(panel + FW_PANEL_COL_OFFSET) = 7;
     *(int *)(panel + FW_PANEL_ROW_OFFSET) = 35;
     *(int *)(panel + FW_PANEL_POWERED) = 1;
+    if (argc >= 3 && strcmp(argv[1], "--replay") == 0) {
+        return replay(argv[2], argc > 3 ? argv[3] : NULL);
+    }
 
     /* Pass-through: anything that is not 0xF0 goes to the stock hook untouched. */
     const uint8_t stock[] = { 0x25, 0x06, 0x00 };  /* stock heartbeat: passed through */
@@ -198,7 +328,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/37", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/38", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -436,36 +566,70 @@ int main(void)
     uint8_t bad_kind[] = { 0xF0, 0x08, 1, 0, 0x07, 0x00, 2, 0, 1, 0, 0 };
     CHECK(send_packet(bad_kind, sizeof bad_kind) == 0 && last_reply[2] == CFW_BAD_ASSET);
 
-    /* Shapes: filled rect, outlined rect, line, filled circle, ring, triangles; clipping. */
+    /* Shapes: the 20-byte records of the g2flash rasterizer, every type at once. */
     memset(frame, 0, 200 * 320);
     *(int *)(panel + FW_PANEL_POWERED) = 1;
-    uint8_t shapes[2 + 2 + 16 * 7];
-    shapes[0] = 0xF0; shapes[1] = 0x0D; shapes[2] = 0x02; shapes[3] = 7;
-    int16_t recs[7][10] = {
-        { 1, 1, 0x0F, 1, 10, 10, 13, 11, 0, 0 },      /* filled rect (10,10)-(13,11) */
-        { 1, 0, 0x0A, 1, 20, 20, 25, 24, 0, 0 },      /* outlined rect */
-        { 0, 0, 0x0F, 1, 100, 50, 104, 50, 0, 0 },    /* horizontal line */
-        { 2, 1, 0x0F, 1, 300, 100, 2, 0, 0, 0 },      /* filled circle r=2 */
-        { 2, 0, 0x0F, 1, 400, 100, 2, 0, 0, 0 },      /* ring r=2 */
-        { 3, 1, 0x0F, 1, 500, 150, 510, 150, 505, 160 }, /* filled triangle */
-        { 1, 1, 0x0F, 1, -10, 195, 5, 300, 0, 0 },    /* clipped rect to the bottom-left corner */
+    static const int16_t shape_recs[][12] = {   /* type, flags, colour, width, p0..p7 */
+        { 1, 0, 15, 1, -50, 199, 700, 170 },                       /* clipped at both ends, drawn first */
+        { 3, 0, 10, 0, 320, 10, 100, 60, 0 },                      /* rect fill (320,10) 100x60 */
+        { 3, 0, 15, 0, 430, 10, 100, 60, 16 },                     /* rounded rect fill, r 16 */
+        { 2, 0, 15, 4, 540, 10, 90, 60, 20 },                      /* rounded outline, 4 px */
+        { 5, 0, 15, 0, 100, 100, 60 },                             /* disc r 60 at (100,100) */
+        { 4, 0, 12, 8, 240, 100, 60 },                             /* ring r 60, 8 px thick */
+        { 5, 0, 8, 0, 480, 130, 1 },                               /* r 1: a 3x3 dot */
+        { 1, 0, 15, 1, 20, 190, 200, 190 },                        /* hairline */
+        { 1, 0, 9, 6, 20, 175, 200, 175 },                         /* 6 px stroke */
+        { 7, 0, 15, 0, 320, 190, 400, 190, 360, 150 },             /* filled triangle */
+        { 9, 0, 11, 0, 410, 150, 490, 160, 480, 195, 420, 185 },   /* filled quad */
+        { 8, 0, 15, 1, 500, 150, 550, 158, 545, 195, 505, 188 },   /* quad outline */
+        { 10, 0, 15, 1, 20, 60, 140, -40, 220, 60 },               /* quadratic, control point above the frame */
+        { 11, 0, 15, 4, 320, 100, 380, 75, 440, 125, 500, 100 },   /* cubic, 4 px */
+        { 12, 0, 15, 3, 560, 120, 40, 180, 360 },                  /* upper half arc */
+        { 13, 0, 6, 0, 600, 160, 30, 0, 360 },                     /* full pie: a disc */
+        { 13, 0, 15, 0, 300, 20, 15, -90, 135 },                   /* sector */
     };
-    for (int i = 0; i < 7; i++) {
-        uint8_t *rec = shapes + 4 + 16 * i;
-        rec[0] = (uint8_t)recs[i][0]; rec[1] = (uint8_t)recs[i][1]; rec[2] = (uint8_t)recs[i][2]; rec[3] = (uint8_t)recs[i][3];
-        for (int k = 0; k < 6; k++) { rec[4 + 2 * k] = (uint8_t)recs[i][4 + k]; rec[5 + 2 * k] = (uint8_t)(recs[i][4 + k] >> 8); }
+    enum { SHAPE_N = sizeof shape_recs / sizeof shape_recs[0] };
+    uint8_t shapes[4 + 20 * SHAPE_N];
+    shapes[0] = 0xF0; shapes[1] = 0x0D; shapes[2] = 0x02; shapes[3] = SHAPE_N;
+    for (int i = 0; i < SHAPE_N; i++) {
+        uint8_t *rec = shapes + 4 + 20 * i;
+        rec[0] = (uint8_t)shape_recs[i][0]; rec[1] = (uint8_t)shape_recs[i][1]; rec[2] = (uint8_t)shape_recs[i][2]; rec[3] = (uint8_t)shape_recs[i][3];
+        for (int k = 0; k < 8; k++) { rec[4 + 2 * k] = (uint8_t)shape_recs[i][4 + k]; rec[5 + 2 * k] = (uint8_t)(shape_recs[i][4 + k] >> 8); }
     }
     reflash_calls = 0;
     CHECK(send_packet(shapes, sizeof shapes) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[4] == 640 && last_rect[5] == 199);
-    CHECK(frame[10 * 320 + 5] == 0xFF && frame[10 * 320 + 6] == 0xFF && frame[11 * 320 + 6] == 0xFF && frame[10 * 320 + 7] == 0 && frame[12 * 320 + 5] == 0);
-    CHECK(frame[20 * 320 + 10] == 0xAA && frame[22 * 320 + 10] == 0xA0 && frame[22 * 320 + 11] == 0 && frame[22 * 320 + 12] == 0x0A && frame[24 * 320 + 11] == 0xAA);
-    CHECK(frame[50 * 320 + 50] == 0xFF && frame[50 * 320 + 52] == 0xF0 && frame[50 * 320 + 49] == 0 && frame[49 * 320 + 50] == 0);
-    CHECK(frame[100 * 320 + 150] == 0xFF && frame[98 * 320 + 150] == 0xF0 && frame[98 * 320 + 149] == 0 && frame[102 * 320 + 150] == 0xF0);
-    CHECK(frame[100 * 320 + 200] == 0 && frame[100 * 320 + 199] == 0xF0 && frame[100 * 320 + 201] == 0xF0 && frame[98 * 320 + 200] == 0xF0 && frame[99 * 320 + 199] == 0x0F);
-    CHECK(frame[150 * 320 + 250] == 0xFF && frame[150 * 320 + 255] == 0xF0 && frame[160 * 320 + 252] == 0x0F && frame[160 * 320 + 250] == 0 && frame[161 * 320 + 252] == 0);
-    CHECK(frame[195 * 320 + 0] == 0xFF && frame[199 * 320 + 2] == 0xFF && frame[199 * 320 + 3] == 0 && frame[194 * 320 + 0] == 0);
+    /* disc r 60: about pi * 60.5^2 = 11500 pixels, edges exactly at cx +- r */
+    int disc = count_level(40, 40, 161, 161, 15);
+    CHECK(disc > 11000 && disc < 11700);
+    CHECK(px(100, 100) == 15 && px(100, 39) == 0 && px(100, 40) == 15 && px(100, 160) == 15 && px(100, 161) == 0);
+    CHECK(px(39, 100) == 0 && px(40, 100) == 15 && px(160, 100) == 15 && px(161, 100) == 0);
+    /* ring r 60 w 8: hollow centre, band exactly 8 px thick */
+    CHECK(px(240, 100) == 0 && px(240, 40) == 12 && px(240, 47) == 12 && px(240, 48) == 0 && px(180, 100) == 12 && px(188, 100) == 0);
+    /* rect fill exact size; rounded corner removed, straight edges kept */
+    CHECK(px(320, 10) == 10 && px(419, 69) == 10 && px(420, 10) == 0 && px(320, 70) == 0);
+    CHECK(px(430, 10) == 0 && px(432, 12) == 0 && px(440, 12) == 15 && px(480, 10) == 15 && px(430, 40) == 15);
+    /* rounded outline: corner pixel empty, edge mid-points 4 px thick, centre empty */
+    CHECK(px(540, 10) == 0 && px(585, 10) == 15 && px(585, 13) == 15 && px(585, 14) == 0 && px(585, 40) == 0 && px(540, 40) == 15 && px(543, 40) == 15 && px(544, 40) == 0);
+    /* r 1 is a 3x3 block */
+    CHECK(px(479, 129) == 8 && px(481, 131) == 8 && px(478, 130) == 0 && px(482, 130) == 0 && px(480, 128) == 0);
+    /* lines: a hairline on its row; a 6 px stroke covers rows y-3 .. y+2 (pixel centres inside the quad) */
+    CHECK(px(20, 190) == 15 && px(200, 190) == 15 && px(19, 190) == 0 && px(100, 189) == 0 && px(100, 191) == 0);
+    CHECK(px(100, 175) == 9 && px(100, 172) == 9 && px(100, 177) == 9 && px(100, 171) == 0 && px(100, 178) == 0);
+    /* polygons */
+    CHECK(px(360, 185) == 15 && px(330, 185) == 15 && px(300, 160) == 0 && px(405, 150) == 0 && px(450, 172) == 11 && px(500, 150) == 15 && px(525, 172) == 0);
+    /* half arc through its top and both ends, nothing at the centre or below; a 360 degree pie is a disc */
+    CHECK(px(560, 80) == 15 && px(520, 120) == 15 && px(600, 120) == 15 && px(560, 120) == 0 && px(560, 160) == 0);
+    int pie = count_level(569, 129, 632, 192, 6);
+    CHECK(pie > 2750 && pie < 3100);
+    /* sector from -90 to 135 degrees covers the right half and the lower left, not the upper left */
+    CHECK(px(300, 20) == 15 && px(305, 10) == 15 && px(310, 25) == 15 && px(295, 30) == 15 && px(290, 25) == 0 && px(290, 15) == 0);
+    /* curves drew along their hulls; the long line was clipped at both ends */
+    CHECK(count_level(20, 0, 221, 61, 15) > 150 && count_level(318, 70, 503, 130, 15) > 400);
+    CHECK(px(0, 197) == 15 && px(639, 172) == 15);
     guards_intact();
-    uint8_t shapes_bad[] = { 0xF0, 0x0D, 0x00, 1, 9, 0, 0, 0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0 };
+    uint8_t shapes_bad[24] = { 0xF0, 0x0D, 0x00, 1, 14, 0, 15, 1 };
+    CHECK(send_packet(shapes_bad, sizeof shapes_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    shapes_bad[4] = 0;
     CHECK(send_packet(shapes_bad, sizeof shapes_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     CHECK(send_packet(shapes, 10) == 0 && last_reply[2] == CFW_BAD_LENGTH);
 
@@ -485,7 +649,7 @@ int main(void)
     CHECK(send_packet(o1, sizeof o1) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(o2, sizeof o2) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(o3, sizeof o3) == 0 && last_reply[2] == CFW_OK);
-    CHECK(memcmp(host_ram2 + 32, "OBJ2", 4) == 0 && host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
+    CHECK(memcmp(host_ram2 + 32, "OBJ3", 4) == 0 && host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
     memset(frame, 0x33, 200 * 320);
     utf_calls = 0; reflash_calls = 0;
     uint8_t show[] = { 0xF0, 0x21, 0x03, 3, 1, 0, 2, 0, 3, 0 };
@@ -517,7 +681,7 @@ int main(void)
     uint8_t show1[] = { 0xF0, 0x21, 0x03, 1, 1, 0 };
     CHECK(send_packet(show1, sizeof show1) == 0 && last_reply[2] == CFW_OK);
     post_calls = 0; sleep_calls = 0; reflash_calls = 0;
-    uint8_t anim[] = { 0xF0, 0x25, 40, 1, 1, 0, 110, 0, 50, 0, 4, 0 };
+    uint8_t anim[] = { 0xF0, 0x25, 40, 1, 1, 0, 0x03, 0x00, 4, 0, 110, 0, 50, 0 };   /* x and y, 4 frames, linear */
     CHECK(send_packet(anim, sizeof anim) == 0 && last_reply[2] == CFW_OK && post_calls == 1 && last_screen == 0x10);
     cfw_display_tick(state, 0x10, 0, 2);   /* frame 1: linear 1/4 of the way */
     CHECK(reflash_calls == 1 && sleep_calls == 1 && last_sleep == 40 && post_calls == 2);
@@ -533,29 +697,110 @@ int main(void)
     CHECK(reflash_calls == 4 && post_calls == 4);
     cfw_display_tick(state, 0x06, 0, 2);   /* stock screen id: ignored */
     CHECK(reflash_calls == 4);
-    uint8_t anim_bad[] = { 0xF0, 0x25, 40, 1, 9, 9, 0, 0, 0, 0, 4, 0 };
+    uint8_t anim_bad[] = { 0xF0, 0x25, 40, 1, 9, 9, 0x03, 0x00, 4, 0, 0, 0, 0, 0 };
     CHECK(send_packet(anim_bad, sizeof anim_bad) == 0 && last_reply[2] == CFW_NO_OBJECT);
-    CHECK(send_packet(anim, 9) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    CHECK(send_packet(anim, 11) == 0 && last_reply[2] == CFW_BAD_LENGTH);   /* values cut short */
+    CHECK(send_packet(anim, 7) == 0 && last_reply[2] == CFW_BAD_LENGTH);    /* entry header cut short */
+    uint8_t anim_mask[] = { 0xF0, 0x25, 40, 1, 1, 0, 0x00, 0x02, 4, 0, 1, 0 };   /* a rect has no stroke width */
+    CHECK(send_packet(anim_mask, sizeof anim_mask) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    uint8_t anim_none[] = { 0xF0, 0x25, 40, 1, 1, 0, 0x00, 0x00, 4, 0 };
+    CHECK(send_packet(anim_none, sizeof anim_none) == 0 && last_reply[2] == CFW_BAD_RECORD);
     /* Easing end points land exactly on the target. */
-    uint8_t anim2[] = { 0xF0, 0x25, 0, 1, 1, 0, 10, 0, 10, 0, 3, 1 };
+    uint8_t anim2[] = { 0xF0, 0x25, 0, 1, 1, 0, 0x03, 0x00, 3, 1, 10, 0, 10, 0 };
     CHECK(send_packet(anim2, sizeof anim2) == 0 && last_reply[2] == CFW_OK && last_sleep == 40);
     for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
     CHECK(frame[10 * 320 + 5] == 0xCC && frame[13 * 320 + 8] == 0xCC && frame[14 * 320 + 5] == 0 && frame[50 * 320 + 55] == 0);
     CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
     const uint8_t astate[] = { 0xF0, 0x26 };
     CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 40 && last_reply[5] == 7 && last_reply[9] == 0);
-    /* A shapes object has no box, so its glide forces a full-frame push. */
-    uint8_t shp_asset[] = { 0xF0, 0x08, 11, 0, 0x02, 0x00, 0, 0, 0, 0, 1, 0, 1, 0x0F, 1, 0, 0, 0, 0, 5, 0, 5, 0, 0, 0, 0, 0 };
+    /* A shapes-asset object (kind 3) draws its records but has nothing to tween. */
+    uint8_t shp_asset[] = { 0xF0, 0x08, 11, 0, 0x02, 0x00, 0, 0, 0, 0, 1, 1, 0, 15, 1, 0, 0, 0, 0, 5, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     CHECK(send_packet(shp_asset, sizeof shp_asset) == 0 && last_reply[2] == CFW_OK);
     uint8_t o5[] = { 0xF0, 0x20, 5, 0, 1, 0, 3, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0x0F, 0, 0 };
     CHECK(send_packet(o5, sizeof o5) == 0 && last_reply[2] == CFW_OK);
     uint8_t show5[] = { 0xF0, 0x21, 0x01, 1, 5, 0 };
     CHECK(send_packet(show5, sizeof show5) == 0 && last_reply[2] == CFW_OK);
-    uint8_t anim5[] = { 0xF0, 0x25, 0, 1, 5, 0, 0, 0, 0, 0, 1, 0 };
-    CHECK(send_packet(anim5, sizeof anim5) == 0 && last_reply[2] == CFW_OK);
+    CHECK(px(0, 0) == 15 && px(5, 5) == 15 && px(1, 0) == 0 && px(6, 6) == 0);
+    uint8_t anim5[] = { 0xF0, 0x25, 0, 1, 5, 0, 0x03, 0x00, 1, 0, 0, 0, 0, 0 };
+    CHECK(send_packet(anim5, sizeof anim5) == 0 && last_reply[2] == CFW_BAD_RECORD);
+
+    /* Kind 4: one shape record per object, animated by parameter tweens. */
+    uint8_t o6[] = { 0xF0, 0x20, 6, 0, 1, 0, 4, 0x01, 5, 1, 15, 0, 100, 0, 100, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  /* disc r 20 at (100,100) */
+    CHECK(send_packet(o6, sizeof o6) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(o6, sizeof o6 - 1) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    uint8_t o6_bad[sizeof o6];
+    memcpy(o6_bad, o6, sizeof o6); o6_bad[8] = 14;                       /* record type 14 */
+    CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    memcpy(o6_bad, o6, sizeof o6); o6_bad[6] = 5;                        /* kind 5 */
+    CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    uint8_t show6[] = { 0xF0, 0x21, 0x03, 1, 6, 0 };
+    reflash_calls = 0;
+    CHECK(send_packet(show6, sizeof show6) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
+    CHECK(px(100, 100) == 15 && px(100, 80) == 15 && px(100, 79) == 0 && px(120, 100) == 15 && px(121, 100) == 0 && px(0, 0) == 0);
+    /* Tween centre x, radius and colour over 4 frames; each frame pushes the union of the boxes. */
+    post_calls = 0; reflash_calls = 0;
+    uint8_t tween[] = { 0xF0, 0x25, 40, 1, 6, 0, 0x05, 0x01, 4, 0, 0x2C, 0x01, 40, 0, 8, 0 };   /* cx 300, r 40, level 8 */
+    CHECK(send_packet(tween, sizeof tween) == 0 && last_reply[2] == CFW_OK && post_calls == 1);
+    cfw_display_tick(state, 0x10, 0, 2);   /* frame 1: cx 150, r 25, level 14 */
+    CHECK(reflash_calls == 1 && last_rect[2] == 78 && last_rect[3] == 73 && last_rect[4] == 178 && last_rect[5] == 127);
+    CHECK(px(150, 100) == 14 && px(126, 100) == 14 && px(124, 100) == 0 && px(100, 100) == 0 && px(90, 100) == 0);
+    for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(reflash_calls == 4 && post_calls == 4);
+    CHECK(px(300, 100) == 8 && px(260, 100) == 8 && px(259, 100) == 0 && px(340, 100) == 8 && px(341, 100) == 0 && px(150, 100) == 0);
     cfw_display_tick(state, 0x10, 0, 2);
-    CHECK(last_rect[4] == 640 && last_rect[5] == 199);
-    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[5] == 8 && last_reply[9] == 1);
+    CHECK(reflash_calls == 4 && post_calls == 4);
+    /* Tweens merge by object: a second object's tween joins a running one, a
+     * retarget restarts from the value reached. */
+    uint8_t o8[] = { 0xF0, 0x20, 8, 0, 1, 0, 4, 0x01, 3, 1, 15, 0, 10, 0, 150, 0, 20, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  /* rect fill 20x10 at (10,150) */
+    CHECK(send_packet(o8, sizeof o8) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show68[] = { 0xF0, 0x21, 0x03, 2, 6, 0, 8, 0 };
+    CHECK(send_packet(show68, sizeof show68) == 0 && last_reply[2] == CFW_OK && px(29, 155) == 15 && px(30, 155) == 0);
+    uint8_t tween_a[] = { 0xF0, 0x25, 0, 1, 6, 0, 0x01, 0x00, 4, 0, 100, 0 };        /* disc back to cx 100 in 4 */
+    CHECK(send_packet(tween_a, sizeof tween_a) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 250 */
+    CHECK(px(250, 100) == 8 && px(300, 100) == 0);
+    uint8_t tween_b[] = { 0xF0, 0x25, 0, 1, 8, 0, 0x04, 0x00, 2, 0, 60, 0 };         /* rect width to 60 in 2 */
+    CHECK(send_packet(tween_b, sizeof tween_b) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 200; width 40 */
+    CHECK(px(200, 100) == 8 && px(49, 155) == 15 && px(50, 155) == 0);
+    uint8_t tween_c[] = { 0xF0, 0x25, 0, 1, 6, 0, 0x01, 0x00, 2, 0, 0xF4, 0x01 };    /* retarget: cx 500 in 2 from 200 */
+    CHECK(send_packet(tween_c, sizeof tween_c) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 350; width 60 (done) */
+    CHECK(px(350, 100) == 8 && px(200, 100) == 0 && px(69, 155) == 15 && px(70, 155) == 0);
+    cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 500 (done) */
+    CHECK(px(500, 100) == 8 && px(350, 100) == 0);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0);
+    /* frames 0 snaps and presents at once, without a display tick. */
+    post_calls = 0; reflash_calls = 0;
+    uint8_t snap[] = { 0xF0, 0x25, 0, 1, 8, 0, 0x00, 0x01, 0, 0, 3, 0 };           /* level 3 now */
+    CHECK(send_packet(snap, sizeof snap) == 0 && last_reply[2] == CFW_OK && post_calls == 0 && reflash_calls == 1);
+    CHECK(px(20, 155) == 3 && last_rect[3] == 149 && last_rect[5] == 160);
+    /* A PUT or a HIDE stops the object's tween; the set holds 16 objects. */
+    CHECK(send_packet(tween_a, sizeof tween_a) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(o6, sizeof o6) == 0 && last_reply[2] == CFW_OK);             /* redefined: tween gone */
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0 && px(500, 100) == 8);
+    CHECK(send_packet(show68, sizeof show68) == 0 && last_reply[2] == CFW_OK && px(100, 100) == 15 && px(500, 100) == 0);
+    uint8_t many[2 + 2 + 17 * 8];
+    many[0] = 0xF0; many[1] = 0x25; many[2] = 0; many[3] = 17;
+    for (int i = 0; i < 17; i++) {
+        uint8_t dot[sizeof o6];
+        memcpy(dot, o6, sizeof o6); dot[2] = (uint8_t)(20 + i); dot[12] = (uint8_t)(10 + i); dot[16] = 2;
+        CHECK(send_packet(dot, sizeof dot) == 0 && last_reply[2] == CFW_OK);
+        uint8_t *e = many + 4 + 8 * i;
+        e[0] = (uint8_t)(20 + i); e[1] = 0; e[2] = 0x01; e[3] = 0; e[4] = 2; e[5] = 0; e[6] = 200; e[7] = 0;
+    }
+    CHECK(send_packet(many, sizeof many) == 0 && last_reply[2] == CFW_NO_MEMORY);
+    many[3] = 16;
+    CHECK(send_packet(many, sizeof many - 8) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 1);
+    const uint8_t hide_all[] = { 0xF0, 0x22, 0x00 };
+    CHECK(send_packet(hide_all, sizeof hide_all) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0);
+    cfw_display_tick(state, 0x10, 0, 2);   /* the queued refresh finds nothing to do and stops */
+    CHECK(send_packet(clear_all, sizeof clear_all) == 0 && last_reply[2] == CFW_OK);
+    CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
+    guards_intact();
 
     /* Touch gestures: the redirected stock helper hands codes to the stock
      * semaphore by default, reports them when asked, and can swallow them. */
@@ -732,6 +977,7 @@ int main(void)
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
 
     /* View offsets: added to the stock origins at flush time. */
+    uint8_t mic_q_early[] = { 0xF0, 0x40, 0x02 };
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_COL_OFFSET) = 0;
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_ROW_OFFSET) = 210;
     state[FW_PANEL_OFFSET + FW_PANEL_HEIGHT_GEAR] = 2;
@@ -741,17 +987,31 @@ int main(void)
     CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[2] == CFW_OK && last_reply_len == 13);
     CHECK(last_reply[3] == 0 && last_reply[5] == 0 && last_reply[7] == 0 && last_reply[9] == 210 && last_reply[11] == 2 && last_reply[12] == 3);
     reflash_calls = 0;
-    uint8_t view_set[] = { 0xF0, 0x14, 0x02, 0xF8, 0xFF, 0x23, 0x00 };   /* dx -8, dy +35, push */
+    margin_rows = margin_dirty = margin_max_row = 0;
+    uint8_t view_set[] = { 0xF0, 0x14, 0x00, 0xF8, 0xFF, 0x23, 0x00 };   /* dx -8, dy +35 */
     CHECK(send_packet(view_set, sizeof view_set) == 0 && last_reply[2] == CFW_OK);
-    CHECK(reflash_calls == 1 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
+    /* The 280 panel rows outside the moved canvas (origin 210 + 35) are blanked, then the frame is pushed. */
+    CHECK(margin_rows == 280 && !margin_dirty && margin_max_row == 479);
+    CHECK(reflash_calls == 281 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(last_reply[3] == 0xF8 && last_reply[4] == 0xFF && last_reply[5] == 0x23 && last_reply[9] == 210);
+    /* A panel power-up parks frame row 0 beside the view state, not over it (G1CFW/37 regression). */
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
+    cfw_work_mode(3);
+    CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
+    CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[3] == 0xF8 && last_reply[5] == 0x23);
+    CHECK(send_packet(mic_q_early, sizeof mic_q_early) == 0 && last_reply[2] == CFW_OK);   /* and neither is the mic state */
     uint8_t view_far[] = { 0xF0, 0x14, 0x00, 0x00, 0x00, 0xE8, 0x03 };   /* dy 1000: out of range, no change */
     CHECK(send_packet(view_far, sizeof view_far) == 0 && last_reply[2] == CFW_BAD_RECT);
     CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[3] == 0xF8 && last_reply[5] == 0x23);
     uint8_t view_short[] = { 0xF0, 0x14, 0x00, 0x01 };
     CHECK(send_packet(view_short, sizeof view_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
     uint8_t view_zero[] = { 0xF0, 0x14, 0x00, 0, 0, 0, 0 };
-    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
+    reflash_calls = 0;
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 281 && last_rect[1] == 210);
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
+    reflash_calls = 0;
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 0);   /* panel off: nothing to blank */
+    *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
     uint8_t flush_all[] = { 0xF0, 0x03, 0, 0, 0, 0, 0x80, 0x02, 0xC8, 0x00 };
     CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK && last_rect[0] == 0 && last_rect[1] == 210);
 
@@ -792,11 +1052,11 @@ int main(void)
     CHECK(post_calls == 1 && last_screen == 0x10);
     cfw_display_tick(state, 0x10, 0, 2);
     CHECK(last_reply_len == 17 && last_reply[1] == 0x34 && last_reply[3] == 0 && last_reply[4] == 0);
-    CHECK(*(int32_t *)(last_reply + 5) == 16623 && *(int32_t *)(last_reply + 9) == -32906 && *(int32_t *)(last_reply + 13) == 1325);
+    CHECK(rd32le(last_reply + 5) == 16623 && rd32le(last_reply + 9) == -32906 && rd32le(last_reply + 13) == 1325);
     CHECK(sleep_calls == 1 && last_sleep == 50 && post_calls == 2);
     host_imu[2] = -7190;
     cfw_display_tick(state, 0x10, 0, 2);
-    CHECK(last_reply[3] == 1 && *(int32_t *)(last_reply + 13) == -7190 && post_calls == 3);
+    CHECK(last_reply[3] == 1 && rd32le(last_reply + 13) == -7190 && post_calls == 3);
     cfw_display_tick(state, 0x10, 0, 2);          /* third and last sample: no further post */
     CHECK(last_reply[3] == 2 && post_calls == 3 && sleep_calls == 2);
     last_reply_len = 0;
@@ -807,7 +1067,7 @@ int main(void)
     for (int i = 0; i < 5; i++) cfw_display_tick(state, 0x10, 0, 2);
     CHECK(last_reply[1] == 0x34 && last_reply[3] == 7 && post_calls == 9 && last_sleep == 10);
     uint8_t imu_stop[] = { 0xF0, 0x33, 0, 0, 0 };
-    CHECK(send_packet(imu_stop, sizeof imu_stop) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && *(uint32_t *)(last_reply + 7) == 8);
+    CHECK(send_packet(imu_stop, sizeof imu_stop) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && rd32le(last_reply + 7) == 8);
     last_reply_len = 0;
     cfw_display_tick(state, 0x10, 0, 2);
     CHECK(last_reply_len == 0 && post_calls == 9);

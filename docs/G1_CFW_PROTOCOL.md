@@ -147,45 +147,92 @@ bytes), 1 = 4bpp image, 2 = UTF-8 string (up to 240 bytes).
 
 All of these except INFO are valid stream records.
 
-## `0D` SHAPES: `[flags][count][records...]`
+## `0D` SHAPES: `[flags][count][records...]` (20-byte records from G1CFW/38)
 
-Draws `count` 16-byte records straight into the frame:
-`[type][flags][level][width][p0..p5 as int16 LE]`. Types: 0 line
-(x0,y0,x1,y1), 1 rectangle (x0,y0,x1,y1), 2 circle (cx,cy,r), 3 triangle
-(x0,y0,x1,y1,x2,y2). Record `flags` bit 0 fills rectangles, circles and
-triangles; otherwise they are outlined with `width` pixels (1-16), which is
-also the brush size for lines. `level` is the grey nibble. Coordinates are
-signed and everything clips to 640x200. Payload `flags` bit 1 pushes the whole
-frame afterwards. SHAPES is also a valid stream record.
+Draws `count` records straight into the frame with the vector rasterizer
+ported from g2flash (`patches/shapes.c`). Every record is 20 bytes:
+`[type][flags][color][width][p0..p7 as int16 LE]`. `color` is the grey
+nibble, `width` the stroke in pixels for outlines and open strokes (0 is
+drawn as 1), `flags` is reserved for objects (bit 0 visible) and ignored
+here. Unused parameters are zero.
 
-## Retained objects (`20`-`24`)
+| type | shape | parameters |
+| --- | --- | --- |
+| 1 | LINE | x0 y0 x1 y1 (hairline at width 1, else a square-capped stroke) |
+| 2 | RECT | x y w h r: stroked rounded rectangle, corner radius r |
+| 3 | RECT_FILL | x y w h r |
+| 4 | CIRCLE | cx cy r: ring of `width` pixels |
+| 5 | CIRCLE_FILL | cx cy r |
+| 6 | TRI | x0 y0 x1 y1 x2 y2, stroked |
+| 7 | TRI_FILL | x0 y0 x1 y1 x2 y2 |
+| 8 | QUAD | x0 y0 x1 y1 x2 y2 x3 y3, stroked |
+| 9 | QUAD_FILL | x0 y0 x1 y1 x2 y2 x3 y3 |
+| 10 | BEZIER2 | x0 y0 cx cy x1 y1: quadratic, stroked |
+| 11 | BEZIER3 | x0 y0 c0x c0y c1x c1y x1 y1: cubic, stroked |
+| 12 | ARC | cx cy r a0 a1: stroked arc in degrees, 0 = +x, clockwise |
+| 13 | PIE | cx cy r a0 a1: filled sector |
+
+Coordinates are signed canvas pixels, clamped to +/-1024 before any
+arithmetic and clipped to 640x200. Circles are centred on the pixel
+(cx, cy) and cover an odd 2r+1 pixel diameter (r = 1 is a 3x3 dot); corners
+are quarter circles of radius r (clamped to half the shorter side); polygons,
+wide lines, curves and sectors are scan-converted at pixel centres in 1/16
+pixel units, so shared edges never gap or double-cover. A type of 0 or above
+13 is `08`; a payload shorter than `count` records is `01`. Payload `flags`
+bit 1 pushes the whole frame afterwards. SHAPES is also a valid stream
+record. (G1CFW/13 to /37 used 16-byte records with types 0-3; those
+builds answer PING with their revision, so a host can tell them apart.)
+
+## Retained objects (`20`-`26`)
 
 Up to 96 object descriptors live in the second CFW RAM region (the stock
 navigation map buffer at `0x2001bf24`); pixels come from assets, the font
 engine or shape records, so showing a scene again costs one SHOW.
 
-- `20` OBJ_PUT `[id:u16][version:u16][kind][flags][x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines]`:
-  define or replace an object. Kinds: 0 image (asset at x,y, grey `level`
-  for 1bpp), 1 text (string asset in the box x,y,w,h with `font`/`lines`),
-  2 rect (filled, `level`), 3 shapes (a string asset holding
-  `[count][records]`). `flags` bit 0 = visible.
+- `20` OBJ_PUT `[id:u16][version:u16][kind][flags]` + body: define or
+  replace an object. `flags` bit 0 = visible. Kinds 0-3 carry
+  `[x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines]` (19 bytes
+  in all): 0 image (asset at x,y, grey `level` for 1bpp), 1 text (string
+  asset in the box x,y,w,h with `font`/`lines`), 2 rect (filled, `level`),
+  3 shapes (a string asset holding `[count][records]`, drawn in canvas
+  coordinates; x,y,w,h unused). Kind 4 (G1CFW/38) SHAPE carries one 20-byte
+  SHAPES record (26 bytes in all; the record's own flags byte is ignored):
+  a single geometric primitive whose parameters, colour and stroke width can
+  be animated. A PUT stops any animation of that object. A wrong kind, a
+  record type outside 1-13 or a body shorter than the kind needs is `08`/`01`.
 - `21` OBJ_SHOW `[flags][count][ids:u16...]`: compose the listed objects in
   order; bit 0 clears the frame first, bit 1 pushes it afterwards. An unknown
   id refuses the whole SHOW before drawing.
-- `22` OBJ_HIDE `[flags]`: blank the frame (bit 1 pushes); objects stay.
+- `22` OBJ_HIDE `[flags]`: blank the frame (bit 1 pushes) and stop every
+  animation; objects stay.
 - `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`.
-- `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects, op 1 drops one.
-
-- `25` OBJ_ANIM `[period_ms][count][entries: id:u16, tx:i16, ty:i16, frames, easing]`:
-  glide up to 16 shown objects from their current position to (tx, ty) over
-  `frames` frames, `period_ms` apart (10-250; 0 keeps the current period).
-  Easing 0 linear, 1 smoothstep, 2 ease-out, 3 ease-in. The glasses render
-  the frames themselves on the display thread: the stubbed stock refresh
-  handler is redirected to the CFW tick, which re-composes the SHOW list,
-  pushes the frame, sleeps the period and re-posts the stock refresh message
-  until every glide has settled. A new ANIM replaces the glide set. Each
-  frame pushes only the union of the moved objects' old and new boxes; a
-  shapes object has no box and forces a whole-frame push.
+- `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects (and animations),
+  op 1 drops one object (and its animation).
+- `25` OBJ_ANIM `[period_ms][count][entries...]` (tween form from G1CFW/38):
+  each entry is `[id:u16][mask:u16][frames][easing]` followed by one `i16`
+  target value per set mask bit, low bit first. Mask bits 0-7 name the
+  parameters of a kind-4 shape (p0..p7; only the type's geometry bits are
+  valid: LINE `0x0F`, RECT/RECT_FILL/ARC/PIE `0x1F`, CIRCLE/CIRCLE_FILL
+  `0x07`, TRI/TRI_FILL/BEZIER2 `0x3F`, QUAD/QUAD_FILL/BEZIER3 `0xFF`) or, for
+  kinds 0-2, bit 0 x, bit 1 y, bit 2 w, bit 3 h (w/h only for text and
+  rect). Bit 8 (`0x100`) is the colour nibble (kind 4) or `level` (kinds 0
+  and 2; the stock text drawer has no level), bit 9 (`0x200`) the stroke
+  width (kind 4 only). Each entry interpolates its object from its current
+  values (mid-flight if it was already animating) to the targets over
+  `frames` frames, `period_ms` apart (10-250; 0 keeps the current period);
+  `frames` 0 applies the targets at once. Entries merge into the running
+  set by object id, so an ANIM for one object never disturbs another's
+  glide; up to 16 objects animate at a time (`0B` when the set is full).
+  Easing 0 linear, 1 smoothstep, 2 ease-out, 3 ease-in. An unknown id is
+  `0E`, a mask bit the kind cannot animate is `08`, a truncated entry list
+  `01`. The glasses render the frames themselves on the display thread: the
+  stubbed stock refresh handler is redirected to the CFW tick, which
+  re-composes the SHOW list, pushes the frame, sleeps the period and
+  re-posts the stock refresh message until every tween has settled. Each
+  frame pushes only the union of the animated objects' old and new boxes
+  (kind-4 shapes have a type-aware box); a kind-3 shapes object has no box
+  and forces a whole-frame push. (G1CFW/17 to /37 took fixed 8-byte glide
+  entries `id, tx, ty, frames, easing`.)
 - `26` ANIM_STATE: reply `[active][period_ms][ticks:u32][full_pushes:u32]`.
 
 All but STATE are valid stream records.
@@ -233,12 +280,14 @@ the affected frame rows by `dx` in place, blanks the strip the canvas no
 longer covers, pushes, and restores the rows, so drawing stays in canvas
 coordinates and content near the far edge is cropped. `dx` must be even
 and within +/-24 (the stock table tops out at 22); `dy` within +/-480.
-`op` bit 0 = query only; bit 1 = push the whole frame after setting. Reply
-body `[dx:i16][dy:i16][stock_col:i16][stock_row:i16][height_gear]
-[depth_gear]`. Moving `dy` leaves the old rows lit, so `g1flash.py view`
-blanks the frame before a change and the caller redraws; `--height H
---depth D` map the stock gears per temple, `--dx/--dy` set the offset
-directly.
+`op` bit 0 = query only. Reply body `[dx:i16][dy:i16][stock_col:i16]
+[stock_row:i16][height_gear][depth_gear]`. From G1CFW/38 setting the view
+while the panel is powered also blanks every panel row outside the new
+canvas and pushes the whole frame (op bit 1, the old explicit push, is
+accepted and redundant), so a connecting host that places the canvas wipes
+whatever the stock screens left on the panel before it. `g1flash.py view
+--height H --depth D` map the stock gears per temple, `--dx/--dy` set the
+offset directly.
 
 ## IMU streaming (`33`-`34`, G1CFW/23 and later)
 

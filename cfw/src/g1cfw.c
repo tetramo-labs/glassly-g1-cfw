@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 37u
+#define CFW_PROTOCOL 38u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -746,171 +746,535 @@ static void cfw_asset_info(void)
     cfw_reply(CFW_ASSET_INFO, CFW_OK, body, sizeof body);
 }
 
-/* --- vector shapes (g2flash mode 36, G1-sized) --------------------------- */
-/* Record: [type][flags][level][width][p0..p5 as int16 LE] = 16 bytes.
- * type 0 line (x0,y0,x1,y1); 1 rect (x0,y0,x1,y1); 2 circle (cx,cy,r);
- * 3 triangle (x0,y0,x1,y1,x2,y2). flags bit 0: fill (rect, circle, triangle);
- * width: stroke width for lines and outlines (1-16); level: 0-15.
- * Coordinates are signed pixels and everything clips to the frame. */
-#define CFW_SHAPE_RECORD 16u
-enum { CFW_SHAPE_LINE = 0, CFW_SHAPE_RECT = 1, CFW_SHAPE_CIRCLE = 2, CFW_SHAPE_TRIANGLE = 3 };
+/* --- vector shapes (ported from g2flash patches/shapes.c) --------------------
+ * Record: [type][flags][color][width][p0..p7 as int16 LE] = 20 bytes, types
+ * 1-13 (docs/G1_CFW_PROTOCOL.md); `flags` is the object visibility bit and
+ * is ignored here. Integer math throughout: a clipped pixel and a clipped
+ * horizontal span are the two primitives; circles, rings and rounded corners
+ * are scan-converted per row from an integer square root; polygons, wide
+ * lines, curves and sectors go through one even-odd scanline filler in 1/16
+ * pixel units (Q4) sampled at pixel centres, so shared edges never gap or
+ * double-cover. Coordinates are clamped to +-1024 before any Q4 product so
+ * everything stays within 32 bits. */
+#define CFW_SHAPE_RECORD 20u
+#define CFW_SHAPE_PARAMS 8u
+enum { CFW_SHAPE_LINE = 1, CFW_SHAPE_RECT = 2, CFW_SHAPE_RECT_FILL = 3, CFW_SHAPE_CIRCLE = 4,
+       CFW_SHAPE_CIRCLE_FILL = 5, CFW_SHAPE_TRI = 6, CFW_SHAPE_TRI_FILL = 7, CFW_SHAPE_QUAD = 8,
+       CFW_SHAPE_QUAD_FILL = 9, CFW_SHAPE_BEZIER2 = 10, CFW_SHAPE_BEZIER3 = 11, CFW_SHAPE_ARC = 12,
+       CFW_SHAPE_PIE = 13 };
+#define CFW_Q4           16
+#define CFW_COORD_MAX    1023
+#define CFW_COORD_MIN    (-1024)
+#define CFW_DIM_MAX      2047
+#define CFW_POLY_MAX     8u
+#define CFW_BEZIER_SEGS  16u
+#define CFW_ARC_MAX_SEGS 72u
+
+typedef struct {
+    uint8_t *frame;
+    int32_t  y0, y1;           /* rows [y0, y1) may be written */
+} cfw_raster;
+
+typedef struct {
+    uint8_t type, color, width;
+    int16_t p[CFW_SHAPE_PARAMS];
+} cfw_shape;
 
 static int16_t rd16s(const uint8_t *p)
 {
     return (int16_t)rd16(p);
 }
 
-static void cfw_pixel(uint8_t *frame, int x, int y, uint8_t level)
+/* Geometry parameters of a record type as a bit mask (p0 = bit 0); 0 for an
+ * unknown type. Also the parameters a tween may change besides colour and
+ * width. */
+static uint32_t cfw_shape_mask(uint8_t type)
 {
-    if (x < 0 || y < 0 || x >= FW_FRAME_WIDTH || y >= FW_FRAME_HEIGHT) {
-        return;
+    switch (type) {
+    case CFW_SHAPE_LINE: return 0x0Fu;
+    case CFW_SHAPE_RECT: case CFW_SHAPE_RECT_FILL: case CFW_SHAPE_ARC: case CFW_SHAPE_PIE: return 0x1Fu;
+    case CFW_SHAPE_CIRCLE: case CFW_SHAPE_CIRCLE_FILL: return 0x07u;
+    case CFW_SHAPE_TRI: case CFW_SHAPE_TRI_FILL: case CFW_SHAPE_BEZIER2: return 0x3Fu;
+    case CFW_SHAPE_QUAD: case CFW_SHAPE_QUAD_FILL: case CFW_SHAPE_BEZIER3: return 0xFFu;
+    default: return 0;
     }
-    uint8_t *b = frame + y * FW_FRAME_STRIDE + x / 2;
-    *b = (x & 1) ? (uint8_t)((*b & 0xF0) | level) : (uint8_t)((*b & 0x0F) | (level << 4));
 }
 
-/* Horizontal span [x0, x1] inclusive, clipped. */
-static void cfw_hspan(uint8_t *frame, int x0, int x1, int y, uint8_t level)
+static void cfw_shape_decode(const uint8_t *rec, cfw_shape *s)
 {
-    if (y < 0 || y >= FW_FRAME_HEIGHT) {
-        return;
+    s->type = rec[0];
+    s->color = (uint8_t)(rec[2] & 0xF);
+    s->width = rec[3];
+    for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
+        s->p[k] = rd16s(rec + 4 + 2 * k);
     }
-    if (x0 > x1) {
-        int t = x0; x0 = x1; x1 = t;
+}
+
+static uint32_t cfw_isqrt(uint32_t v)
+{
+    uint32_t res = 0;
+    uint32_t bit = 1u << 30;
+    while (bit > v) bit >>= 2;
+    while (bit) {
+        if (v >= res + bit) {
+            v -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
     }
-    if (x1 < 0 || x0 >= FW_FRAME_WIDTH) {
-        return;
-    }
-    if (x0 < 0) {
-        x0 = 0;
-    }
-    if (x1 >= FW_FRAME_WIDTH) {
-        x1 = FW_FRAME_WIDTH - 1;
-    }
-    uint8_t *row = frame + y * FW_FRAME_STRIDE;
+    return res;
+}
+
+/* Floor division for den > 0 (C's / truncates toward zero). */
+static int32_t cfw_div_floor(int32_t num, int32_t den)
+{
+    int32_t q = num / den;
+    if ((num % den) != 0 && num < 0) q--;
+    return q;
+}
+
+static int32_t cfw_clamp(int32_t v, int32_t lo, int32_t hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static void rs_pixel(const cfw_raster *r, int32_t x, int32_t y, uint8_t c)
+{
+    if (x < 0 || x >= FW_FRAME_WIDTH || y < r->y0 || y >= r->y1) return;
+    uint8_t *b = r->frame + y * FW_FRAME_STRIDE + (x >> 1);
+    *b = (x & 1) ? (uint8_t)((*b & 0xF0) | c) : (uint8_t)((*b & 0x0F) | (c << 4));
+}
+
+/* Inclusive [x0, x1] on row y; empty when x0 > x1. */
+static void rs_hspan(const cfw_raster *r, int32_t x0, int32_t x1, int32_t y, uint8_t c)
+{
+    if (y < r->y0 || y >= r->y1 || x0 > x1 || x1 < 0 || x0 >= FW_FRAME_WIDTH) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 >= FW_FRAME_WIDTH) x1 = FW_FRAME_WIDTH - 1;
+    uint8_t *row = r->frame + y * FW_FRAME_STRIDE;
     if (x0 & 1) {
-        row[x0 / 2] = (uint8_t)((row[x0 / 2] & 0xF0) | level);
+        row[x0 >> 1] = (uint8_t)((row[x0 >> 1] & 0xF0) | c);
         x0++;
     }
+    if (x0 > x1) return;
     if (!(x1 & 1)) {
-        if (x1 >= x0) {
-            row[x1 / 2] = (uint8_t)((row[x1 / 2] & 0x0F) | (level << 4));
-        }
+        row[x1 >> 1] = (uint8_t)((row[x1 >> 1] & 0x0F) | (c << 4));
         x1--;
     }
-    uint8_t pair = (uint8_t)(level * 0x11);
-    for (int x = x0; x < x1; x += 2) {
-        row[x / 2] = pair;
-    }
+    if (x0 > x1) return;
+    uint8_t v = (uint8_t)(c * 0x11);
+    for (int32_t i = x0 >> 1; i <= (x1 >> 1); i++) row[i] = v;
 }
 
-static void cfw_fill_rect(uint8_t *frame, int x0, int y0, int x1, int y1, uint8_t level)
+static void rs_fill_rect(const cfw_raster *r, int32_t x, int32_t y, int32_t w, int32_t h, uint8_t c)
 {
-    if (y0 > y1) {
-        int t = y0; y0 = y1; y1 = t;
-    }
-    for (int y = y0; y <= y1; y++) {
-        cfw_hspan(frame, x0, x1, y, level);
-    }
+    if (w <= 0 || h <= 0) return;
+    int32_t row0 = y < r->y0 ? r->y0 : y;
+    int32_t row1 = y + h;
+    if (row1 > r->y1) row1 = r->y1;
+    for (int32_t row = row0; row < row1; row++) rs_hspan(r, x, x + w - 1, row, c);
 }
 
-/* Bresenham line with a square brush of `width` pixels. */
-static void cfw_line(uint8_t *frame, int x0, int y0, int x1, int y1, uint8_t level, int width)
+/* Half-width (Q4) of a circle of radius rad16 at vertical offset dy16 from its
+ * centre, or -1 when the row misses the circle. */
+static int32_t rs_chord_half(int32_t rad16, int32_t dy16)
 {
-    int dx = x1 > x0 ? x1 - x0 : x0 - x1;
-    int dy = y1 > y0 ? y1 - y0 : y0 - y1;
-    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-    int err = dx - dy;
-    int half = (width - 1) / 2;
-    for (;;) {
-        if (width <= 1) {
-            cfw_pixel(frame, x0, y0, level);
+    if (dy16 < 0) dy16 = -dy16;
+    if (dy16 >= rad16) return -1;
+    uint32_t rr = (uint32_t)rad16 * (uint32_t)rad16;
+    uint32_t dd = (uint32_t)dy16 * (uint32_t)dy16;
+    return (int32_t)cfw_isqrt(rr - dd);
+}
+
+/* First/last pixel covered by the continuous span [a16, b16). */
+static int rs_span_pixels(int32_t a16, int32_t b16, int32_t *first, int32_t *last)
+{
+    *first = cfw_div_floor(a16 + 7, CFW_Q4);
+    *last = cfw_div_floor(b16 + 7, CFW_Q4) - 1;
+    return *first <= *last;
+}
+
+/* Pixel extents of the rounded rectangle (x,y,w,h,rad) on `row`. Corners are
+ * quarter circles of radius rad (clamped to half the shorter side). */
+static int rs_rrect_row(int32_t x, int32_t y, int32_t w, int32_t h, int32_t rad,
+                        int32_t row, int32_t *l, int32_t *rt)
+{
+    if (w <= 0 || h <= 0 || row < y || row >= y + h) return 0;
+    int32_t maxr = (w < h ? w : h) / 2;
+    if (rad > maxr) rad = maxr;
+    if (rad < 0) rad = 0;
+    *l = x;
+    *rt = x + w - 1;
+    if (rad == 0) return 1;
+    int32_t dy16 = -1;
+    if (row < y + rad)              dy16 = (y + rad - row) * CFW_Q4 - 8;
+    else if (row >= y + h - rad)    dy16 = (row - (y + h - rad)) * CFW_Q4 + 8;
+    if (dy16 < 0) return 1;
+    int32_t half = rs_chord_half(rad * CFW_Q4, dy16);
+    if (half < 0) return 0;
+    int32_t first, last;
+    int32_t a16 = x * CFW_Q4 + rad * CFW_Q4 - half;
+    int32_t b16 = (x + w) * CFW_Q4 - rad * CFW_Q4 + half;
+    if (!rs_span_pixels(a16, b16, &first, &last)) return 0;
+    *l = first;
+    *rt = last;
+    return 1;
+}
+
+/* Rounded rectangle: filled when wd <= 0, else a border of width wd. */
+static void rs_rrect(const cfw_raster *r, int32_t x, int32_t y, int32_t w, int32_t h,
+                     int32_t rad, int32_t wd, uint8_t c)
+{
+    if (w <= 0 || h <= 0) return;
+    int inner = wd > 0 && w > 2 * wd && h > 2 * wd;
+    int32_t row0 = y < r->y0 ? r->y0 : y;
+    int32_t row1 = y + h;
+    if (row1 > r->y1) row1 = r->y1;
+    for (int32_t row = row0; row < row1; row++) {
+        int32_t ol, orr, il, ir;
+        if (!rs_rrect_row(x, y, w, h, rad, row, &ol, &orr)) continue;
+        if (inner && rs_rrect_row(x + wd, y + wd, w - 2 * wd, h - 2 * wd, rad - wd, row, &il, &ir)) {
+            rs_hspan(r, ol, il - 1, row, c);
+            rs_hspan(r, ir + 1, orr, row, c);
         } else {
-            cfw_fill_rect(frame, x0 - half, y0 - half, x0 - half + width - 1, y0 - half + width - 1, level);
-        }
-        if (x0 == x1 && y0 == y1) {
-            break;
-        }
-        int e2 = 2 * err;
-        if (e2 > -dy) {
-            err -= dy;
-            x0 += sx;
-        }
-        if (e2 < dx) {
-            err += dx;
-            y0 += sy;
+            rs_hspan(r, ol, orr, row, c);
         }
     }
 }
 
-static void cfw_circle(uint8_t *frame, int cx, int cy, int r, uint8_t level, int fill, int width)
+/* Circle centred on pixel (cx,cy): filled when wd <= 0, else a ring of width wd. */
+static void rs_circle(const cfw_raster *r, int32_t cx, int32_t cy, int32_t rad, int32_t wd, uint8_t c)
 {
-    if (r < 0) {
-        return;
-    }
-    if (fill) {
-        for (int y = -r; y <= r; y++) {
-            int xx = 0;
-            while ((xx + 1) * (xx + 1) + y * y <= r * r) {
-                xx++;
-            }
-            cfw_hspan(frame, cx - xx, cx + xx, cy + y, level);
-        }
-        return;
-    }
-    /* Ring: pixels whose distance d satisfies r-width < d <= r. */
-    int inner = r - width;
-    for (int y = -r; y <= r; y++) {
-        for (int x = -r; x <= r; x++) {
-            int d = x * x + y * y;
-            if (d <= r * r && (inner < 0 || d > inner * inner)) {
-                cfw_pixel(frame, cx + x, cy + y, level);
-            }
+    if (rad < 0) return;
+    /* radius r + 1/2 around the pixel centre: an odd 2r+1 px diameter, so a
+     * radius-1 dot is a 3x3 block and a ring of width wd is exactly wd px thick */
+    int32_t rad16 = rad * CFW_Q4 + 8;
+    int32_t in16 = wd > 0 && rad > wd ? (rad - wd) * CFW_Q4 + 8 : -1;
+    int32_t cx16 = cx * CFW_Q4 + 8;
+    for (int32_t row = cy - rad; row <= cy + rad; row++) {
+        if (row < r->y0 || row >= r->y1) continue;
+        int32_t dy16 = (cy - row) * CFW_Q4;
+        int32_t ho = rs_chord_half(rad16, dy16);
+        if (ho < 0) continue;
+        int32_t of, ol;
+        if (!rs_span_pixels(cx16 - ho, cx16 + ho, &of, &ol)) continue;
+        int32_t hi = in16 > 0 ? rs_chord_half(in16, dy16) : -1;
+        int32_t inf, inl;
+        if (hi > 0 && rs_span_pixels(cx16 - hi, cx16 + hi, &inf, &inl)) {
+            rs_hspan(r, of, inf - 1, row, c);
+            rs_hspan(r, inl + 1, ol, row, c);
+        } else {
+            rs_hspan(r, of, ol, row, c);
         }
     }
 }
 
-static void cfw_triangle(uint8_t *frame, int x0, int y0, int x1, int y1, int x2, int y2, uint8_t level, int fill, int width)
+/* Polygon with Q4 vertices, even-odd, sampled at pixel centres. */
+static void rs_fill_poly_q4(const cfw_raster *r, const int32_t *px, const int32_t *py, uint32_t n, uint8_t c)
 {
-    if (!fill) {
-        cfw_line(frame, x0, y0, x1, y1, level, width);
-        cfw_line(frame, x1, y1, x2, y2, level, width);
-        cfw_line(frame, x2, y2, x0, y0, level, width);
-        return;
+    if (n < 3 || n > CFW_POLY_MAX) return;
+    int32_t ymin = py[0], ymax = py[0];
+    for (uint32_t i = 1; i < n; i++) {
+        if (py[i] < ymin) ymin = py[i];
+        if (py[i] > ymax) ymax = py[i];
     }
-    /* Scanline fill: for each row find the span covered by the edges. */
-    int ymin = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
-    int ymax = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
-    int ex[3] = { x0, x1, x2 }, ey[3] = { y0, y1, y2 };
-    for (int y = ymin; y <= ymax; y++) {
-        int left = 0x7FFF, right = -0x7FFF;
-        for (int e = 0; e < 3; e++) {
-            int ax = ex[e], ay = ey[e], bx = ex[(e + 1) % 3], by = ey[(e + 1) % 3];
-            if (ay == by) {
-                if (y == ay) {
-                    if (ax < left) left = ax;
-                    if (bx < left) left = bx;
-                    if (ax > right) right = ax;
-                    if (bx > right) right = bx;
-                }
-                continue;
+    int32_t row0 = cfw_div_floor(ymin, CFW_Q4);
+    int32_t row1 = cfw_div_floor(ymax, CFW_Q4);
+    if (row0 < r->y0) row0 = r->y0;
+    if (row1 >= r->y1) row1 = r->y1 - 1;
+    for (int32_t row = row0; row <= row1; row++) {
+        int32_t yc = row * CFW_Q4 + 8;
+        int32_t xs[CFW_POLY_MAX];
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t j = (i + 1 == n) ? 0 : i + 1;
+            int32_t ax = px[i], ay = py[i], bx = px[j], by = py[j];
+            if (ay == by) continue;
+            if (ay > by) {
+                int32_t t = ax; ax = bx; bx = t;
+                t = ay; ay = by; by = t;
             }
-            if ((y < ay && y < by) || (y > ay && y > by)) {
-                continue;
-            }
-            int x = ax + (int)((long)(bx - ax) * (y - ay) / (by - ay));
-            if (x < left) left = x;
-            if (x > right) right = x;
+            if (yc < ay || yc >= by) continue;
+            xs[k++] = ax + cfw_div_floor((yc - ay) * (bx - ax), by - ay);
         }
-        if (left <= right) {
-            cfw_hspan(frame, left, right, y, level);
+        for (uint32_t i = 1; i < k; i++) {          /* insertion sort */
+            int32_t v = xs[i];
+            uint32_t j = i;
+            while (j > 0 && xs[j - 1] > v) { xs[j] = xs[j - 1]; j--; }
+            xs[j] = v;
+        }
+        for (uint32_t i = 0; i + 1 < k; i += 2) {
+            int32_t first, last;
+            if (rs_span_pixels(xs[i], xs[i + 1], &first, &last)) rs_hspan(r, first, last, row, c);
         }
     }
 }
 
-/* [count][records...][optional flush rect when flags bit 1 of the first byte? no: see below]
- * SHAPES payload: [flags][count][records]. flags bit 1 flushes the whole frame
- * afterwards (shapes have no single bounding box worth computing here). */
+static void rs_hairline(const cfw_raster *r, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint8_t c)
+{
+    int32_t dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int32_t dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    int32_t sx = x0 < x1 ? 1 : -1;
+    int32_t sy = y0 < y1 ? 1 : -1;
+    int32_t err = dx - dy;
+    for (;;) {
+        rs_pixel(r, x0, y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        int32_t e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Line between Q4 points. Widths >= 2 become a filled quad with square caps
+ * (half a width past each end), so consecutive segments of a flattened curve
+ * overlap instead of leaving wedge gaps at the joints. */
+static void rs_line_q4(const cfw_raster *r, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t wd, uint8_t c)
+{
+    if (wd <= 1) {
+        rs_hairline(r, cfw_div_floor(x0, CFW_Q4), cfw_div_floor(y0, CFW_Q4),
+                    cfw_div_floor(x1, CFW_Q4), cfw_div_floor(y1, CFW_Q4), c);
+        return;
+    }
+    int32_t dx = x1 - x0, dy = y1 - y0;
+    uint32_t len = cfw_isqrt((uint32_t)(dx * dx) + (uint32_t)(dy * dy));
+    int32_t hw = wd * 8;                                 /* half width in Q4 */
+    if (len == 0) {
+        int32_t px[4] = { x0 - hw, x0 + hw, x0 + hw, x0 - hw };
+        int32_t py[4] = { y0 - hw, y0 - hw, y0 + hw, y0 + hw };
+        rs_fill_poly_q4(r, px, py, 4, c);
+        return;
+    }
+    int32_t ex = dx * hw / (int32_t)len, ey = dy * hw / (int32_t)len;
+    int32_t nx = -ey, ny = ex;
+    int32_t px[4] = { x0 - ex + nx, x1 + ex + nx, x1 + ex - nx, x0 - ex - nx };
+    int32_t py[4] = { y0 - ey + ny, y1 + ey + ny, y1 + ey - ny, y0 - ey - ny };
+    rs_fill_poly_q4(r, px, py, 4, c);
+}
+
+static int32_t cfw_pix_q4(int32_t v)
+{
+    return v * CFW_Q4 + 8;
+}
+
+static void rs_line(const cfw_raster *r, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t wd, uint8_t c)
+{
+    rs_line_q4(r, cfw_pix_q4(x0), cfw_pix_q4(y0), cfw_pix_q4(x1), cfw_pix_q4(y1), wd, c);
+}
+
+/* Closed polygon outline through integer vertices. */
+static void rs_stroke_poly(const cfw_raster *r, const int32_t *px, const int32_t *py, uint32_t n, int32_t wd, uint8_t c)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t j = (i + 1 == n) ? 0 : i + 1;
+        rs_line(r, px[i], py[i], px[j], py[j], wd, c);
+    }
+}
+
+static void rs_bezier2(const cfw_raster *r, int32_t x0, int32_t y0, int32_t cx, int32_t cy,
+                       int32_t x1, int32_t y1, int32_t wd, uint8_t c)
+{
+    int32_t px = cfw_pix_q4(x0), py = cfw_pix_q4(y0);
+    for (uint32_t i = 1; i <= CFW_BEZIER_SEGS; i++) {
+        int32_t u = (int32_t)(CFW_BEZIER_SEGS - i), t = (int32_t)i;
+        int32_t nx = (u * u * x0 + 2 * u * t * cx + t * t * x1) * CFW_Q4 / 256 + 8;
+        int32_t ny = (u * u * y0 + 2 * u * t * cy + t * t * y1) * CFW_Q4 / 256 + 8;
+        rs_line_q4(r, px, py, nx, ny, wd, c);
+        px = nx; py = ny;
+    }
+}
+
+static void rs_bezier3(const cfw_raster *r, int32_t x0, int32_t y0, int32_t ax, int32_t ay,
+                       int32_t bx, int32_t by, int32_t x1, int32_t y1, int32_t wd, uint8_t c)
+{
+    int32_t px = cfw_pix_q4(x0), py = cfw_pix_q4(y0);
+    for (uint32_t i = 1; i <= CFW_BEZIER_SEGS; i++) {
+        int32_t u = (int32_t)(CFW_BEZIER_SEGS - i), t = (int32_t)i;
+        int32_t uu = u * u, tt = t * t;
+        int32_t nx = (uu * u * x0 + 3 * uu * t * ax + 3 * u * tt * bx + tt * t * x1) * CFW_Q4 / 4096 + 8;
+        int32_t ny = (uu * u * y0 + 3 * uu * t * ay + 3 * u * tt * by + tt * t * y1) * CFW_Q4 / 4096 + 8;
+        rs_line_q4(r, px, py, nx, ny, wd, c);
+        px = nx; py = ny;
+    }
+}
+
+/* sin(deg) * 32768 for 0..90 degrees. */
+static const uint16_t cfw_sin_q15[91] = {
+    0, 572, 1144, 1715, 2286, 2856, 3425, 3993, 4560, 5126, 5690, 6252, 6813,
+    7371, 7927, 8481, 9032, 9580, 10126, 10668, 11207, 11743, 12275, 12803, 13328, 13848,
+    14365, 14876, 15384, 15886, 16384, 16877, 17364, 17847, 18324, 18795, 19261, 19720, 20174,
+    20622, 21063, 21498, 21926, 22348, 22763, 23170, 23571, 23965, 24351, 24730, 25102, 25466,
+    25822, 26170, 26510, 26842, 27166, 27482, 27789, 28088, 28378, 28660, 28932, 29197, 29452,
+    29698, 29935, 30163, 30382, 30592, 30792, 30983, 31164, 31336, 31499, 31651, 31795, 31928,
+    32052, 32166, 32270, 32365, 32449, 32524, 32588, 32643, 32688, 32723, 32748, 32763, 32767,
+};
+
+static int32_t cfw_sin_deg(int32_t a)
+{
+    a %= 360;
+    if (a < 0) a += 360;
+    int32_t sign = 1;
+    if (a >= 180) { a -= 180; sign = -1; }
+    if (a > 90) a = 180 - a;
+    return sign * (int32_t)cfw_sin_q15[a];
+}
+
+static int32_t cfw_cos_deg(int32_t a)
+{
+    return cfw_sin_deg(a + 90);
+}
+
+/* Q4 point on the circle (cx,cy,rad) at integer degrees. 0 = +x, angles grow
+ * toward +y (clockwise on screen). */
+static void rs_arc_point(int32_t cx, int32_t cy, int32_t rad, int32_t deg, int32_t *x, int32_t *y)
+{
+    int32_t r16 = rad * CFW_Q4;
+    *x = cfw_pix_q4(cx) + ((r16 * cfw_cos_deg(deg) + 16384) >> 15);
+    *y = cfw_pix_q4(cy) + ((r16 * cfw_sin_deg(deg) + 16384) >> 15);
+}
+
+static uint32_t rs_arc_segments(int32_t span)
+{
+    uint32_t n = (uint32_t)(span < 0 ? -span : span) / 6u + 1u;
+    return n > CFW_ARC_MAX_SEGS ? CFW_ARC_MAX_SEGS : n;
+}
+
+static void rs_arc(const cfw_raster *r, int32_t cx, int32_t cy, int32_t rad, int32_t a0, int32_t a1, int32_t wd, uint8_t c)
+{
+    if (rad <= 0) return;
+    int32_t span = cfw_clamp(a1 - a0, -360, 360);
+    uint32_t n = rs_arc_segments(span);
+    int32_t px, py;
+    rs_arc_point(cx, cy, rad, a0, &px, &py);
+    for (uint32_t i = 1; i <= n; i++) {
+        int32_t nx, ny;
+        rs_arc_point(cx, cy, rad, a0 + span * (int32_t)i / (int32_t)n, &nx, &ny);
+        rs_line_q4(r, px, py, nx, ny, wd, c);
+        px = nx; py = ny;
+    }
+}
+
+static void rs_pie(const cfw_raster *r, int32_t cx, int32_t cy, int32_t rad, int32_t a0, int32_t a1, uint8_t c)
+{
+    if (rad <= 0) return;
+    int32_t span = cfw_clamp(a1 - a0, -360, 360);
+    if (span == 0) return;
+    uint32_t n = rs_arc_segments(span);
+    int32_t px[3], py[3];
+    px[0] = cfw_pix_q4(cx);
+    py[0] = cfw_pix_q4(cy);
+    rs_arc_point(cx, cy, rad, a0, &px[1], &py[1]);
+    for (uint32_t i = 1; i <= n; i++) {
+        rs_arc_point(cx, cy, rad, a0 + span * (int32_t)i / (int32_t)n, &px[2], &py[2]);
+        rs_fill_poly_q4(r, px, py, 3, c);
+        px[1] = px[2];
+        py[1] = py[2];
+    }
+}
+
+/* Draw one decoded record; unknown types draw nothing. */
+static void cfw_shape_draw(const cfw_raster *r, const cfw_shape *s)
+{
+    int32_t p[CFW_SHAPE_PARAMS];
+    for (uint32_t i = 0; i < CFW_SHAPE_PARAMS; i++) {
+        p[i] = cfw_clamp(s->p[i], CFW_COORD_MIN, CFW_COORD_MAX);
+    }
+    uint8_t c = s->color;
+    int32_t wd = s->width < 1 ? 1 : s->width;
+    switch (s->type) {
+    case CFW_SHAPE_LINE:
+        rs_line(r, p[0], p[1], p[2], p[3], wd, c);
+        break;
+    case CFW_SHAPE_RECT:
+    case CFW_SHAPE_RECT_FILL:
+        rs_rrect(r, p[0], p[1], cfw_clamp(s->p[2], 0, CFW_DIM_MAX), cfw_clamp(s->p[3], 0, CFW_DIM_MAX),
+                 cfw_clamp(s->p[4], 0, CFW_DIM_MAX), s->type == CFW_SHAPE_RECT ? wd : 0, c);
+        break;
+    case CFW_SHAPE_CIRCLE:
+    case CFW_SHAPE_CIRCLE_FILL:
+        rs_circle(r, p[0], p[1], cfw_clamp(p[2], 0, CFW_COORD_MAX), s->type == CFW_SHAPE_CIRCLE ? wd : 0, c);
+        break;
+    case CFW_SHAPE_TRI:
+    case CFW_SHAPE_QUAD: {
+        int32_t px[4] = { p[0], p[2], p[4], p[6] };
+        int32_t py[4] = { p[1], p[3], p[5], p[7] };
+        rs_stroke_poly(r, px, py, s->type == CFW_SHAPE_TRI ? 3u : 4u, wd, c);
+        break;
+    }
+    case CFW_SHAPE_TRI_FILL:
+    case CFW_SHAPE_QUAD_FILL: {
+        uint32_t n = s->type == CFW_SHAPE_TRI_FILL ? 3u : 4u;
+        int32_t px[4], py[4];
+        for (uint32_t i = 0; i < n; i++) {
+            px[i] = cfw_pix_q4(p[2 * i]);
+            py[i] = cfw_pix_q4(p[2 * i + 1]);
+        }
+        rs_fill_poly_q4(r, px, py, n, c);
+        break;
+    }
+    case CFW_SHAPE_BEZIER2:
+        rs_bezier2(r, p[0], p[1], p[2], p[3], p[4], p[5], wd, c);
+        break;
+    case CFW_SHAPE_BEZIER3:
+        rs_bezier3(r, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], wd, c);
+        break;
+    case CFW_SHAPE_ARC:
+        rs_arc(r, p[0], p[1], cfw_clamp(p[2], 0, CFW_COORD_MAX), p[3], p[4], wd, c);
+        break;
+    case CFW_SHAPE_PIE:
+        rs_pie(r, p[0], p[1], cfw_clamp(p[2], 0, CFW_COORD_MAX), p[3], p[4], c);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Frame box a record can touch (stroke, caps and rounding included), for
+ * dirty-rect pushes. Returns 0 for an unknown type; w = 0 when off screen. */
+static int cfw_shape_box(const cfw_shape *s, cfw_rect *r)
+{
+    uint32_t mask = cfw_shape_mask(s->type);
+    int32_t x0, y0, x1, y1;
+    int32_t m = s->width / 2 + 2;
+    if (!mask) {
+        return 0;
+    }
+    if (s->type == CFW_SHAPE_RECT || s->type == CFW_SHAPE_RECT_FILL) {
+        x0 = s->p[0]; y0 = s->p[1]; x1 = x0 + s->p[2]; y1 = y0 + s->p[3];
+        m = 1;
+    } else if (s->type == CFW_SHAPE_CIRCLE || s->type == CFW_SHAPE_CIRCLE_FILL ||
+               s->type == CFW_SHAPE_ARC || s->type == CFW_SHAPE_PIE) {
+        int32_t rad = s->p[2] < 0 ? 0 : s->p[2];
+        x0 = s->p[0] - rad; y0 = s->p[1] - rad; x1 = s->p[0] + rad + 1; y1 = s->p[1] + rad + 1;
+    } else {
+        x0 = y0 = 0x7FFF; x1 = y1 = -0x7FFF;
+        for (uint32_t i = 0; i < CFW_SHAPE_PARAMS; i += 2) {
+            if (!(mask & (1u << i))) continue;
+            if (s->p[i] < x0) x0 = s->p[i];
+            if (s->p[i] + 1 > x1) x1 = s->p[i] + 1;
+            if (s->p[i + 1] < y0) y0 = s->p[i + 1];
+            if (s->p[i + 1] + 1 > y1) y1 = s->p[i + 1] + 1;
+        }
+    }
+    x0 -= m; y0 -= m; x1 += m; y1 += m;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > FW_FRAME_WIDTH) x1 = FW_FRAME_WIDTH;
+    if (y1 > FW_FRAME_HEIGHT) y1 = FW_FRAME_HEIGHT;
+    if (x0 >= x1 || y0 >= y1) {
+        r->w = 0;
+        return 1;
+    }
+    x0 &= ~1;
+    x1 = (x1 + 1) & ~1;
+    r->x0 = (uint32_t)x0; r->y0 = (uint32_t)y0; r->w = (uint32_t)(x1 - x0); r->h = (uint32_t)(y1 - y0);
+    return 1;
+}
+
+/* SHAPES payload: [flags][count][records]. Every type is checked before a
+ * pixel is written; flags bit 1 pushes the whole frame afterwards. */
 static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
 {
     if (n < 2) {
@@ -921,41 +1285,17 @@ static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
     if (n - 2 < count * CFW_SHAPE_RECORD) {
         return CFW_BAD_LENGTH;
     }
-    uint8_t *panel = cfw_panel();
-    uint8_t *frame = cfw_row(panel, 0, 0);
-    const uint8_t *r = p + 2;
-    for (uint32_t i = 0; i < count; i++, r += CFW_SHAPE_RECORD) {
-        uint8_t type = r[0], rflags = r[1], level = (uint8_t)(r[2] & 0xF);
-        int width = r[3] ? (r[3] > 16 ? 16 : r[3]) : 1;
-        int v[6];
-        for (int k = 0; k < 6; k++) {
-            v[k] = rd16s(r + 4 + 2 * k);
-        }
-        switch (type) {
-        case CFW_SHAPE_LINE:
-            cfw_line(frame, v[0], v[1], v[2], v[3], level, width);
-            break;
-        case CFW_SHAPE_RECT:
-            if (rflags & 1u) {
-                cfw_fill_rect(frame, v[0], v[1], v[2], v[3], level);
-            } else {
-                int x0 = v[0] < v[2] ? v[0] : v[2], x1 = v[0] < v[2] ? v[2] : v[0];
-                int y0 = v[1] < v[3] ? v[1] : v[3], y1 = v[1] < v[3] ? v[3] : v[1];
-                cfw_fill_rect(frame, x0, y0, x1, y0 + width - 1, level);
-                cfw_fill_rect(frame, x0, y1 - width + 1, x1, y1, level);
-                cfw_fill_rect(frame, x0, y0, x0 + width - 1, y1, level);
-                cfw_fill_rect(frame, x1 - width + 1, y0, x1, y1, level);
-            }
-            break;
-        case CFW_SHAPE_CIRCLE:
-            cfw_circle(frame, v[0], v[1], v[2], level, rflags & 1u, width);
-            break;
-        case CFW_SHAPE_TRIANGLE:
-            cfw_triangle(frame, v[0], v[1], v[2], v[3], v[4], v[5], level, rflags & 1u, width);
-            break;
-        default:
+    for (uint32_t i = 0; i < count; i++) {
+        if (!cfw_shape_mask(p[2 + i * CFW_SHAPE_RECORD])) {
             return CFW_BAD_RECORD;
         }
+    }
+    uint8_t *panel = cfw_panel();
+    cfw_raster r = { cfw_row(panel, 0, 0), 0, FW_FRAME_HEIGHT };
+    for (uint32_t i = 0; i < count; i++) {
+        cfw_shape s;
+        cfw_shape_decode(p + 2 + i * CFW_SHAPE_RECORD, &s);
+        cfw_shape_draw(&r, &s);
     }
     if (flags & CFW_FLAG_FLUSH) {
         cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
@@ -967,17 +1307,20 @@ static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
 typedef struct cfw_anims cfw_anims;
 static cfw_anims *cfw_animation(void);
 
-/* --- animation: glides stepped on the display thread ---------------------- */
-#define CFW_ANIM_MAX 16u
+/* --- animation: tweens stepped on the display thread ---------------------- */
+#define CFW_ANIM_MAX    16u
+#define CFW_ANIM_VALUES 10u          /* p0..p7, then level (colour), then width */
+#define CFW_ANIM_LEVEL_BIT 0x100u
+#define CFW_ANIM_WIDTH_BIT 0x200u
 typedef struct {
-    uint16_t id;
-    int16_t  x0, y0, x1, y1;   /* from / to */
+    uint16_t id, mask;         /* mask: one bit per animated value */
     uint8_t  frames, frame, easing, pad;
-} cfw_anim;
+    int16_t  from[CFW_ANIM_VALUES], to[CFW_ANIM_VALUES];
+} cfw_anim;                    /* 48 bytes; finished when frame >= frames */
 
 struct cfw_anims {
     uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
-    uint8_t  active;           /* glides in flight */
+    uint8_t  active;           /* tweens in flight */
     uint8_t  period_ms;
     uint8_t  count;
     uint8_t  ticking;          /* a refresh is queued or running */
@@ -986,26 +1329,26 @@ struct cfw_anims {
     uint16_t clip_y0, clip_y1; /* row clip for composition (exclusive end); 0,0 = none */
     cfw_anim items[CFW_ANIM_MAX];
 };
-#define CFW_ANIM_MAGIC 0x314d4e41u  /* "ANM1" */
+#define CFW_ANIM_MAGIC 0x324d4e41u  /* "ANM2" */
 
 
-/* --- retained objects (g2flash modes 37-41, without animation yet) -------
+/* --- retained objects (g2flash modes 37-41, G1-sized) --------------------
  * Objects are small descriptors in the second RAM region; pixels come from
  * assets, the font engine or shape records. SHOW composes an ordered list of
  * object ids into a cleared frame and pushes it. */
 #define CFW_OBJ_MAX    96u
-#define CFW_OBJ_MAGIC  0x324a424fu  /* "OBJ2" */
-enum { CFW_OBJ_IMAGE = 0, CFW_OBJ_TEXT = 1, CFW_OBJ_RECT = 2, CFW_OBJ_SHAPES = 3 };
+#define CFW_OBJ_MAGIC  0x334a424fu  /* "OBJ3" */
+enum { CFW_OBJ_IMAGE = 0, CFW_OBJ_TEXT = 1, CFW_OBJ_RECT = 2, CFW_OBJ_SHAPES = 3, CFW_OBJ_SHAPE = 4 };
 
 typedef struct {
     uint16_t id, version;
     uint8_t  kind, flags;      /* flags: bit 0 visible */
-    int16_t  x, y;             /* position (box origin) */
-    uint16_t w, h;             /* box size (text/rect) */
+    int16_t  p[CFW_SHAPE_PARAMS]; /* kind 4: shape parameters; kinds 0-3: p[0] x, p[1] y, p[2] w, p[3] h */
     uint16_t asset;            /* image or string asset id, or shapes asset id */
-    uint8_t  level, font;      /* grey level / font; text: lines in `level`? no: */
-    uint8_t  lines, pad;
-} cfw_obj;                     /* 20 bytes */
+    uint8_t  level, font;      /* grey level (kind 4: colour) / text font */
+    uint8_t  lines, type;      /* text lines / kind 4 record type */
+    uint8_t  width, pad;       /* kind 4 stroke width */
+} cfw_obj;                     /* 30 bytes */
 
 typedef struct {
     uint32_t magic;
@@ -1045,16 +1388,106 @@ static cfw_obj *cfw_obj_find(cfw_objs *o, uint16_t id)
     return 0;
 }
 
-/* [id:u16][version:u16][kind][flags][x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines] = 19 bytes */
+static cfw_anims *cfw_animation(void)
+{
+    cfw_anims *a = (cfw_anims *)(FW_CFW_RAM2 + sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj));
+    if (a->magic != CFW_ANIM_MAGIC) {
+        uint8_t *p = (uint8_t *)a;
+        for (uint32_t i = 0; i < sizeof *a; i++) {
+            p[i] = 0;
+        }
+        a->magic = CFW_ANIM_MAGIC;
+        a->period_ms = 20;   /* about 30 fps with the 12 ms per-frame floor */
+    }
+    return a;
+}
+
+/* The running tween of an object, if any. */
+static cfw_anim *cfw_anim_find(cfw_anims *a, uint16_t id)
+{
+    for (uint32_t i = 0; i < a->count; i++) {
+        if (a->items[i].frame < a->items[i].frames && a->items[i].id == id) {
+            return &a->items[i];
+        }
+    }
+    return 0;
+}
+
+static void cfw_anim_cancel(uint16_t id)
+{
+    cfw_anim *g = cfw_anim_find(cfw_animation(), id);
+    if (g) {
+        g->frames = 0;
+    }
+}
+
+static void cfw_anim_clear(void)
+{
+    cfw_anims *a = cfw_animation();
+    a->count = 0;
+    a->active = 0;
+}
+
+/* The tween values of an object: p0..p7, then level, then width. */
+static int16_t cfw_obj_value(const cfw_obj *obj, uint32_t k)
+{
+    if (k < CFW_SHAPE_PARAMS) {
+        return obj->p[k];
+    }
+    return k == CFW_SHAPE_PARAMS ? obj->level : obj->width;
+}
+
+static void cfw_obj_set_value(cfw_obj *obj, uint32_t k, int32_t v)
+{
+    if (k < CFW_SHAPE_PARAMS) {
+        obj->p[k] = (int16_t)v;
+    } else if (k == CFW_SHAPE_PARAMS) {
+        obj->level = (uint8_t)(v & 0xF);
+    } else {
+        obj->width = (uint8_t)cfw_clamp(v, 0, 255);
+    }
+}
+
+/* Values a tween may change for this object (OBJ_ANIM mask bits). */
+static uint32_t cfw_obj_tween_mask(const cfw_obj *obj)
+{
+    switch (obj->kind) {
+    case CFW_OBJ_IMAGE: return 0x003u | CFW_ANIM_LEVEL_BIT;
+    case CFW_OBJ_TEXT:  return 0x00Fu;
+    case CFW_OBJ_RECT:  return 0x00Fu | CFW_ANIM_LEVEL_BIT;
+    case CFW_OBJ_SHAPE: return cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT | CFW_ANIM_WIDTH_BIT;
+    default:            return 0;
+    }
+}
+
+static void cfw_obj_shape(const cfw_obj *obj, cfw_shape *s)
+{
+    s->type = obj->type;
+    s->color = (uint8_t)(obj->level & 0xF);
+    s->width = obj->width;
+    for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
+        s->p[k] = obj->p[k];
+    }
+}
+
+/* [id:u16][version:u16][kind][flags] then, for kinds 0-3,
+ * [x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines] (19 bytes in
+ * all) or, for kind 4, one 20-byte SHAPES record (26 bytes in all). */
 static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
-    if (n < 19) {
+    if (n < 6) {
         return CFW_BAD_LENGTH;
     }
     uint16_t id = rd16(p);
     uint8_t kind = p[4];
-    if (kind > CFW_OBJ_SHAPES) {
+    if (kind > CFW_OBJ_SHAPE) {
+        return CFW_BAD_RECORD;
+    }
+    if (n < (kind == CFW_OBJ_SHAPE ? 6u + CFW_SHAPE_RECORD : 19u)) {
+        return CFW_BAD_LENGTH;
+    }
+    if (kind == CFW_OBJ_SHAPE && !cfw_shape_mask(p[6])) {
         return CFW_BAD_RECORD;
     }
     cfw_obj *obj = cfw_obj_find(o, id);
@@ -1068,14 +1501,31 @@ static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
     obj->version = rd16(p + 2);
     obj->kind = kind;
     obj->flags = p[5];
-    obj->x = rd16s(p + 6);
-    obj->y = rd16s(p + 8);
-    obj->w = rd16(p + 10);
-    obj->h = rd16(p + 12);
-    obj->asset = rd16(p + 14);
-    obj->level = p[16];
-    obj->font = p[17];
-    obj->lines = p[18];
+    for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
+        obj->p[k] = 0;
+    }
+    obj->asset = 0;
+    obj->font = obj->lines = obj->type = obj->width = obj->pad = 0;
+    if (kind == CFW_OBJ_SHAPE) {
+        cfw_shape s;
+        cfw_shape_decode(p + 6, &s);
+        obj->type = s.type;
+        obj->level = s.color;
+        obj->width = s.width;
+        for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
+            obj->p[k] = s.p[k];
+        }
+    } else {
+        obj->p[0] = rd16s(p + 6);
+        obj->p[1] = rd16s(p + 8);
+        obj->p[2] = rd16s(p + 10);
+        obj->p[3] = rd16s(p + 12);
+        obj->asset = rd16(p + 14);
+        obj->level = p[16];
+        obj->font = p[17];
+        obj->lines = p[18];
+    }
+    cfw_anim_cancel(id);
     o->revision++;
     return CFW_OK;
 }
@@ -1083,7 +1533,12 @@ static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
 /* Bounding box of an object for dirty-rect flushes; returns 0 when unknown. */
 static int cfw_obj_bbox(const cfw_obj *obj, cfw_rect *r)
 {
-    int x0 = obj->x, y0 = obj->y, w = obj->w, h = obj->h;
+    int x0 = obj->p[0], y0 = obj->p[1], w = obj->p[2], h = obj->p[3];
+    if (obj->kind == CFW_OBJ_SHAPE) {
+        cfw_shape s;
+        cfw_obj_shape(obj, &s);
+        return cfw_shape_box(&s, r);
+    }
     if (obj->kind == CFW_OBJ_IMAGE) {
         cfw_ctx *c = cfw_context();
         cfw_asset *a = c->arena ? cfw_asset_find(c, obj->asset) : 0;
@@ -1131,20 +1586,21 @@ static void cfw_rect_union(cfw_rect *acc, const cfw_rect *r)
 }
 
 /* Draw one object into the frame (no flush). When the animation row clip is
- * set, images and rects are limited to those rows; text is drawn whole when
- * its box touches them (glyph cells are idempotent), shapes always whole. */
+ * set, images, rects and shapes are limited to those rows; text is drawn
+ * whole when its box touches them (glyph cells are idempotent); a shapes
+ * asset always whole. */
 static uint8_t cfw_obj_render(const cfw_obj *obj)
 {
     uint8_t buf[16];
     cfw_anims *an = cfw_animation();
     int clip = an->clip_y1 > an->clip_y0;
-    int cy0 = an->clip_y0, cy1 = an->clip_y1;
+    int cy0 = clip ? an->clip_y0 : 0, cy1 = clip ? an->clip_y1 : FW_FRAME_HEIGHT;
     if (!(obj->flags & 1u)) {
         return CFW_OK;
     }
     switch (obj->kind) {
     case CFW_OBJ_IMAGE: {
-        if (obj->x < 0 || obj->y < 0) {
+        if (obj->p[0] < 0 || obj->p[1] < 0) {
             return CFW_BAD_RECT;
         }
         cfw_ctx *c = cfw_context();
@@ -1156,48 +1612,47 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
             return CFW_BAD_ASSET;
         }
         int r0 = 0, r1 = a->h;                /* asset rows to draw */
-        if (clip) {
-            if (obj->y + (int)a->h <= cy0 || obj->y >= cy1) {
-                return CFW_OK;
-            }
-            if (obj->y < cy0) r0 = cy0 - obj->y;
-            if (obj->y + (int)a->h > cy1) r1 = cy1 - obj->y;
+        if (obj->p[1] + (int)a->h <= cy0 || obj->p[1] >= cy1) {
+            return CFW_OK;
         }
+        if (obj->p[1] < cy0) r0 = cy0 - obj->p[1];
+        if (obj->p[1] + (int)a->h > cy1) r1 = cy1 - obj->p[1];
         uint32_t stride = a->kind == CFW_ASSET_1BPP ? (a->w + 7u) / 8u : a->w / 2u;
-        int y = obj->y + r0;
+        int y = obj->p[1] + r0;
         buf[0] = (uint8_t)(((obj->level & 0xF) << 4) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
-        buf[1] = (uint8_t)obj->x; buf[2] = (uint8_t)(obj->x >> 8);
+        buf[1] = (uint8_t)obj->p[0]; buf[2] = (uint8_t)(obj->p[0] >> 8);
         buf[3] = (uint8_t)y; buf[4] = (uint8_t)(y >> 8);
         buf[5] = (uint8_t)a->w; buf[6] = (uint8_t)(a->w >> 8);
         buf[7] = (uint8_t)(r1 - r0); buf[8] = (uint8_t)((r1 - r0) >> 8);
         return cfw_blit_from(buf, cfw_asset_bytes(c, a) + (uint32_t)r0 * stride, (uint32_t)(r1 - r0) * stride);
     }
     case CFW_OBJ_TEXT: {
-        int x1 = obj->x + obj->w, y1 = obj->y + obj->h - 1;
-        if (obj->x < 0 || obj->y < 0 || x1 > FW_FRAME_WIDTH || y1 >= FW_FRAME_HEIGHT) {
+        int x1 = obj->p[0] + obj->p[2], y1 = obj->p[1] + obj->p[3] - 1;
+        if (obj->p[0] < 0 || obj->p[1] < 0 || x1 > FW_FRAME_WIDTH || y1 >= FW_FRAME_HEIGHT) {
             return CFW_BAD_RECT;
         }
-        if (clip && (y1 < cy0 || obj->y >= cy1)) {
+        if (y1 < cy0 || obj->p[1] >= cy1) {
             return CFW_OK;
         }
         buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
         buf[2] = obj->font; buf[3] = 0;
-        buf[4] = (uint8_t)obj->x; buf[5] = (uint8_t)(obj->x >> 8);
-        buf[6] = (uint8_t)obj->y; buf[7] = (uint8_t)(obj->y >> 8);
+        buf[4] = (uint8_t)obj->p[0]; buf[5] = (uint8_t)(obj->p[0] >> 8);
+        buf[6] = (uint8_t)obj->p[1]; buf[7] = (uint8_t)(obj->p[1] >> 8);
         buf[8] = (uint8_t)x1; buf[9] = (uint8_t)(x1 >> 8);
         buf[10] = (uint8_t)y1; buf[11] = (uint8_t)(y1 >> 8);
         buf[12] = obj->lines ? obj->lines : 1;
         return cfw_asset_text(buf, 13);
     }
     case CFW_OBJ_RECT: {
-        uint8_t *frame = cfw_row(cfw_panel(), 0, 0);
-        int y0 = obj->y, y1 = obj->y + (int)obj->h - 1;
-        if (clip) {
-            if (y0 < cy0) y0 = cy0;
-            if (y1 >= cy1) y1 = cy1 - 1;
-            if (y0 > y1) return CFW_OK;
-        }
-        cfw_fill_rect(frame, obj->x, y0, obj->x + (int)obj->w - 1, y1, (uint8_t)(obj->level & 0xF));
+        cfw_raster r = { cfw_row(cfw_panel(), 0, 0), cy0, cy1 };
+        rs_fill_rect(&r, obj->p[0], obj->p[1], obj->p[2], obj->p[3], (uint8_t)(obj->level & 0xF));
+        return CFW_OK;
+    }
+    case CFW_OBJ_SHAPE: {
+        cfw_raster r = { cfw_row(cfw_panel(), 0, 0), cy0, cy1 };
+        cfw_shape s;
+        cfw_obj_shape(obj, &s);
+        cfw_shape_draw(&r, &s);
         return CFW_OK;
     }
     case CFW_OBJ_SHAPES: {
@@ -1262,7 +1717,7 @@ static uint8_t cfw_obj_show(const uint8_t *p, uint32_t n)
     return CFW_OK;
 }
 
-/* Blank the frame and forget the SHOW list (objects stay resident). */
+/* Blank the frame, forget the SHOW list and stop every tween (objects stay). */
 static uint8_t cfw_obj_hide(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
@@ -1274,6 +1729,7 @@ static uint8_t cfw_obj_hide(const uint8_t *p, uint32_t n)
     }
     o->shown_count = 0;
     o->revision++;
+    cfw_anim_clear();
     if (flags & CFW_FLAG_FLUSH) {
         cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
         return cfw_flush(panel, &all);
@@ -1309,6 +1765,7 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
         o->count = 0;
         o->shown_count = 0;
         o->revision++;
+        cfw_anim_clear();
         return CFW_OK;
     }
     if (p[0] == 1 && n >= 3) {
@@ -1316,6 +1773,7 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
         if (!obj) {
             return CFW_NO_OBJECT;
         }
+        cfw_anim_cancel(obj->id);
         cfw_obj *last = &cfw_obj_table()[o->count - 1];
         for (cfw_obj *q = obj; q < last; q++) {
             uint8_t *d = (uint8_t *)q;
@@ -1329,20 +1787,6 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
         return CFW_OK;
     }
     return CFW_BAD_COMMAND;
-}
-
-static cfw_anims *cfw_animation(void)
-{
-    cfw_anims *a = (cfw_anims *)(FW_CFW_RAM2 + sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj));
-    if (a->magic != CFW_ANIM_MAGIC) {
-        uint8_t *p = (uint8_t *)a;
-        for (uint32_t i = 0; i < sizeof *a; i++) {
-            p[i] = 0;
-        }
-        a->magic = CFW_ANIM_MAGIC;
-        a->period_ms = 20;   /* about 30 fps with the 12 ms per-frame floor */
-    }
-    return a;
 }
 
 /* Eased interpolation of `t` in [0, frames]; returns 0..1024. */
@@ -1393,14 +1837,24 @@ static uint8_t cfw_obj_present(const cfw_rect *dirty)
     return cfw_flush(panel, dirty ? dirty : &all);
 }
 
-/* Advance every glide one frame; returns the number still in flight and the
- * union of the old and new boxes of what moved (w = 0 when nothing moved;
+/* Union an object's box into `dirty`, or flag a whole-frame push. */
+static void cfw_anim_touch(const cfw_obj *obj, cfw_rect *dirty, int *full)
+{
+    cfw_rect box;
+    if (cfw_obj_bbox(obj, &box)) {
+        cfw_rect_union(dirty, &box);
+    } else {
+        *full = 1;
+    }
+}
+
+/* Advance every tween one frame; returns the number still in flight and the
+ * union of the old and new boxes of what changed (w = 0 when nothing did;
  * *full set when a box is unknown). */
 static uint32_t cfw_anim_step(cfw_anims *a, cfw_rect *dirty, int *full)
 {
     cfw_objs *o = cfw_objects();
     uint32_t left = 0;
-    cfw_rect box;
     dirty->x0 = dirty->y0 = dirty->w = dirty->h = 0;
     *full = 0;
     for (uint32_t i = 0; i < a->count; i++) {
@@ -1412,18 +1866,13 @@ static uint32_t cfw_anim_step(cfw_anims *a, cfw_rect *dirty, int *full)
         int32_t k = cfw_ease(g->easing, g->frame, g->frames);
         cfw_obj *obj = cfw_obj_find(o, g->id);
         if (obj) {
-            if (cfw_obj_bbox(obj, &box)) {
-                cfw_rect_union(dirty, &box);
-            } else {
-                *full = 1;
+            cfw_anim_touch(obj, dirty, full);
+            for (uint32_t v = 0; v < CFW_ANIM_VALUES; v++) {
+                if (g->mask & (1u << v)) {
+                    cfw_obj_set_value(obj, v, g->from[v] + ((int32_t)(g->to[v] - g->from[v]) * k) / 1024);
+                }
             }
-            obj->x = (int16_t)(g->x0 + ((int32_t)(g->x1 - g->x0) * k) / 1024);
-            obj->y = (int16_t)(g->y0 + ((int32_t)(g->y1 - g->y0) * k) / 1024);
-            if (cfw_obj_bbox(obj, &box)) {
-                cfw_rect_union(dirty, &box);
-            } else {
-                *full = 1;
-            }
+            cfw_anim_touch(obj, dirty, full);
         }
         if (g->frame < g->frames) {
             left++;
@@ -1486,11 +1935,12 @@ static cfw_input *cfw_input_state(void);
 /* The stock panel_init no longer clears the panel memory outside the canvas
  * (fw_abi.h: FW_PANEL_MEM_ROWS), so after a power-up those rows show random
  * content. Push one blanked frame row to every row outside the canvas; the
- * row is saved in the CFW RAM region behind the input state and restored. */
+ * row is parked in the second CFW RAM region (cfw_margin_row) and restored. */
+static uint8_t *cfw_margin_row(void);
 static void cfw_blank_margins(uint8_t *panel)
 {
     uint8_t *row0 = FW_FRAME_OF(panel);
-    uint8_t *keep = (uint8_t *)cfw_input_state() + sizeof(cfw_input);
+    uint8_t *keep = cfw_margin_row();
     int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
     int top = *(int *)(panel + FW_PANEL_ROW_OFFSET) + cfw_view_state()->dy;
     for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
@@ -1541,8 +1991,6 @@ static void cfw_auto_panel(cfw_input *in, int on)
     }
 }
 
-_Static_assert(sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_anims) + sizeof(cfw_input) + FW_FRAME_STRIDE <= FW_CFW_RAM2_SIZE,
-               "second CFW RAM region: objects, animations, input state and the margin row save");
 
 static cfw_input *cfw_input_state(void)
 {
@@ -1799,8 +2247,9 @@ static cfw_view *cfw_view_state(void)
     return v;
 }
 
-/* [op][dx:i16][dy:i16]: op 0 sets the offsets (and pushes the whole frame when
- * bit 1 of op is set), op 1 queries. Reply body:
+/* [op][dx:i16][dy:i16]: op 0 sets the offsets, blanks the panel outside the
+ * new canvas and pushes the whole frame (bit 1, the old explicit push, is
+ * accepted); op 1 queries. Reply body:
  * [dx:i16][dy:i16][stock_col:i16][stock_row:i16][height_gear][depth_gear][flushes:u16]. */
 static void cfw_view_cmd(const uint8_t *p, uint32_t n)
 {
@@ -1820,7 +2269,11 @@ static void cfw_view_cmd(const uint8_t *p, uint32_t n)
         }
         v->dx = (int16_t)dx;
         v->dy = (int16_t)dy;
-        if (p[0] & 2) {
+        if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
+            /* The rows the canvas just left keep whatever was pushed there
+             * (and a connecting host inherits the stock boot screens), so
+             * blank everything outside the new canvas and push the frame. */
+            cfw_blank_margins(panel);
             cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
             status = cfw_flush(panel, &all);
         }
@@ -1928,6 +2381,10 @@ typedef struct {
 } cfw_mic;
 #define CFW_MIC_MAGIC 0x3243494du  /* "MIC2" */
 
+_Static_assert(sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_anims) + sizeof(cfw_input) + sizeof(cfw_view)
+               + sizeof(cfw_imu) + sizeof(cfw_mic) + FW_FRAME_STRIDE <= FW_CFW_RAM2_SIZE,
+               "second CFW RAM region: objects, animations, input, view, IMU and mic state, then the parked margin row");
+
 static cfw_mic *cfw_mic_state(void)
 {
     cfw_mic *m = (cfw_mic *)((uint8_t *)cfw_imu_state() + sizeof(cfw_imu));
@@ -1939,6 +2396,12 @@ static cfw_mic *cfw_mic_state(void)
         m->magic = CFW_MIC_MAGIC;
     }
     return m;
+}
+
+/* Where frame row 0 is parked while the panel margins are blanked. */
+static uint8_t *cfw_margin_row(void)
+{
+    return (uint8_t *)cfw_mic_state() + sizeof(cfw_mic);
 }
 
 static void cfw_mic_control(const uint8_t *p, uint32_t n)
@@ -2020,9 +2483,21 @@ static void cfw_anim_state(void)
     cfw_reply(CFW_ANIM_STATE, CFW_OK, body, sizeof body);
 }
 
-/* [period_ms][count][entries: id:u16, tx:i16, ty:i16, frames, easing] = 8 bytes each.
- * Glides start from the object's current position; a period of 0 keeps the
- * current one. The first frame is rendered by the display thread. */
+static uint32_t cfw_popcount(uint32_t v)
+{
+    uint32_t n = 0;
+    while (v) {
+        n += v & 1u;
+        v >>= 1;
+    }
+    return n;
+}
+
+/* [period_ms][count][entries]: entry [id:u16][mask:u16][frames][easing] then
+ * one i16 target per set mask bit (bits 0-7 p0..p7, 8 level, 9 width).
+ * Tweens start from the object's current values and merge into the running
+ * set by id; frames 0 applies the targets at once. The display thread
+ * renders the frames. */
 static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
 {
     cfw_anims *a = cfw_animation();
@@ -2030,36 +2505,97 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
     if (n < 2) {
         return CFW_BAD_LENGTH;
     }
-    uint32_t count = p[1];
-    if (count > CFW_ANIM_MAX || n - 2 < count * 8) {
-        return CFW_BAD_LENGTH;
+    uint32_t count = p[1], pos = 2, fresh = 0, slots = CFW_ANIM_MAX - a->count;
+    for (uint32_t i = 0; i < a->count; i++) {
+        if (a->items[i].frame >= a->items[i].frames) {
+            slots++;
+        }
     }
     for (uint32_t i = 0; i < count; i++) {
-        if (!cfw_obj_find(o, rd16(p + 2 + 8 * i)) || p[2 + 8 * i + 6] == 0) {
+        if (n - pos < 6) {
+            return CFW_BAD_LENGTH;
+        }
+        cfw_obj *obj = cfw_obj_find(o, rd16(p + pos));
+        if (!obj) {
             return CFW_NO_OBJECT;
         }
+        uint32_t mask = rd16(p + pos + 2);
+        if (mask == 0 || (mask & ~cfw_obj_tween_mask(obj))) {
+            return CFW_BAD_RECORD;
+        }
+        if (p[pos + 4] && !cfw_anim_find(a, obj->id)) {
+            fresh++;
+        }
+        pos += 6 + 2 * cfw_popcount(mask);
+        if (pos > n) {
+            return CFW_BAD_LENGTH;
+        }
+    }
+    if (fresh > slots) {
+        return CFW_NO_MEMORY;
     }
     if (p[0] >= 1) {
         a->period_ms = p[0];
     }
-    a->count = (uint8_t)count;
+    cfw_rect snapped = { 0, 0, 0, 0 };
+    int full = 0, started = 0;
+    pos = 2;
     for (uint32_t i = 0; i < count; i++) {
-        const uint8_t *e = p + 2 + 8 * i;
-        cfw_anim *g = &a->items[i];
+        const uint8_t *e = p + pos;
         cfw_obj *obj = cfw_obj_find(o, rd16(e));
-        g->id = obj->id;
-        g->x0 = obj->x;
-        g->y0 = obj->y;
-        g->x1 = rd16s(e + 2);
-        g->y1 = rd16s(e + 4);
-        g->frames = e[6];
-        g->frame = 0;
-        g->easing = e[7];
+        uint32_t mask = rd16(e + 2);
+        uint8_t frames = e[4];
+        const uint8_t *v = e + 6;
+        cfw_anim *g = cfw_anim_find(a, obj->id);
+        if (frames == 0) {
+            cfw_anim_touch(obj, &snapped, &full);
+            for (uint32_t k = 0; k < CFW_ANIM_VALUES; k++) {
+                if (mask & (1u << k)) {
+                    cfw_obj_set_value(obj, k, rd16s(v));
+                    v += 2;
+                }
+            }
+            cfw_anim_touch(obj, &snapped, &full);
+            if (g) {
+                g->frames = 0;
+            }
+        } else {
+            if (!g) {
+                for (uint32_t j = 0; j < a->count && !g; j++) {
+                    if (a->items[j].frame >= a->items[j].frames) {
+                        g = &a->items[j];
+                    }
+                }
+                if (!g) {
+                    g = &a->items[a->count++];
+                }
+            }
+            for (uint32_t k = 0; k < CFW_ANIM_VALUES; k++) {
+                if (mask & (1u << k)) {
+                    g->from[k] = cfw_obj_value(obj, k);
+                    g->to[k] = rd16s(v);
+                    v += 2;
+                }
+            }
+            g->id = obj->id;
+            g->mask = (uint16_t)mask;
+            g->frames = frames;
+            g->frame = 0;
+            g->easing = e[5];
+            started = 1;
+        }
+        pos += 6 + 2 * cfw_popcount(mask);
     }
-    a->active = 1;
-    if (!a->ticking) {
-        a->ticking = 1;
-        FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+    o->revision++;
+    if (snapped.w || full) {
+        cfw_obj_present(full ? 0 : &snapped);
+    }
+    if (started) {
+        a->active = 1;
+        if (!a->ticking) {
+            a->ticking = 1;
+            FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+        }
     }
     return CFW_OK;
 }
