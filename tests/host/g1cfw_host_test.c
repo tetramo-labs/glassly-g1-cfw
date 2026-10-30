@@ -816,6 +816,22 @@ int main(int argc, char **argv)
     CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
     guards_intact();
 
+    /* Text level: the stock drawer writes full-bright glyphs (the host stub
+     * writes nothing, so the box is prefilled), which the object scales. */
+    CHECK(send_packet(puts2, sizeof puts2) == 0 && last_reply[2] == CFW_OK);        /* string asset 9 again */
+    uint8_t o3dim[] = { 0xF0, 0x20, 3, 0, 8, 0, 1, 0x01, 32, 0, 32, 0, 0x40, 0x02, 28, 0, 9, 0, 0x05, 0, 1 };  /* text at level 5 */
+    CHECK(send_packet(o3dim, sizeof o3dim) == 0 && last_reply[2] == CFW_OK);
+    memset(frame, 0, 200 * 320);
+    for (int row = 32; row < 60; row++) memset(frame + row * 320 + 16, 0xF9, 288);  /* 15 and 9 inside the box */
+    frame[32 * 320 + 15] = 0xFF;                                                     /* just left of the box */
+    uint8_t show3[] = { 0xF0, 0x21, 0x02, 1, 3, 0 };                                   /* no clear: the prefill stands in for glyphs */
+    CHECK(send_packet(show3, sizeof show3) == 0 && last_reply[2] == CFW_OK);
+    CHECK(frame[32 * 320 + 16] == 0x53 && frame[59 * 320 + 303] == 0x53 && frame[32 * 320 + 15] == 0xFF && frame[60 * 320 + 16] == 0 && frame[32 * 320 + 304] == 0);
+    uint8_t dim_tween[] = { 0xF0, 0x25, 0, 1, 3, 0, 0x00, 0x01, 1, 0, 15, 0 };         /* level back to 15 in one frame */
+    CHECK(send_packet(dim_tween, sizeof dim_tween) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[2] == CFW_OK);
+
     /* Paths (asset kind 3): commands in Q4 compiled on PUT; a square with a
      * same-winding square hole fills even-odd with the hole, nonzero without. */
     uint8_t path_cmds[2 * (4 * 5 + 1)];

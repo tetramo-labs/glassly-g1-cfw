@@ -203,7 +203,8 @@ engine or shape records, so showing a scene again costs one SHOW.
   replace an object. `flags` bit 0 = visible. Kinds 0-3 carry
   `[x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines]` (19 bytes
   in all): 0 image (asset at x,y, grey `level` for 1bpp), 1 text (string
-  asset in the box x,y,w,h with `font`/`lines`), 2 rect (filled, `level`),
+  asset in the box x,y,w,h with `font`/`lines`, drawn full-bright by the
+  stock engine then scaled to `level` from G1CFW/39), 2 rect (filled, `level`),
   3 shapes (a string asset holding `[count][records]`, drawn in canvas
   coordinates; x,y,w,h unused). Kind 4 (G1CFW/38) SHAPE carries one 20-byte
   SHAPES record (26 bytes in all; the record's own flags byte is ignored):
@@ -231,8 +232,9 @@ engine or shape records, so showing a scene again costs one SHOW.
   `0x07`, TRI/TRI_FILL/BEZIER2 `0x3F`, QUAD/QUAD_FILL/BEZIER3 `0xFF`) or, for
   kinds 0-2, bit 0 x, bit 1 y, bit 2 w, bit 3 h (w/h only for text and
   rect) or, for kind 5, bit 0 x, bit 1 y, bit 2 the Q8 scale. Bit 8
-  (`0x100`) is the colour nibble (kinds 4 and 5) or `level` (kinds 0 and 2;
-  the stock text drawer has no level), bit 9 (`0x200`) the stroke width
+  (`0x100`) is the colour nibble (kinds 4 and 5) or `level` (kinds 0, 1 and
+  2; for text the glyph pixels the stock drawer wrote are scaled by it, so
+  a level tween fades a caption), bit 9 (`0x200`) the stroke width
   (kind 4 only), bits 10-12 (`0x400`, `0x800`, `0x1000`) the rotation angle
   in Q4 degrees (16 per degree, so 1440 is a quarter turn; unwrapped, so
   5760 is a full turn) and the pivot x and y in canvas pixels (kinds 4 and

@@ -1806,7 +1806,7 @@ static uint32_t cfw_obj_tween_mask(const cfw_obj *obj)
 {
     switch (obj->kind) {
     case CFW_OBJ_IMAGE: return 0x003u | CFW_ANIM_LEVEL_BIT;
-    case CFW_OBJ_TEXT:  return 0x00Fu;
+    case CFW_OBJ_TEXT:  return 0x00Fu | CFW_ANIM_LEVEL_BIT;
     case CFW_OBJ_RECT:  return 0x00Fu | CFW_ANIM_LEVEL_BIT;
     case CFW_OBJ_SHAPE: return cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT | CFW_ANIM_WIDTH_BIT | CFW_ANIM_ROTATE_BITS;
     case CFW_OBJ_PATH:  return 0x007u | CFW_ANIM_LEVEL_BIT | CFW_ANIM_ROTATE_BITS;
@@ -2003,7 +2003,20 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
         buf[8] = (uint8_t)x1; buf[9] = (uint8_t)(x1 >> 8);
         buf[10] = (uint8_t)y1; buf[11] = (uint8_t)(y1 >> 8);
         buf[12] = obj->lines ? obj->lines : 1;
-        return cfw_asset_text(buf, 13);
+        uint8_t status = cfw_asset_text(buf, 13);
+        if (status == CFW_OK && (obj->level & 0xF) < 15) {
+            /* The stock drawer only knows full brightness: scale the box's
+             * pixels by the object's level so text can fade like a shape. */
+            uint32_t level = obj->level & 0xF;
+            int r0 = obj->p[1] > cy0 ? obj->p[1] : cy0, r1 = y1 + 1 < cy1 ? y1 + 1 : cy1;
+            for (int row = r0; row < r1; row++) {
+                uint8_t *b = cfw_row(cfw_panel(), (uint32_t)row, (uint32_t)obj->p[0]);
+                for (int i = 0; i < obj->p[2] / 2; i++) {
+                    b[i] = (uint8_t)((((b[i] >> 4) * level / 15) << 4) | ((b[i] & 0xF) * level / 15));
+                }
+            }
+        }
+        return status;
     }
     case CFW_OBJ_RECT: {
         cfw_raster r = { cfw_row(cfw_panel(), 0, 0), cy0, cy1 };
