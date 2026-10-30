@@ -200,7 +200,13 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 9. **Phone path.** G1CFW/20 removes the stock central policy (any central
    may connect and stay connected; no pairing). Verified: the Mac pinged the
    left temple while the glasses were worn, out of the case, which unblocks
-   the sensor work. A phone client for
+   the sensor work. The Glassly app (sibling `glassly` checkout,
+   `mobile/modules/bluetooth-sdk`) bundles the G1CFW/37 image next to the
+   vendor 1.6.3 application, flashes either over MCUmgr SMP, and on the CFW
+   drives the scene canvas through retained objects (TEXT, SHAPES, 1-bit
+   image assets, OBJ_SHOW, OBJ_ANIM glides), INPUT_CONTROL events,
+   MIC_CONTROL, VIEW offsets for height and depth, and PANEL for silent
+   mode (2026-10-29). A phone client for
    `0xF0` is still wanted for daily use.
 
 ## Known limits and handoff
