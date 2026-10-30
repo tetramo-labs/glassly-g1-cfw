@@ -52,6 +52,16 @@ class WireTests(unittest.TestCase):
         self.assertEqual(scene.anim_entry(7, 0x107, 10, 0, [1, 2, 3, 15]), bytes.fromhex('0700 0701 0a00') + struct.pack('<4h', 1, 2, 3, 15))
         with self.assertRaises(ValueError):
             scene.anim_entry(7, 0x107, 10, 0, [1, 2, 3])
+        # G1CFW/40: a CSS cubic-bezier rides the entry as 0x80 + four bytes after the values (the host test's `cur_lin`);
+        # a linear curve entry and a code-0 entry both encode
+        self.assertEqual(scene.anim_entry(6, 0x01, 4, 0, [500], (0, 0, 255, 255)), bytes.fromhex('0600 0100 0480 f401 0000ffff'))
+        self.assertEqual(scene.anim_entry(6, 0x01, 4, 0, [500]), bytes.fromhex('0600 0100 0400 f401'))
+        self.assertEqual(scene.rotation_entry(9, 1440, 350, 90, 10, curve=scene.CURVES['ease-in']), bytes.fromhex('0900 001c 0a80') + le(1440, 350, 90) + bytes.fromhex('6b00ffff'))
+        with self.assertRaises(ValueError):
+            scene.anim_entry(6, 0x01, 4, 0, [500], (0, 0, 255))
+        self.assertIsNone(scene.easing_curve('linear'))
+        self.assertEqual([scene.easing_curve(e) for e in ('ease-in-out', 'ease-out', 'ease-in', 'ease', None, 'bounce')],
+                         [(107, 0, 148, 255), (0, 0, 148, 255), (107, 0, 255, 255), (64, 26, 64, 255), (64, 26, 64, 255), (64, 26, 64, 255)])
 
     def test_utf8_cut_keeps_characters_whole(self):
         text = '日' * 100  # 3 bytes each: 300 bytes
@@ -66,8 +76,8 @@ class WireTests(unittest.TestCase):
         self.assertIsNone(scene.tween_entry(1, old, scene.shape_slot(CIRCLE_FILL, 15, 3, [10, 10, 10]), 10, 0))
         # a parameter outside the type's mask (p3 of a circle) is not tweenable
         self.assertIsNone(scene.tween_entry(1, old, scene.shape_slot(CIRCLE_FILL, 15, 0, [10, 10, 10, 1]), 10, 0))
-        entry = scene.tween_entry(1, old, scene.shape_slot(CIRCLE_FILL, 3, 0, [20, 10, 10]), 10, 2)
-        self.assertEqual(entry, bytes.fromhex('0100 0701 0a02') + struct.pack('<4h', 20, 10, 10, 3))
+        entry = scene.tween_entry(1, old, scene.shape_slot(CIRCLE_FILL, 3, 0, [20, 10, 10]), 10, curve=scene.CURVES['ease-out'])
+        self.assertEqual(entry, bytes.fromhex('0100 0701 0a80') + struct.pack('<4h', 20, 10, 10, 3) + bytes.fromhex('000094ff'))
 
 
 class PipelineTests(unittest.TestCase):
@@ -350,8 +360,8 @@ class RotationTests(unittest.TestCase):
         bar = {'id': 'r', 'type': 'rect', 'box': {'x': 300, 'y': 80, 'w': 100, 'h': 20}, 'style': {'fill': True}, 'rotationQ8': 90 * 256, 'change': 'created'}
         records = g1.encode([bar])
         self.assertEqual([r[0] for r in records], [OBJ_PUT, OBJ_SHOW, OBJ_ANIM])
-        # the host test's example: angle 1440 (90 deg) about the centre (350, 90), frames 0 (the easing byte is moot)
-        self.assertEqual(records[2], bytes.fromhex('250e00 2101 0100 001c 0001') + le(1440, 350, 90))
+        # the host test's example: angle 1440 (90 deg) about the centre (350, 90), frames 0 (no curve on a snap)
+        self.assertEqual(records[2], bytes.fromhex('250e00 2101 0100 001c 0000') + le(1440, 350, 90))
         self.assertEqual(g1.encode([bar]), [])
         # the rotation glides back with a transition about the pivot the glasses hold; nothing else changes
         records = g1.encode([{**bar, 'rotationQ8': 0, 'transition': {'durationMs': 330, 'easing': 'linear'}}])
@@ -359,14 +369,15 @@ class RotationTests(unittest.TestCase):
         # a geometry tween and a rotation ride one entry; the new pivot is snapped first while the angle is still 0
         records = g1.encode([{**bar, 'box': {'x': 200, 'y': 80, 'w': 100, 'h': 20}, 'rotationQ8': 45 * 256, 'pivotX': 250, 'pivotY': 90, 'transition': {'durationMs': 330}}])
         self.assertEqual(records, [bytes.fromhex('210400 0301 0100'), bytes.fromhex('250c00 2101 0100 0018 0000') + le(250, 90),
-                                   bytes.fromhex('251600 2101 0100 1f05 0a01') + le(200, 80, 100, 20, 0, 15, 720)])
+                                   bytes.fromhex('251a00 2101 0100 1f05 0a80') + le(200, 80, 100, 20, 0, 15, 720) + bytes.fromhex('401a40ff')])
         # a border adds a second slot: a new object with its own snap; the first slot is unchanged and keeps its rotation
         records = g1.encode([{**bar, 'box': {'x': 200, 'y': 80, 'w': 100, 'h': 20}, 'style': {'fill': True, 'border': 2}, 'rotationQ8': 45 * 256, 'pivotX': 250, 'pivotY': 90}])
         self.assertEqual([r[0] for r in records], [OBJ_PUT, OBJ_SHOW, OBJ_ANIM])
-        self.assertEqual(records[2], bytes.fromhex('250e00 2101 0200 001c 0001') + le(720, 250, 90))
+        self.assertEqual(records[2], bytes.fromhex('250e00 2101 0200 001c 0000') + le(720, 250, 90))
         # a rotated shape that moves with a transition carries its pivot along in the same glide
         records = g1.encode([{**bar, 'box': {'x': 100, 'y': 80, 'w': 100, 'h': 20}, 'style': {'fill': True, 'border': 2}, 'rotationQ8': 45 * 256, 'transition': {'durationMs': 330}}])
-        self.assertEqual(records[1][5:5 + 6], bytes.fromhex('0100 1f1d 0a01'))
+        self.assertEqual(records[1][5:5 + 6], bytes.fromhex('0100 1f1d 0a80'))
+        self.assertEqual(records[1][-4:], bytes.fromhex('401a40ff'))
 
     def test_text_never_rotates_and_hide_resnaps(self):
         g1 = G1Scene(1)
@@ -378,7 +389,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(g1.hide(), [scene.record(OBJ_HIDE, b'\x02')])
         records = g1.encode([{**disc, 'box': {'x': 100, 'y': 0, 'w': 21, 'h': 21}}])
         self.assertEqual([r[0] for r in records], [OBJ_PUT, OBJ_SHOW, OBJ_ANIM])
-        self.assertEqual(records[2], bytes.fromhex('250e00 2101 0100 001c 0001') + le(480, 110, 10))
+        self.assertEqual(records[2], bytes.fromhex('250e00 2101 0100 001c 0000') + le(480, 110, 10))
 
 
 class VectorSuiteTests(unittest.TestCase):
@@ -416,15 +427,16 @@ class VectorSuiteTests(unittest.TestCase):
 
     def test_ops_merge_into_one_entry_per_object(self):
         # the first rotation snaps the pivot in its own record, then glides the angle alone
+        linear = bytes.fromhex('0000ffff')   # the fixtures' curves ride verbatim behind easing 0x80
         records = self.records('rotation-quarter-turn')
-        self.assertEqual(records, [(OBJ_ANIM, bytes.fromhex('2101 0100 0018 0000') + le(58, 50)), (OBJ_ANIM, bytes.fromhex('2101 0100 0004 1500') + le(1440))])
-        self.assertEqual(self.records('rotation-full-turn'), [(OBJ_ANIM, bytes.fromhex('2101 0100 0004 3700') + le(7200))])
+        self.assertEqual(records, [(OBJ_ANIM, bytes.fromhex('2101 0100 0018 0000') + le(58, 50)), (OBJ_ANIM, bytes.fromhex('2101 0100 0004 1580') + le(1440) + linear)])
+        self.assertEqual(self.records('rotation-full-turn'), [(OBJ_ANIM, bytes.fromhex('2101 0100 0004 3780') + le(7200) + linear)])
         records = self.records('rotation-retarget-and-move')
-        self.assertEqual(records, [(OBJ_ANIM, bytes.fromhex('2101 0100 0304 2800') + le(133, 83, 0))])
+        self.assertEqual(records, [(OBJ_ANIM, bytes.fromhex('2101 0100 0304 2880') + le(133, 83, 0) + linear)])
         self.assertIn('the longer wins', self.by_name['rotation-retarget-and-move']['notes'][0])
         records = self.records('path-move-scale-color-rotate')
         self.assertEqual(records, [(OBJ_ANIM, bytes.fromhex('2101 0100 0018 0000') + le(125, 75)),
-                                   (OBJ_ANIM, bytes.fromhex('2101 0100 0705 1e00') + le(125, 75, 512, 9, 1440))])
+                                   (OBJ_ANIM, bytes.fromhex('2101 0100 0705 1e80') + le(125, 75, 512, 9, 1440) + linear)])
         # finish snaps everything this port tweened on the slot since its PUT: the glide's x,y and the rotation
         self.assertEqual(self.records('rotation-finish'), [(OBJ_ANIM, bytes.fromhex('2101 0100 031c 0000') + le(133, 83, 0, 150, 92))])
         self.assertEqual(self.by_name['rotation-freeze']['message'], b'')
@@ -441,8 +453,9 @@ class VectorSuiteTests(unittest.TestCase):
         self.assertEqual([cmd for cmd, _ in anim], [OBJ_ANIM, OBJ_ANIM])
         self.assertEqual((anim[0][1][1], anim[1][1][1]), (13, 13))
         self.assertEqual(anim[0][1][2:8], bytes.fromhex('1500 0018 0000'))
-        self.assertEqual(anim[1][1][2:8], bytes.fromhex('1500 0004 4c00'))
+        self.assertEqual(anim[1][1][2:8], bytes.fromhex('1500 0004 4c80'))
         self.assertEqual(struct.unpack_from('<h', anim[1][1], 8)[0], 5760)
+        self.assertEqual(anim[1][1][10:14], bytes.fromhex('0000ffff'))
         self.assertEqual(self.records('path-reopen-from-cache'), [(OBJ_SHOW, bytes.fromhex('0301 0100'))])
         self.assertEqual(self.records('path-hide'), [(OBJ_HIDE, b'\x02')])
 
@@ -474,13 +487,32 @@ class VectorSuiteTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('cc'), 'no host C compiler')
 class HostReplayTests(unittest.TestCase):
+    """Both suites' dumps through the firmware's host build: every message accepted, every probe right."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.exe = Path(cls.temp.name) / 'g1cfw_host_test'
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
+                        '-O1', '-g', str(ROOT / 'tests/host/g1cfw_host_test.c'), '-o', str(cls.exe)], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def replay(self, dump):
+        result = subprocess.run([str(self.exe), '--replay', str(dump)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
     def test_vector_dump_replays_without_errors(self):
-        with tempfile.TemporaryDirectory() as temp:
-            exe = Path(temp) / 'g1cfw_host_test'
-            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
-                            '-O1', '-g', str(ROOT / 'tests/host/g1cfw_host_test.c'), '-o', str(exe)], check=True)
-            dump = Path(temp) / 'vector.dump'
-            dump.write_bytes(vector_suite.dump_bytes(vector_suite.encode_steps(vector_suite.vector_cases())))
-            result = subprocess.run([str(exe), '--replay', str(dump)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn('replay: 22 messages, 46 snapshots, 0 errors', result.stdout)
+        dump = Path(self.temp.name) / 'vector.dump'
+        dump.write_bytes(vector_suite.dump_bytes(vector_suite.encode_steps(vector_suite.vector_cases())))
+        self.assertIn('replay: 22 messages, 46 snapshots, 0 errors', self.replay(dump))
+
+    def test_shapes_dump_replays_without_errors(self):
+        dump = Path(self.temp.name) / 'shapes.dump'
+        with redirect_stdout(io.StringIO()):
+            results = asyncio.run(suite.run_suite(options(dump=str(dump)), suite.select_cases([])))
+        self.assertTrue(all(r['state'] == 'pass' for r in results))
+        self.assertRegex(self.replay(dump), r'replay: \d+ messages, \d+ snapshots, 0 errors')

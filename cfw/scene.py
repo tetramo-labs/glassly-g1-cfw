@@ -294,11 +294,21 @@ def obj_control_payload(id_=None):
     return bytes([0]) if id_ is None else bytes([1]) + struct.pack('<H', id_)
 
 
-def anim_entry(id_, mask, frames, easing, values):
-    """`[id:u16][mask:u16][frames][easing]` then one i16 per set mask bit, low bit first."""
+EASE_CURVE = 0x80
+# CSS cubic-bezier control points x1 y1 x2 y2 scaled to 0..255: g2flash's EASE table, what the glasses take verbatim.
+CURVES = {'linear': (0, 0, 255, 255), 'ease-in-out': (107, 0, 148, 255), 'ease-out': (0, 0, 148, 255),
+          'ease-in': (107, 0, 255, 255), 'ease': (64, 26, 64, 255)}
+
+
+def anim_entry(id_, mask, frames, easing, values, curve=None):
+    """`[id:u16][mask:u16][frames][easing]` then one i16 per set mask bit, low bit first.
+    With a `curve` (four control bytes) the easing byte is 0x80 and the curve follows the values."""
     if len(values) != bin(mask).count('1'):
         raise ValueError(f'{len(values)} values for a mask of {bin(mask).count("1")} bits')
-    return struct.pack('<HHBB', id_, mask, frames, easing) + struct.pack(f'<{len(values)}h', *values)
+    if curve is not None and len(curve) != 4:
+        raise ValueError(f'a cubic-bezier curve is four bytes, not {len(curve)}')
+    out = struct.pack('<HHBB', id_, mask, frames, EASE_CURVE if curve is not None else easing) + struct.pack(f'<{len(values)}h', *values)
+    return out + bytes(curve) if curve is not None else out
 
 
 def obj_anim_payload(entries, period_ms=ANIM_PERIOD_MS):
@@ -316,8 +326,13 @@ def utf8_cut(text, limit=TEXT_MAX):
     return data
 
 
-def easing_code(name):
-    return {'linear': 0, 'ease-out': 2, 'easeOut': 2, 'ease-in': 3, 'easeIn': 3}.get(name, 1)
+def easing_curve(name):
+    """The curve an element transition's easing name rides to the glasses, as the phone
+    maps them: None for linear (easing code 0), the CSS `ease` curve for anything unnamed."""
+    if name == 'linear':
+        return None
+    aliases = {'easeOut': 'ease-out', 'easeIn': 'ease-in', 'easeInOut': 'ease-in-out'}
+    return CURVES.get(aliases.get(name, name), CURVES['ease'])
 
 
 def transition_frames(ms):
@@ -674,14 +689,14 @@ def slot_values(slot, mask, rotation=ROTATION_NONE):
     return [values[k] for k in range(13) if mask & (1 << k)]
 
 
-def tween_entry(id_, old, new, frames, easing):
+def tween_entry(id_, old, new, frames, easing=0, curve=None):
     mask = tween_mask(old, new)
-    return None if mask is None else anim_entry(id_, mask, frames, easing, slot_values(new, mask))
+    return None if mask is None else anim_entry(id_, mask, frames, easing, slot_values(new, mask), curve)
 
 
-def rotation_entry(id_, angle_q4, px, py, frames=0, easing=0):
+def rotation_entry(id_, angle_q4, px, py, frames=0, easing=0, curve=None):
     """Rotate a kind-4 or kind-5 object about a canvas pixel; frames 0 snaps."""
-    return anim_entry(id_, ROTATE_BITS, frames, easing, [angle_q4, px, py])
+    return anim_entry(id_, ROTATE_BITS, frames, easing, [angle_q4, px, py], curve)
 
 
 def rotation_masks(held, want, frames):
@@ -804,7 +819,7 @@ class G1Scene:
             slots = self._slots_for(el)
             transition = el.get('transition') or {}
             frames = transition_frames(transition.get('durationMs') or 0)
-            easing = easing_code(transition.get('easing'))
+            curve = easing_curve(transition.get('easing'))
             objs = m.retained.get(key)
             if not slots:
                 if objs is not None:
@@ -874,7 +889,7 @@ class G1Scene:
                     obj.rotation = rotation
                     changed = True
                 if mask:
-                    anims.append(anim_entry(obj.object_id, mask, entry_frames, easing, slot_values(slot, mask, rotation)))
+                    anims.append(anim_entry(obj.object_id, mask, entry_frames, 0, slot_values(slot, mask, rotation), curve if entry_frames else None))
                     if entry_frames:
                         anim_frames = max(anim_frames, entry_frames)
                         obj.anim_ends_at = now + entry_frames * ANIM_PERIOD_MS / 1000

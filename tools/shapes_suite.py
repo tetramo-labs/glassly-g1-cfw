@@ -44,7 +44,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from cfw.scene import (CANVAS, ARC, CIRCLE, CIRCLE_FILL, LINE, PIE, RECT, RECT_FILL, ASSET_CLEAR, OBJ_CONTROL, OBJ_HIDE,  # noqa: E402
-                       RESET_RECORDS, G1Scene, crc16, diff_scene, easing_code, messages, obj_control_payload,
+                       RESET_RECORDS, G1Scene, anim_entry, crc16, diff_scene, easing_curve, messages, obj_control_payload,
                        obj_hide_payload, process_scene, record, resolve_anchors, stream_packets, svg_path, transition_frames,
                        evaluate_result, jround)
 
@@ -1105,7 +1105,7 @@ def self_test_checks():
     eq('text put', records[1], bytes.fromhex('201300 01000100 0101') + struct.pack('<hhHHHBBB', 10, 10, 200, 60, 1, 15, 0, 2))
     eq('text show', records[2], bytes.fromhex('210400 0301 0100'))
     records = shown(pipeline, scene, [t(40, 'hi\nthere', 9, {'durationMs': 330})])
-    eq('text move tweens x,y', records, [bytes.fromhex('210400 0301 0100'), bytes.fromhex('250c00 2101 0100 0300 0a01') + le(10, 40)])
+    eq('text move tweens x,y on the ease curve', records, [bytes.fromhex('210400 0301 0100'), bytes.fromhex('251000 2101 0100 0300 0a80') + le(10, 40) + bytes.fromhex('401a40ff')])
     records = shown(pipeline, scene, [t(40, 'ho\nthere', 9, {'durationMs': 330})])
     eq('text change replaces the asset', records[0], bytes.fromhex('081000 0100 02 00 0000 0000') + b'ho\nthere')
     eq('text change re-PUTs', records[1], bytes.fromhex('201300 01000200 0101') + struct.pack('<hhHHHBBB', 10, 40, 200, 60, 1, 15, 0, 2))
@@ -1119,7 +1119,7 @@ def self_test_checks():
         return {'type': 'circle', 'id': 'ring', 'box': center(CANVAS, 140, 140), 'style': {'border': stroke, 'color': color}, 'transition': {'durationMs': 700}}
     shown(pipeline, scene, [ring(2, 1)])
     records = shown(pipeline, scene, [ring(15, 12)])
-    eq('colour and stroke tween', records[1], bytes.fromhex('251200 2101 0100 0703 1501') + le(320, 100, 69, 15, 12))
+    eq('colour and stroke tween', records[1], bytes.fromhex('251600 2101 0100 0703 1580') + le(320, 100, 69, 15, 12) + bytes.fromhex('401a40ff'))
 
     # past the retained budget the rest is drawn after the SHOW and flushed
     pipeline, scene = fresh()
@@ -1140,7 +1140,7 @@ def self_test_checks():
     eq('path object', records[1], bytes.fromhex('201300 01000100 0501') + struct.pack('<hhHHHBBB', 10, 20, 256, 0, 1, 9, 0, 0))
     pipeline, scene = fresh()
     records = shown(pipeline, scene, [{'type': 'rect', 'id': 'bar', 'box': {'x': 300, 'y': 80, 'w': 100, 'h': 20}, 'style': {'fill': True}, 'rotationQ8': 90 * 256}])
-    eq('rotated put snaps the angle about the box centre', records[2], bytes.fromhex('250e00 2101 0100 001c 0001') + le(1440, 350, 90))
+    eq('rotated put snaps the angle about the box centre', records[2], bytes.fromhex('250e00 2101 0100 001c 0000') + le(1440, 350, 90))
 
     # framing, stream packets and the small codecs
     eq('crc16 check value', crc16(b'123456789'), 0x29B1)
@@ -1154,7 +1154,11 @@ def self_test_checks():
     eq('messages split at 4096', [len(m) for m in messages([b'a' * 4000, b'b' * 97, b'c' * 96])], [4000, 97 + 96])
     eq('messages fill to 4096', [len(m) for m in messages([b'a' * 4000, b'b' * 96])], [4096])
     eq('frames', [transition_frames(ms) for ms in (0, 10, 330, 400, 700, 10000)], [0, 1, 10, 12, 21, 255])
-    eq('easing', [easing_code(e) for e in ('linear', 'ease-out', 'ease-in', 'ease-in-out', 'ease', None)], [0, 2, 3, 1, 1, 1])
+    eq('easing curves', [easing_curve(e) for e in ('linear', 'ease-out', 'ease-in', 'ease-in-out', 'ease', None)],
+       [None, (0, 0, 148, 255), (107, 0, 255, 255), (107, 0, 148, 255), (64, 26, 64, 255), (64, 26, 64, 255)])
+    # the host test's `cur_lin` entry: a linear curve rides as 0x80 + four bytes; code 0 still encodes without them
+    eq('curve entry', anim_entry(6, 0x01, 4, 0, [500], (0, 0, 255, 255)), bytes.fromhex('0600 0100 0480 f401 0000ffff'))
+    eq('code 0 entry', anim_entry(6, 0x01, 4, 0, [500]), bytes.fromhex('0600 0100 0400 f401'))
     eq('reset records', RESET_RECORDS, [bytes.fromhex('240100 00'), bytes.fromhex('0b0000')])
     eq('shape types', (LINE, RECT, RECT_FILL, CIRCLE, CIRCLE_FILL, ARC, PIE), (1, 2, 3, 4, 5, 12, 13))
     return checks

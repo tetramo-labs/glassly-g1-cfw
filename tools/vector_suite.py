@@ -45,13 +45,9 @@ from tools.shapes_suite import open_temples  # noqa: E402
 
 REQUIRED_REVISION = 39
 SCALE = 200 / 480
-# CSS cubic-bezier control points scaled to 0..255 (object-cache.ts EASE) -> firmware easing codes.
+# CSS cubic-bezier control points scaled to 0..255 (object-cache.ts EASE); from G1CFW/40 the
+# glasses take them verbatim (easing byte 0x80 + the four bytes), so the fixtures' curves pass through.
 EASE_LINEAR, EASE_IN_OUT, EASE_OUT, EASE_IN, EASE_EASE = (0, 0, 255, 255), (107, 0, 148, 255), (0, 0, 148, 255), (107, 0, 255, 255), (64, 26, 64, 255)
-EASING_CODES = {EASE_LINEAR: 0, EASE_IN_OUT: 1, EASE_OUT: 2, EASE_IN: 3, EASE_EASE: 1}
-
-
-def easing_of(curve):
-    return EASING_CODES.get(tuple(curve), 1)
 
 
 # ============================================================================
@@ -69,15 +65,15 @@ def path(slot, commands, rule='nonzero', x=0, y=0, scale=1, color=15):
 
 def rotate(slot, degrees, px, py, duration_ms=0, curve=EASE_LINEAR):
     return {'op': 'rotate', 'slot': slot, 'angle': jround(degrees * 16), 'px': px, 'py': py,
-            'frames': min(255, jround(duration_ms / 33)), 'easing': easing_of(curve)}
+            'frames': min(255, jround(duration_ms / 33)), 'curve': tuple(curve)}
 
 
 def glide(slot, dx, dy, frames, curve=EASE_LINEAR):
-    return {'op': 'glide', 'slot': slot, 'dx': dx, 'dy': dy, 'frames': frames, 'easing': easing_of(curve)}
+    return {'op': 'glide', 'slot': slot, 'dx': dx, 'dy': dy, 'frames': frames, 'curve': tuple(curve)}
 
 
 def tween(slot, mask, frames, curve, values):
-    return {'op': 'tween', 'slot': slot, 'mask': mask, 'frames': frames, 'easing': easing_of(curve), 'values': list(values)}
+    return {'op': 'tween', 'slot': slot, 'mask': mask, 'frames': frames, 'curve': tuple(curve), 'values': list(values)}
 
 
 def freeze(slot):
@@ -205,7 +201,7 @@ class VectorScene:
         for op in ops:
             self._apply(op, snaps, glides, notes)
         for table in (snaps, glides):
-            entries = [anim_entry(slot + 1, p['mask'], p['frames'], p['easing'], self._values(slot, p['mask'])) for slot, p in table.items()]
+            entries = [anim_entry(slot + 1, p['mask'], p['frames'], 0, self._values(slot, p['mask']), p['curve']) for slot, p in table.items()]
             for i in range(0, len(entries), ANIM_MAX_ENTRIES):
                 records.append(record(OBJ_ANIM, obj_anim_payload(entries[i:i + ANIM_MAX_ENTRIES])))
         return records, notes
@@ -251,14 +247,14 @@ class VectorScene:
         if state is None:
             raise ValueError(f"{op['op']} on undefined slot {slot}")
 
-        def merge(mask, frames, easing):
+        def merge(mask, frames, curve):
             table = glides if frames else snaps
-            p = table.setdefault(slot, {'mask': 0, 'frames': frames, 'easing': easing})
+            p = table.setdefault(slot, {'mask': 0, 'frames': frames, 'curve': curve})
             if p['mask'] and p['frames'] != frames:
                 notes.append(f"slot {slot}: {op['op']} over {frames} frames merged with an entry over {p['frames']}; the longer wins")
             p['mask'] |= mask
             p['frames'] = max(p['frames'], frames)
-            p['easing'] = easing
+            p['curve'] = curve
             state.sent_mask |= mask
 
         kind = op['op']
@@ -269,9 +265,10 @@ class VectorScene:
             snap_mask, glide_mask = rotation_masks(state.rotation, want, op['frames'])
             state.rotation = want
             if snap_mask:
-                merge(snap_mask, 0, 0)
+                # a pivot snapped ahead of its glide is this port's own entry; a 0-frame rotate keeps the fixture's curve
+                merge(snap_mask, 0, None if glide_mask else op['curve'])
             if glide_mask:
-                merge(glide_mask, op['frames'], op['easing'])
+                merge(glide_mask, op['frames'], op['curve'])
         elif kind == 'glide':
             xs = (0,) if state.definition['kind'] == KIND_PATH else SHAPE_X_PARAMS[state.definition['type']]
             mask = 0
@@ -279,7 +276,7 @@ class VectorScene:
                 state.params[i] += op['dx']
                 state.params[i + 1] += op['dy']
                 mask |= 0x03 << i
-            merge(mask, op['frames'], op['easing'])
+            merge(mask, op['frames'], op['curve'])
         elif kind == 'tween':
             values = list(op['values'])
             for k in range(10):
@@ -291,12 +288,12 @@ class VectorScene:
                         state.color = v
                     else:
                         state.width = v
-            merge(op['mask'], op['frames'], op['easing'])
+            merge(op['mask'], op['frames'], op['curve'])
         elif kind == 'freeze':
             notes.append(f'slot {slot}: freeze cannot stop a running tween where it is; nothing sent, the tween completes')
         elif kind == 'finish':
             if state.sent_mask:
-                merge(state.sent_mask, 0, 0)   # snap to the targets this port last sent
+                merge(state.sent_mask, 0, None)   # snap to the targets this port last sent
             else:
                 notes.append(f'slot {slot}: finish with no tween sent; nothing to snap')
         else:
