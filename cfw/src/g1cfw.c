@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 41u
+#define CFW_PROTOCOL 42u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -77,6 +77,53 @@ typedef struct {
 static cfw_asset *cfw_assets(void)
 {
     return (cfw_asset *)(FW_CFW_RAM + sizeof(cfw_ctx) + CFW_MSG_MAX);
+}
+
+/* --- mutation journal (g2flash's STATE deltas): the last few changes to
+ * objects and assets, so a host that missed replies can catch up from the
+ * revision it knows instead of re-reading the inventory. ---------------- */
+#define CFW_JOURNAL_MAX 10u
+enum { CFW_JOURNAL_OBJ_PUT = 1, CFW_JOURNAL_OBJ_DROP = 2, CFW_JOURNAL_OBJ_DROP_ALL = 3,
+       CFW_JOURNAL_ASSET_PUT = 4, CFW_JOURNAL_ASSET_CLEAR = 5 };
+typedef struct {
+    uint16_t revision, id, version;
+    uint8_t  kind, pad;
+} cfw_journal_entry;
+typedef struct {
+    uint32_t magic;
+    uint8_t  head, count;      /* ring: next slot to write, entries held */
+    uint16_t revision;         /* bumps on every journaled change */
+    cfw_journal_entry items[CFW_JOURNAL_MAX];
+} cfw_journal;
+#define CFW_JOURNAL_MAGIC 0x314e524au  /* "JRN1" */
+_Static_assert(sizeof(cfw_ctx) + CFW_MSG_MAX + CFW_ASSET_MAX * sizeof(cfw_asset) + sizeof(cfw_journal) <= FW_CFW_RAM_SIZE,
+               "first CFW RAM region: context, message buffer, asset directory and the journal");
+
+static cfw_journal *cfw_journal_state(void)
+{
+    cfw_journal *j = (cfw_journal *)(FW_CFW_RAM + sizeof(cfw_ctx) + CFW_MSG_MAX + CFW_ASSET_MAX * sizeof(cfw_asset));
+    if (j->magic != CFW_JOURNAL_MAGIC) {
+        uint8_t *b = (uint8_t *)j;
+        for (uint32_t i = 0; i < sizeof *j; i++) {
+            b[i] = 0;
+        }
+        j->magic = CFW_JOURNAL_MAGIC;
+    }
+    return j;
+}
+
+static void cfw_journal_note(uint8_t kind, uint16_t id, uint16_t version)
+{
+    cfw_journal *j = cfw_journal_state();
+    cfw_journal_entry *e = &j->items[j->head];
+    e->revision = ++j->revision;
+    e->kind = kind;
+    e->id = id;
+    e->version = version;
+    j->head = (uint8_t)((j->head + 1) % CFW_JOURNAL_MAX);
+    if (j->count < CFW_JOURNAL_MAX) {
+        j->count++;
+    }
 }
 
 static cfw_asset *cfw_asset_find(cfw_ctx *c, uint16_t id)
@@ -542,52 +589,6 @@ static uint8_t cfw_text(const uint8_t *p, uint32_t n)
     return (flags & CFW_FLAG_FLUSH) ? cfw_flush(panel, &box) : CFW_OK;
 }
 
-/* [flags][src rect][dst x:u16][dst y:u16]: copy a rectangle within the frame
- * (overlap-safe, so it can scroll). flags bit 1 pushes the destination. */
-static uint8_t cfw_copy(const uint8_t *p, uint32_t n)
-{
-    cfw_rect src, dst;
-    if (n < 13) {
-        return CFW_BAD_LENGTH;
-    }
-    if (!cfw_parse_rect(p + 1, &src)) {
-        return CFW_BAD_RECT;
-    }
-    dst = src;
-    dst.x0 = rd16(p + 9);
-    dst.y0 = rd16(p + 11);
-    if (dst.x0 & 1u || dst.x0 + dst.w > FW_FRAME_WIDTH || dst.y0 + dst.h > FW_FRAME_HEIGHT) {
-        return CFW_BAD_RECT;
-    }
-    uint8_t *panel = cfw_panel();
-    uint32_t bytes = src.w / 2;
-    /* Walk rows in the direction that keeps the source ahead of the write. */
-    if (dst.y0 > src.y0) {
-        for (uint32_t y = src.h; y-- > 0;) {
-            const uint8_t *s = cfw_row(panel, src.y0 + y, src.x0);
-            uint8_t *d = cfw_row(panel, dst.y0 + y, dst.x0);
-            for (uint32_t i = 0; i < bytes; i++) {
-                d[i] = s[i];
-            }
-        }
-    } else {
-        for (uint32_t y = 0; y < src.h; y++) {
-            const uint8_t *s = cfw_row(panel, src.y0 + y, src.x0);
-            uint8_t *d = cfw_row(panel, dst.y0 + y, dst.x0);
-            if (dst.y0 == src.y0 && dst.x0 > src.x0) {
-                for (uint32_t i = bytes; i-- > 0;) {
-                    d[i] = s[i];
-                }
-            } else {
-                for (uint32_t i = 0; i < bytes; i++) {
-                    d[i] = s[i];
-                }
-            }
-        }
-    }
-    return (p[0] & CFW_FLAG_FLUSH) ? cfw_flush(panel, &dst) : CFW_OK;
-}
-
 /* Path assets are flattened into the third CFW RAM region (see the vector section). */
 #define CFW_PATH_MAX_EDGES 128u
 #define CFW_PATH_HDR       4u
@@ -723,6 +724,9 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
     if (kind <= CFW_ASSET_4BPP && a->bytes == limit) {
         a->open = 0;
     }
+    if (!(flags & 1u)) {
+        cfw_journal_note(CFW_JOURNAL_ASSET_PUT, id, (uint16_t)kind);
+    }
     return CFW_OK;
 }
 
@@ -781,6 +785,7 @@ static uint8_t cfw_asset_clear(void)
     cfw_ctx *c = cfw_context();
     c->asset_count = 0;
     c->arena_used = 0;
+    cfw_journal_note(CFW_JOURNAL_ASSET_CLEAR, 0, 0);
     return CFW_OK;
 }
 
@@ -812,7 +817,7 @@ static void cfw_asset_info(void)
 enum { CFW_SHAPE_LINE = 1, CFW_SHAPE_RECT = 2, CFW_SHAPE_RECT_FILL = 3, CFW_SHAPE_CIRCLE = 4,
        CFW_SHAPE_CIRCLE_FILL = 5, CFW_SHAPE_TRI = 6, CFW_SHAPE_TRI_FILL = 7, CFW_SHAPE_QUAD = 8,
        CFW_SHAPE_QUAD_FILL = 9, CFW_SHAPE_BEZIER2 = 10, CFW_SHAPE_BEZIER3 = 11, CFW_SHAPE_ARC = 12,
-       CFW_SHAPE_PIE = 13 };
+       CFW_SHAPE_PIE = 13, CFW_SHAPE_IMAGE = 14, CFW_SHAPE_TEXT = 15 };
 #define CFW_Q4           16
 #define CFW_COORD_MAX    1023
 #define CFW_COORD_MIN    (-1024)
@@ -847,8 +852,45 @@ static uint32_t cfw_shape_mask(uint8_t type)
     case CFW_SHAPE_CIRCLE: case CFW_SHAPE_CIRCLE_FILL: return 0x07u;
     case CFW_SHAPE_TRI: case CFW_SHAPE_TRI_FILL: case CFW_SHAPE_BEZIER2: return 0x3Fu;
     case CFW_SHAPE_QUAD: case CFW_SHAPE_QUAD_FILL: case CFW_SHAPE_BEZIER3: return 0xFFu;
+    case CFW_SHAPE_IMAGE: return 0x03u;   /* x y, p2 = image asset */
+    case CFW_SHAPE_TEXT:  return 0x0Fu;   /* x y w h, p4 = string asset, width = font, p5 = lines */
     default: return 0;
     }
+}
+
+static uint8_t *cfw_asset_bytes(cfw_ctx *c, const cfw_asset *a);
+static uint32_t cfw_asset_expected(const cfw_asset *a);
+static uint8_t cfw_blit_from(const uint8_t *hdr, const uint8_t *px, uint32_t px_len);
+static uint8_t cfw_asset_text(const uint8_t *p, uint32_t n);
+
+/* Image (14) and text (15) records draw assets by id, like the asset
+ * commands do; an unknown or unfinished asset draws nothing. */
+static void cfw_shape_draw_asset(const cfw_shape *s)
+{
+    cfw_ctx *c = cfw_context();
+    uint8_t buf[13];
+    if (s->type == CFW_SHAPE_IMAGE) {
+        cfw_asset *a = c->arena ? cfw_asset_find(c, (uint16_t)s->p[2]) : 0;
+        if (!a || a->kind > CFW_ASSET_4BPP || a->bytes != cfw_asset_expected(a) || s->p[0] < 0 || s->p[1] < 0) {
+            return;
+        }
+        buf[0] = (uint8_t)((s->color << 4) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
+        buf[1] = (uint8_t)s->p[0]; buf[2] = (uint8_t)(s->p[0] >> 8);
+        buf[3] = (uint8_t)s->p[1]; buf[4] = (uint8_t)(s->p[1] >> 8);
+        buf[5] = (uint8_t)a->w; buf[6] = (uint8_t)(a->w >> 8);
+        buf[7] = (uint8_t)a->h; buf[8] = (uint8_t)(a->h >> 8);
+        cfw_blit_from(buf, cfw_asset_bytes(c, a), a->bytes);
+        return;
+    }
+    int x0 = s->p[0] & ~1, x1 = (s->p[0] + s->p[2]) & ~1, y1 = s->p[1] + s->p[3] - 1;
+    buf[0] = (uint8_t)s->p[4]; buf[1] = (uint8_t)(s->p[4] >> 8);
+    buf[2] = s->width; buf[3] = 0;
+    buf[4] = (uint8_t)x0; buf[5] = (uint8_t)(x0 >> 8);
+    buf[6] = (uint8_t)s->p[1]; buf[7] = (uint8_t)(s->p[1] >> 8);
+    buf[8] = (uint8_t)x1; buf[9] = (uint8_t)(x1 >> 8);
+    buf[10] = (uint8_t)y1; buf[11] = (uint8_t)(y1 >> 8);
+    buf[12] = s->p[5] > 0 ? (uint8_t)s->p[5] : 1;
+    cfw_asset_text(buf, 13);
 }
 
 static void cfw_shape_decode(const uint8_t *rec, cfw_shape *s)
@@ -1235,6 +1277,10 @@ static void cfw_shape_draw(const cfw_raster *r, const cfw_shape *s)
     uint8_t c = s->color;
     int32_t wd = s->width < 1 ? 1 : s->width;
     switch (s->type) {
+    case CFW_SHAPE_IMAGE:
+    case CFW_SHAPE_TEXT:
+        cfw_shape_draw_asset(s);
+        break;
     case CFW_SHAPE_LINE:
         rs_line(r, p[0], p[1], p[2], p[3], wd, c);
         break;
@@ -1292,9 +1338,17 @@ static int cfw_shape_box(const cfw_shape *s, cfw_rect *r)
     if (!mask) {
         return 0;
     }
-    if (s->type == CFW_SHAPE_RECT || s->type == CFW_SHAPE_RECT_FILL) {
+    if (s->type == CFW_SHAPE_RECT || s->type == CFW_SHAPE_RECT_FILL || s->type == CFW_SHAPE_TEXT) {
         x0 = s->p[0]; y0 = s->p[1]; x1 = x0 + s->p[2]; y1 = y0 + s->p[3];
         m = 1;
+    } else if (s->type == CFW_SHAPE_IMAGE) {
+        cfw_ctx *c = cfw_context();
+        cfw_asset *a = c->arena ? cfw_asset_find(c, (uint16_t)s->p[2]) : 0;
+        if (!a) {
+            return 0;
+        }
+        x0 = s->p[0]; y0 = s->p[1]; x1 = x0 + a->w; y1 = y0 + a->h;
+        m = 0;
     } else if (s->type == CFW_SHAPE_CIRCLE || s->type == CFW_SHAPE_CIRCLE_FILL ||
                s->type == CFW_SHAPE_ARC || s->type == CFW_SHAPE_PIE) {
         int32_t rad = s->p[2] < 0 ? 0 : s->p[2];
@@ -1823,7 +1877,8 @@ static uint32_t cfw_obj_tween_mask(const cfw_obj *obj)
     case CFW_OBJ_IMAGE: return 0x003u | CFW_ANIM_LEVEL_BIT;
     case CFW_OBJ_TEXT:  return 0x00Fu | CFW_ANIM_LEVEL_BIT;
     case CFW_OBJ_RECT:  return 0x00Fu | CFW_ANIM_LEVEL_BIT;
-    case CFW_OBJ_SHAPE: return cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT | CFW_ANIM_WIDTH_BIT | CFW_ANIM_ROTATE_BITS;
+    case CFW_OBJ_SHAPE: return obj->type >= CFW_SHAPE_IMAGE ? cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT
+                                                          : cfw_shape_mask(obj->type) | CFW_ANIM_LEVEL_BIT | CFW_ANIM_WIDTH_BIT | CFW_ANIM_ROTATE_BITS;
     case CFW_OBJ_PATH:  return 0x007u | CFW_ANIM_LEVEL_BIT | CFW_ANIM_ROTATE_BITS;
     default:            return 0;
     }
@@ -1898,6 +1953,7 @@ static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
     }
     cfw_anim_cancel(id);
     o->revision++;
+    cfw_journal_note(CFW_JOURNAL_OBJ_PUT, id, obj->version);
     return CFW_OK;
 }
 
@@ -2151,6 +2207,40 @@ static void cfw_obj_state(const uint8_t *p, uint32_t n_in)
     cfw_objs *o = cfw_objects();
     uint8_t body[4 + 4 * 4];
     uint32_t n = 4;
+    if (n_in >= 3 && p[0] == 0xFF) {
+        /* [FF][since:u16]: the changes after revision `since`, oldest first,
+         * two per reply: [revision:u16][count][kind, id:u16, version:u16...].
+         * count FF: `since` is older than the journal, read the pages. */
+        cfw_journal *j = cfw_journal_state();
+        uint16_t since = rd16(p + 1);
+        body[0] = (uint8_t)j->revision; body[1] = (uint8_t)(j->revision >> 8);
+        body[2] = 0;
+        n = 3;
+        if (since != j->revision) {
+            uint32_t oldest = (j->head + CFW_JOURNAL_MAX - j->count) % CFW_JOURNAL_MAX;
+            if (j->count == 0 || (uint16_t)(j->items[oldest].revision - 1) != since) {
+                int covered = 0;
+                for (uint32_t i = 0; i < j->count; i++) {
+                    if (j->items[(oldest + i) % CFW_JOURNAL_MAX].revision == since) covered = 1;
+                }
+                if (!covered) {
+                    body[2] = 0xFF;
+                    cfw_reply(CFW_OBJ_STATE, CFW_OK, body, n);
+                    return;
+                }
+            }
+            for (uint32_t i = 0; i < j->count && body[2] < 2; i++) {
+                const cfw_journal_entry *e = &j->items[(oldest + i) % CFW_JOURNAL_MAX];
+                if ((int16_t)(e->revision - since) <= 0) continue;
+                body[n++] = e->kind;
+                body[n++] = (uint8_t)e->id; body[n++] = (uint8_t)(e->id >> 8);
+                body[n++] = (uint8_t)e->version; body[n++] = (uint8_t)(e->version >> 8);
+                body[2]++;
+            }
+        }
+        cfw_reply(CFW_OBJ_STATE, CFW_OK, body, n);
+        return;
+    }
     if (n_in >= 1) {
         /* [page]: four (id, version) pairs of the object table from index page * 4,
          * whether shown or not. Reply body [page][pairs]. */
@@ -2217,6 +2307,7 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
         o->count = 0;
         o->shown_count = 0;
         o->revision++;
+        cfw_journal_note(CFW_JOURNAL_OBJ_DROP_ALL, 0, 0);
         cfw_anim_clear();
         return CFW_OK;
     }
@@ -2236,6 +2327,7 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
         }
         o->count--;
         o->revision++;
+        cfw_journal_note(CFW_JOURNAL_OBJ_DROP, rd16(p + 1), 0);
         return CFW_OK;
     }
     return CFW_BAD_COMMAND;
@@ -3102,7 +3194,6 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
     case CFW_FILL:  return cfw_fill(p, n);
     case CFW_FLUSH: return cfw_flush_cmd(p, n);
     case CFW_TEXT:  return cfw_text(p, n);
-    case CFW_COPY:  return cfw_copy(p, n);
     case CFW_ASSET_PUT:   return cfw_asset_put(p, n);
     case CFW_ASSET_DRAW:  return cfw_asset_draw(p, n);
     case CFW_ASSET_TEXT:  return cfw_asset_text(p, n);
@@ -3313,9 +3404,6 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         break;
     case CFW_TEXT:
         cfw_reply(CFW_TEXT, cfw_text(data + 2, len - 2), 0, 0);
-        break;
-    case CFW_COPY:
-        cfw_reply(CFW_COPY, cfw_copy(data + 2, len - 2), 0, 0);
         break;
     case CFW_ASSET_PUT:
     case CFW_ASSET_DRAW:

@@ -117,12 +117,12 @@ must stay within 200 rows (so `y1 <= 173` for font 0). Text is 1-240 bytes;
 `\n` moves to the next line. Glyphs are only on or off; there is no grey
 level. TEXT is also a valid stream record.
 
-## `07` COPY: `[flags][src rect][dst x:u16][dst y:u16]`
+## `07` COPY (removed in G1CFW/42)
 
-Copies a rectangle to another position in the frame buffer. Overlapping
-source and destination are handled, so it can scroll a region by any offset.
-Destination x must be even and the rectangle must fit. `flags` bit 1 pushes
-the destination rectangle afterwards. COPY is also a valid stream record.
+G1CFW/11 to /41 copied a rectangle within the frame (`[flags][src rect]
+[dst x:u16][dst y:u16]`, overlap-safe, for scrolling). It left to make room
+for the vector contract; retained objects glide instead. The sub-command now
+answers `02`.
 
 ## Assets (`08`-`0C`)
 
@@ -181,6 +181,8 @@ here. Unused parameters are zero.
 | 11 | BEZIER3 | x0 y0 c0x c0y c1x c1y x1 y1: cubic, stroked |
 | 12 | ARC | cx cy r a0 a1: stroked arc in degrees, 0 = +x, clockwise |
 | 13 | PIE | cx cy r a0 a1: filled sector |
+| 14 | IMAGE | x y asset: a complete image asset at x,y, `color` as the 1bpp grey (G1CFW/42) |
+| 15 | TEXT | x y w h asset lines: a string asset in the box with `width` as the font (G1CFW/42) |
 
 Coordinates are signed canvas pixels, clamped to +/-1024 before any
 arithmetic and clipped to 640x200. Circles are centred on the pixel
@@ -224,7 +226,14 @@ engine or shape records, so showing a scene again costs one SHOW.
 - `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`
   of the shown list; with a `[page]` byte (G1CFW/40) the reply is
   `[page][id,version x up to 4]` for object-table entries `page*4` onward,
-  shown or not, so a host can read the whole inventory back.
+  shown or not, so a host can read the whole inventory back. With
+  `[FF][since:u16]` (G1CFW/42) the reply is the journal of definition
+  changes after revision `since`, oldest first, two per reply:
+  `[revision:u16][count][kind, id:u16, version:u16 ...]` with kinds 1 object
+  put, 2 object drop, 3 drop all, 4 asset put (version = asset kind), 5
+  asset clear; `count` `FF` means `since` is older than the ten entries the
+  journal keeps, so read the inventory pages instead. The revision here is
+  the journal's own, bumped on every definition change.
 - `24` OBJ_CONTROL `[op][id:u16]`: op 0 drops all objects (and animations),
   op 1 drops one object (and its animation); op 2 freezes and op 3 finishes
   (jumps to the targets and pushes the frame) the tweens of object `id`, or
@@ -285,7 +294,7 @@ get no reply. The last packet is answered `F0 10 <status> <seq> <records done>`
 after the message runs.
 
 A message is a list of records `[cmd:u8][len:u16][payload]` using the BLIT,
-FILL, FLUSH, TEXT and COPY payloads above, so one message can carry a clear, several
+FILL, FLUSH and TEXT payloads above, so one message can carry a clear, several
 compressed bands and a single flush. The first failing record stops the
 message; `records done` says how many ran. A flush that meets the panel off
 does not stop it (G1CFW/32): the pixels are in the frame buffer and go out

@@ -1025,6 +1025,21 @@ notification was lost can resend a frame without restarting its glides.
 `g1flash.py`'s stream sender sets it. Journal deltas stay unported (the phone
 keeps a mirror; OBJ_STATE pages cover a resync). 928 bytes of flash left.
 
+### G1CFW/42: shape-list image and text records, a definition journal (2026-10-30)
+
+The last two g2flash object-cache features: SHAPES records 14 (image asset
+at x,y) and 15 (string asset in a box with a font) draw assets inside a shape
+list or as kind-4 objects, and OBJ_STATE `[FF][since]` replays the last ten
+definition changes (object put/drop/drop-all, asset put/clear) with their
+own revision counter, two per reply (the 20-byte notification cap), so a
+host that missed replies can catch up without re-reading the inventory. To
+fit, COPY left (406 bytes; nothing used it: retained objects glide instead).
+Blob 23,848 bytes, 148 left: the contiguous region is full. Anything further
+means trimming diagnostics (PEEK, STATS, the state replies) or a second
+blob segment. With this the g2flash drawing, object, animation and transport
+contract is ported except for lens-synchronised records (two connections on
+the G1) and the 64 KiB messages and zlib the G2 needs for its larger panel.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

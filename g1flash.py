@@ -371,11 +371,6 @@ async def run_cfw_command(client, args, checkpoint):
             payload = bytes([args.font, flags]) + struct.pack('<HHHH', x0, y0, x1, y1) + bytes([args.lines]) + args.text.encode('utf-8')
             await link.check(CFW_TEXT, payload)
             result = {'text': args.text, 'font': args.font, 'box': args.box, 'lines': args.lines, 'flushed': not args.no_flush}
-        elif args.command == 'copy':
-            x, y, w, h = args.rect
-            flags = 0 if args.no_flush else 0x02
-            await link.check(CFW_COPY, bytes([flags]) + rect_bytes(x, y, w, h) + struct.pack('<HH', args.to[0], args.to[1]))
-            result = {'copied': args.rect, 'to': args.to, 'flushed': not args.no_flush}
         elif args.command == 'asset':
             if args.action == 'info':
                 body = await link.check(CFW_ASSET_INFO)
@@ -781,7 +776,7 @@ async def run(args, scanner_cls=None, client_cls=None, checkpoint=lambda *_: Non
 
     options = {'disconnected_callback': on_disconnect} if real_bluetooth else {}
     async with client_cls(device, timeout=20, **options) as client:
-        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'mic'):
+        if args.command in ('info', 'fill', 'draw', 'panel', 'stats', 'text', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'mic'):
             await run_cfw_command(client, args, checkpoint)
             return
         if args.command == 'ping':
@@ -848,7 +843,7 @@ def arguments(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     offline = sub.add_parser('plan', help='Verify an image and print its flash/restore plan without Bluetooth')
     offline.add_argument('--firmware', type=Path, required=True)
-    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'mic', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
+    for command in ('scan', 'probe', 'ping', 'info', 'stats', 'panel', 'fill', 'draw', 'text', 'asset', 'shapes', 'peek', 'obj', 'touch', 'imu', 'view', 'mic', 'verify', 'enter-dfu', 'state', 'stage', 'activate', 'confirm'):
         child = sub.add_parser(command)
         child.add_argument('--scan-seconds', type=float, default=10)
         child.add_argument('--log', type=Path, help='New JSONL session log (must not already exist)')
@@ -895,9 +890,6 @@ def arguments(argv=None):
                                help='x0,y0,x1,y1 (even x; y1 must leave room for a glyph cell)')
             child.add_argument('--lines', type=int, default=1)
             child.add_argument('--clear', action='store_true', help='Clear the box before drawing')
-        if command == 'copy':
-            child.add_argument('--rect', type=lambda v: tuple(int(x) for x in v.split(',')), required=True, help='source x,y,w,h')
-            child.add_argument('--to', type=lambda v: tuple(int(x) for x in v.split(',')), required=True, help='destination x,y')
         if command == 'asset':
             child.add_argument('action', choices=('put', 'draw', 'text', 'clear', 'info'))
             child.add_argument('--id', type=int, default=1)
@@ -966,7 +958,7 @@ def arguments(argv=None):
             child.add_argument('--shape', action='append', default=[],
                                help='type,color,width,p0,...  types: 1 line x0,y0,x1,y1; 2 rect x,y,w,h,r; 3 rect fill; 4 circle cx,cy,r; '
                                     '5 disc; 6 triangle; 7 triangle fill; 8 quad; 9 quad fill; 10 quadratic; 11 cubic; 12 arc cx,cy,r,a0,a1; 13 pie')
-        if command in ('fill', 'draw', 'text', 'copy', 'asset', 'shapes', 'obj'):
+        if command in ('fill', 'draw', 'text', 'asset', 'shapes', 'obj'):
             child.add_argument('--no-flush', action='store_true', help='Write the frame buffer only; do not push to the panel')
         if command == 'draw':
             child.add_argument('--stream', action='store_true', help='Send as pipelined multi-packet messages (G1CFW/9+)')

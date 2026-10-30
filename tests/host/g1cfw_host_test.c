@@ -342,7 +342,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/41", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/42", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -539,22 +539,9 @@ int main(int argc, char **argv)
     memcpy(tpk + 8, tmsg, sizeof tmsg);
     CHECK(send_packet(tpk, sizeof tpk) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 1 && utf_calls == 3);
 
-    /* COPY: scroll a 4x3 block up by one row (overlapping), then sideways, then flush. */
-    memset(frame, 0, 200 * 320);
-    for (int y = 0; y < 3; y++) { frame[(10 + y) * 320 + 5] = (uint8_t)(0x11 * (y + 1)); frame[(10 + y) * 320 + 6] = (uint8_t)(0xA0 + y); }
-    uint8_t up[] = { 0xF0, 0x07, 0x00, 10, 0, 10, 0, 4, 0, 3, 0, 10, 0, 9, 0 };   /* src (10,10) 4x3 -> dst (10,9) */
-    CHECK(send_packet(up, sizeof up) == 0 && last_reply[2] == CFW_OK);
-    CHECK(frame[9 * 320 + 5] == 0x11 && frame[10 * 320 + 5] == 0x22 && frame[11 * 320 + 5] == 0x33 && frame[12 * 320 + 5] == 0x33);
-    uint8_t down[] = { 0xF0, 0x07, 0x00, 10, 0, 9, 0, 4, 0, 3, 0, 10, 0, 11, 0 };  /* src (10,9) 4x3 -> dst (10,11): overlap downward */
-    CHECK(send_packet(down, sizeof down) == 0 && last_reply[2] == CFW_OK);
-    CHECK(frame[11 * 320 + 5] == 0x11 && frame[12 * 320 + 5] == 0x22 && frame[13 * 320 + 5] == 0x33 && frame[13 * 320 + 6] == 0xA2);
-    uint8_t right[] = { 0xF0, 0x07, 0x02, 10, 0, 11, 0, 4, 0, 1, 0, 12, 0, 11, 0 }; /* same row, shift right by 2 px, flush */
-    reflash_calls = 0;
-    CHECK(send_packet(right, sizeof right) == 0 && last_reply[2] == CFW_OK && frame[11 * 320 + 6] == 0x11 && frame[11 * 320 + 7] == 0xA0 && frame[11 * 320 + 5] == 0x11);
-    CHECK(reflash_calls == 1 && last_rect[2] == 12 && last_rect[3] == 11 && last_rect[4] == 16 && last_rect[5] == 11);
-    uint8_t copy_bad[] = { 0xF0, 0x07, 0x00, 10, 0, 10, 0, 4, 0, 3, 0, 0x7E, 0x02, 9, 0 }; /* dst x 638 + 4 > 640 */
-    CHECK(send_packet(copy_bad, sizeof copy_bad) == 0 && last_reply[2] == CFW_BAD_RECT);
-    CHECK(send_packet(up, 12) == 0 && last_reply[2] == CFW_BAD_LENGTH);
+    /* COPY (07) left the firmware in G1CFW/42 to make room for the vector contract. */
+    uint8_t copy_gone[] = { 0xF0, 0x07, 0x00, 10, 0, 10, 0, 4, 0, 3, 0, 10, 0, 9, 0 };
+    CHECK(send_packet(copy_gone, sizeof copy_gone) == 0 && last_reply[2] == CFW_BAD_COMMAND);
 
     /* Assets: a 16x2 1bpp image uploaded in two PUTs, drawn, then a string asset. */
     memset(frame, 0, 200 * 320);
@@ -654,7 +641,7 @@ int main(int argc, char **argv)
     CHECK(count_level(20, 0, 221, 61, 15) > 150 && count_level(318, 70, 503, 130, 15) > 400);
     CHECK(px(0, 197) == 15 && px(639, 172) == 15);
     guards_intact();
-    uint8_t shapes_bad[24] = { 0xF0, 0x0D, 0x00, 1, 14, 0, 15, 1 };
+    uint8_t shapes_bad[24] = { 0xF0, 0x0D, 0x00, 1, 16, 0, 15, 1 };
     CHECK(send_packet(shapes_bad, sizeof shapes_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     shapes_bad[4] = 0;
     CHECK(send_packet(shapes_bad, sizeof shapes_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
@@ -751,12 +738,26 @@ int main(int argc, char **argv)
     uint8_t anim5[] = { 0xF0, 0x25, 0, 1, 5, 0, 0x03, 0x00, 1, 0, 0, 0, 0, 0 };
     CHECK(send_packet(anim5, sizeof anim5) == 0 && last_reply[2] == CFW_BAD_RECORD);
 
+    /* Image (14) and text (15) records in a shape list draw assets by id. */
+    CHECK(send_packet(put5, sizeof put5) == 0 && last_reply[2] == CFW_OK);          /* 16x2 1bpp image, asset 5 */
+    CHECK(send_packet(puts2, sizeof puts2) == 0 && last_reply[2] == CFW_OK);        /* string asset 9 */
+    memset(frame, 0, 200 * 320);
+    utf_calls = 0;
+    uint8_t shapes_assets[4 + 40] = { 0xF0, 0x0D, 0x00, 2,
+        14, 0, 9, 0, 20, 0, 50, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,               /* image asset 5 at (20,50), level 9 */
+        15, 0, 15, 1, 100, 0, 100, 0, 64, 0, 40, 0, 9, 0, 2, 0, 0, 0, 0, 0 };       /* text asset 9 in (100,100) 64x40, font 1, 2 lines */
+    CHECK(send_packet(shapes_assets, sizeof shapes_assets) == 0 && last_reply[2] == CFW_OK);
+    CHECK(px(20, 50) == 9 && px(27, 50) == 9 && px(28, 50) == 0 && px(20, 51) == 0 && px(28, 51) == 9);
+    CHECK(utf_calls == 1 && utf_font == 1 && utf_lines == 2 && utf_box[0] == 100 && utf_box[2] == 164 && utf_box[3] == 139);
+    uint8_t shapes_no_asset[24] = { 0xF0, 0x0D, 0x00, 1, 14, 0, 15, 0, 0, 0, 0, 0, 77, 0 };
+    CHECK(send_packet(shapes_no_asset, sizeof shapes_no_asset) == 0 && last_reply[2] == CFW_OK);   /* unknown asset: draws nothing */
+
     /* Kind 4: one shape record per object, animated by parameter tweens. */
     uint8_t o6[] = { 0xF0, 0x20, 6, 0, 1, 0, 4, 0x01, 5, 1, 15, 0, 100, 0, 100, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  /* disc r 20 at (100,100) */
     CHECK(send_packet(o6, sizeof o6) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(o6, sizeof o6 - 1) == 0 && last_reply[2] == CFW_BAD_LENGTH);
     uint8_t o6_bad[sizeof o6];
-    memcpy(o6_bad, o6, sizeof o6); o6_bad[8] = 14;                       /* record type 14 */
+    memcpy(o6_bad, o6, sizeof o6); o6_bad[8] = 16;                       /* record type 16 */
     CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     memcpy(o6_bad, o6, sizeof o6); o6_bad[6] = 6;                        /* kind 6 */
     CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
@@ -818,6 +819,26 @@ int main(int argc, char **argv)
     CHECK(send_packet(cur_in, sizeof cur_in - 2) == 0 && last_reply[2] == CFW_BAD_LENGTH);          /* curve cut short */
     uint8_t cur_bad[] = { 0xF0, 0x25, 0, 1, 6, 0, 0x01, 0x00, 4, 7, 100, 0 };                        /* easing 7: unknown */
     CHECK(send_packet(cur_bad, sizeof cur_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
+    /* The journal: OBJ_STATE [FF][since] replays definition changes two at a time. */
+    uint8_t jq[] = { 0xF0, 0x23, 0xFF, 0, 0 };
+    CHECK(send_packet(jq, sizeof jq) == 0 && last_reply[2] == CFW_OK && last_reply[5] == 0xFF);       /* revision 0 is long gone */
+    uint16_t jrev = (uint16_t)(last_reply[3] | last_reply[4] << 8);
+    jq[3] = (uint8_t)jrev; jq[4] = (uint8_t)(jrev >> 8);
+    CHECK(send_packet(jq, sizeof jq) == 0 && last_reply[2] == CFW_OK && last_reply[5] == 0 && last_reply_len == 6);   /* up to date */
+    uint8_t o30[] = { 0xF0, 0x20, 30, 0, 3, 0, 2, 0x01, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0x0F, 0, 0 };
+    CHECK(send_packet(o30, sizeof o30) == 0 && last_reply[2] == CFW_OK);
+    uint8_t drop30[] = { 0xF0, 0x24, 1, 30, 0 };
+    CHECK(send_packet(drop30, sizeof drop30) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(jq, sizeof jq) == 0 && last_reply[2] == CFW_OK && last_reply[5] == 2 && last_reply_len == 16);
+    CHECK(last_reply[6] == 1 && last_reply[7] == 30 && last_reply[9] == 3 && last_reply[11] == 2 && last_reply[12] == 30 && last_reply[14] == 0);
+    uint16_t jrev2 = (uint16_t)(last_reply[3] | last_reply[4] << 8);
+    CHECK(jrev2 == (uint16_t)(jrev + 2));
+    jq[3] = (uint8_t)(jrev + 1); jq[4] = (uint8_t)((jrev + 1) >> 8);
+    CHECK(send_packet(jq, sizeof jq) == 0 && last_reply[5] == 1 && last_reply[6] == 2);                /* only the drop is newer */
+    for (int i = 0; i < 12; i++) { o30[2] = (uint8_t)(31 + i); CHECK(send_packet(o30, sizeof o30) == 0 && last_reply[2] == CFW_OK); }
+    jq[3] = (uint8_t)jrev; jq[4] = (uint8_t)(jrev >> 8);
+    CHECK(send_packet(jq, sizeof jq) == 0 && last_reply[5] == 0xFF);                                    /* fell off the ring */
+    for (int i = 0; i < 12; i++) { drop30[3] = (uint8_t)(31 + i); CHECK(send_packet(drop30, sizeof drop30) == 0 && last_reply[2] == CFW_OK); }
     /* OBJ_STATE with a page lists the object table four at a time. */
     uint8_t ostate_page[] = { 0xF0, 0x23, 0 };
     CHECK(send_packet(ostate_page, sizeof ostate_page) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 4 + 4 * 4);
