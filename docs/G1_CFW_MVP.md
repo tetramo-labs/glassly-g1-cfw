@@ -1040,6 +1040,36 @@ blob segment. With this the g2flash drawing, object, animation and transport
 contract is ported except for lens-synchronised records (two connections on
 the G1) and the 64 KiB messages and zlib the G2 needs for its larger panel.
 
+### Hardware note: deep sleep silences the UART, not the firmware (2026-10-30)
+
+Flashing G1CFW/42 to both temples uploaded and activated cleanly (MCUmgr
+`state` showed the /42 hash active and confirmed on both), but neither
+temple answered `#t` or PING afterwards, and a held connection dropped
+after 31 s. Two things had changed since the morning's /37 cycle: the
+glasses had been paired to Glassly on the phone, and they were back in
+the case with the lid closed. The pairing cost one real failure first:
+the glasses' `on_pairing_complete` unpairs any other bond, so the Mac's
+stale record made every connect fail with CoreBluetooth error 14 "Peer
+removed pairing information" until the two `Even G1_26_*` entries were
+forgotten in System Settings (`blueutil --unpair` does not clear the LE
+record). The silence afterwards was not the bond and not /38–/42:
+/37 reflashed to the left temple and /38 to the right were equally
+silent, and the /39 carve's "pointer" hits into `0x3e882..0x3e912` decode
+as `stm`/`ldm` instruction words inside the `0x3e7a8` helper, as
+`gen_profile.py` says.
+
+The cause is the stock work mode. `ble_work_thread` (0x233a8) only
+dequeues commands while bit 7 of the halfword at context+0x1068 is set
+(`ldrh; lsls #24; bmi`, otherwise a 1 s sleep and retry); two other
+threads (0x19e18, 0x28238) wait on the same bit. `change_work_mode`
+(0x16ee0) sets that bit through the flag helper at 0x16de8 for modes 0–7
+and 9 and clears it for mode 8, deep sleep (lid closed, no charger).
+MCUmgr runs on its own thread, so SMP keeps answering, which is why the
+upload and `state` worked while every UART command went unanswered.
+Opening the lid (mode 9, then 5/6) or taking the glasses out brings the
+worker back; no bond is needed since G1CFW/20. `g1flash.py` now says so
+in its UART timeout hint.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

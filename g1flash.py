@@ -1009,7 +1009,10 @@ def main(argv=None):
     except (Exception, KeyboardInterrupt) as exc:
         if journal:
             journal.event('error', {'type': type(exc).__name__, 'message': str(exc),
-                                    'action': 'Inspect last recorded step and device state before retrying; boot is unverified'})
+                                    'action': 'Inspect last recorded step and device state before retrying; boot is unverified. '
+                                              'If `state` answers but UART commands do not, the glasses are in deep sleep '
+                                              '(case closed, no charger: stock work mode 8 pauses the BLE command worker); '
+                                              'open the case lid or dock them.'})
         if isinstance(exc, subprocess.TimeoutExpired):
             message = 'Bluetooth worker exceeded its deadline and was stopped. Check permission/connection and the session log before retrying.'
         else:
