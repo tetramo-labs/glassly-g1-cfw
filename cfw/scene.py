@@ -115,7 +115,7 @@ def stream_packets(message, seq=0):
         first = False
     packets = []
     for i, data in enumerate(chunks):
-        flags = (0x01 if i == 0 else 0) | (0x02 if i == len(chunks) - 1 else 0)
+        flags = (0x01 if i == 0 else 0) | (0x06 if i == len(chunks) - 1 else 0)   # last + once (G1CFW/41)
         packets.append(bytes([0xF0, STREAM, seq, flags]) + data)
         seq = (seq + 1) & 0xFF
     return packets, seq

@@ -1147,7 +1147,7 @@ def self_test_checks():
     message = bytes(range(256)) * 2
     packets, seq = stream_packets(message, 7)
     eq('stream packet sizes', [len(p) for p in packets], [255, 255, 18])
-    eq('stream packet flags', [p[3] for p in packets], [1, 0, 2])
+    eq('stream packet flags', [p[3] for p in packets], [1, 0, 6])   # first; middle; last + once (G1CFW/41)
     eq('stream packet seq', ([p[2] for p in packets], seq), ([7, 8, 9], 10))
     eq('stream header', packets[0][4:8], struct.pack('<HH', 512, crc16(message)))
     eq('stream data', b''.join(p[4:] for p in packets)[4:], message)
