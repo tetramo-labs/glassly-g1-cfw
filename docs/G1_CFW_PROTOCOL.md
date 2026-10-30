@@ -89,11 +89,18 @@ same entry the stock silent-mode exit uses; 0 suspends it through
 changes, and the stock resume only re-powers the panel when its wear/dock
 policy allows it. `mode` 2 instead calls the panel context's own `on`
 callback (`panel_on`: rail on, SPI init, panel init, powered flag set) and 3
-its `off` callback, bypassing that policy; use these to draw while docked. Reply body: `[power_state][powered]`, where `power_state` is the stock
-byte (0 running, 1 suspended, 2 suspending, 3 resuming) and `powered` is the
-panel context flag that FLUSH checks. While the glasses are docked the stock
-firmware keeps the panel suspended, so a PANEL on is needed before anything
-becomes visible there.
+its `off` callback, bypassing that policy; use these to draw while docked.
+`mode` 4 calls the context's `suspend` callback (`panel_suspend`: SPI deep
+power down) and 5 its `resume` callback (`panel_resume`: panel init plus
+brightness; it refuses when bit 8 of the halfword at panel+0x4fc is clear),
+the pair the auto panel uses since G1CFW/34. Reply body:
+`[power_state][powered]`, where `power_state` is the stock byte (0 running,
+1 suspended, 2 suspending, 3 resuming) and `powered` is the panel context
+flag that FLUSH checks. While the glasses are docked the stock firmware
+keeps the panel suspended, so a PANEL on is needed before anything becomes
+visible there. Under the CFW with the auto panel enabled the stock suspend
+is refused; with it disabled, `mode` 0 rebooted a temple on hardware, so
+prefer 3 or 4 to switch the panel off.
 
 ## `06` TEXT: `[font][flags][x0:u16][y0:u16][x1:u16][y1:u16][max_lines][utf8...]`
 
@@ -307,11 +314,12 @@ the glasses sense:
 
 **Panel follows wear (G1CFW/27, reworked in /28).** With the stock refresh
 pipeline stubbed nothing asks for the panel when the glasses are put on, so
-unless bit 4 is set the CFW switches it: on through the panel's own
-callback, then the stored brightness level is written to the panel (the
-on callback alone leaves it dark, G1CFW/33), then a push of the whole
-frame buffer (the panel comes up blank, the buffer survives); off through
-the off callback. Two sources
+unless bit 4 is set the CFW switches it (G1CFW/34): on through the
+panel's resume callback (`panel_init` plus brightness, what the stock
+silent-mode exit does), falling back to the on callback plus a brightness
+write when resume refuses, then a push of the whole frame buffer (the panel
+comes up blank, the buffer survives); off through the suspend callback (SPI
+deep power down), falling back to the off callback. Two sources
 feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
 and `case closed` (`0b`) only flow while a central is connected (the stock
 wear state machine resets when nothing is). The stock work-mode switch

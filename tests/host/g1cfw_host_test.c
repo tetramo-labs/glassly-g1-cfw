@@ -19,7 +19,10 @@ static uint32_t host_wear_word;
 #define FW_SEND_OF(ctx) host_send
 #define FW_SYSTEM_SUSPEND host_suspend
 #define FW_SYSTEM_RESUME host_resume
-#define FW_PANEL_CB_OF(panel, slot) ((slot) == 0x10 ? host_panel_on : host_panel_off)
+static int host_panel_resume(uint8_t *panel);
+static int host_panel_suspend(uint8_t *panel);
+#define FW_PANEL_CB_OF(panel, slot) ((slot) == 0x10 ? host_panel_on : (slot) == 0x0c ? host_panel_off : \
+                                     (slot) == 0x08 ? host_panel_resume : host_panel_suspend)
 static uint8_t host_ram[0x1400 + 64];
 static int host_utf_draw(int u, const char *t, unsigned f, int x0, int y0, int x1, int y1, unsigned l, unsigned d, int p10, void *cb, int p12);
 static int host_set_rows(void *rows);
@@ -117,6 +120,9 @@ static int host_resume(uint8_t *s)
 static int panel_cb_calls;
 static int host_panel_on(uint8_t *panel) { panel_cb_calls++; *(int *)(panel + FW_PANEL_POWERED) = 1; return 0; }
 static int host_panel_off(uint8_t *panel) { panel_cb_calls++; *(int *)(panel + FW_PANEL_POWERED) = 0; return 0; }
+static int resume_calls, suspend_calls, resume_refuses;
+static int host_panel_resume(uint8_t *panel) { panel_cb_calls++; resume_calls++; if (resume_refuses) return -1; *(int *)(panel + FW_PANEL_POWERED) = 1; return 0; }
+static int host_panel_suspend(uint8_t *panel) { panel_cb_calls++; suspend_calls++; *(int *)(panel + FW_PANEL_POWERED) = 0; return 0; }
 
 static char utf_text[256]; static unsigned utf_font, utf_lines; static int utf_box[4], utf_calls, rows_set, manual_flush_calls; static void *rows_arg;
 static int host_utf_draw(int u, const char *t, unsigned f, int x0, int y0, int x1, int y1, unsigned l, unsigned d, int p10, void *cb, int p12)
@@ -178,7 +184,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/33", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/34", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -623,18 +629,26 @@ int main(void)
     host_frame[7] = 0xA5;
     pushed_row[7] = 0;
     panel[FW_PANEL_BRIGHTNESS_LEVEL] = 0x15;
-    brightness_writes = 0;
-    cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness programmed, frame pushed */
-    CHECK(panel_cb_calls == 1 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5);
-    CHECK(brightness_writes == 1 && last_brightness == 0x15);
+    brightness_writes = resume_calls = suspend_calls = 0;
+    cfw_work_mode(3);                       /* normal standby: worn, panel resumed, frame pushed */
+    CHECK(resume_calls == 1 && panel_cb_calls == 1 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5);
+    CHECK(brightness_writes == 0);          /* resume programs the brightness itself */
     cfw_work_mode(2);                       /* normal run: already on */
-    CHECK(panel_cb_calls == 1);
-    cfw_work_mode(4);                       /* taken off: panel off */
-    CHECK(panel_cb_calls == 2 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    CHECK(resume_calls == 1);
+    cfw_work_mode(4);                       /* taken off: panel suspended */
+    CHECK(suspend_calls == 1 && panel_cb_calls == 2 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
     cfw_work_mode(9);                       /* waking from deep sleep: left to the next check */
-    CHECK(panel_cb_calls == 2);
+    CHECK(suspend_calls == 1 && resume_calls == 1);
+    resume_refuses = 1;                     /* resume refused: power-on path plus the brightness write */
+    cfw_work_mode(3);
+    CHECK(resume_calls == 2 && panel_cb_calls == 4 && brightness_writes == 1 && last_brightness == 0x15
+          && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
+    resume_refuses = 0;
+    cfw_work_mode(4);
+    CHECK(suspend_calls == 2 && panel_cb_calls == 5 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    panel_cb_calls = 2;                     /* the checks below predate the refused-resume detour */
     state[FW_STATE_WORK_MODE] = 4;
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 5 && last_reply[15] == 4 && last_reply[16] == 9 && last_reply[17] == 4 && last_reply[18] == 0);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 7 && last_reply[15] == 4 && last_reply[16] == 4 && last_reply[17] == 6 && last_reply[18] == 0);
 
     /* The 200 ms checker pass reconciles the panel with the current mode
      * (the stock display-off path switches it without a mode change). */
@@ -650,7 +664,7 @@ int main(void)
     cfw_work_mode_tick();                   /* charging in the case: off */
     CHECK(panel_cb_calls == 4 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
     CHECK(cfw_suspend_gate(state) == 1);    /* stock suspend refused while the CFW manages the panel */
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 7 && last_reply[17] == 4 && last_reply[18] == 3 && last_reply[19] == 1);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 9 && last_reply[17] == 6 && last_reply[18] == 3 && last_reply[19] == 1);
     CHECK(send_packet(in_manual, sizeof in_manual) == 0 && last_reply[2] == CFW_OK);
     state[FW_STATE_WORK_MODE] = 3;
     state[FW_STATE_WEAR_DETECT] = 0;

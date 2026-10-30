@@ -342,7 +342,7 @@ async def run_cfw_command(client, args, checkpoint):
                       'col_offset': struct.unpack_from('<h', body, 2)[0], 'row_offset': struct.unpack_from('<h', body, 4)[0],
                       'frame_buffer': hex(struct.unpack_from('<I', body, 6)[0]), 'width': body[10] * 4, 'height': body[11]}
         elif args.command == 'panel':
-            mode = {'on': 1, 'off': 0, 'force_on': 2, 'force_off': 3}
+            mode = {'on': 1, 'off': 0, 'force_on': 2, 'force_off': 3, 'resume': 5, 'suspend': 4}
             requested = next(name for name in mode if getattr(args, name))
             body = await link.check(CFW_PANEL, bytes([mode[requested]]))
             result = {'requested': requested, 'power_state': body[0], 'panel_powered': bool(body[1])}
@@ -851,6 +851,8 @@ def arguments(argv=None):
             group.add_argument('--off', action='store_true', help='Suspend the panel via the stock system-suspend path')
             group.add_argument('--force-on', action='store_true', help="Call the panel context's own on callback (ignores dock/wear policy)")
             group.add_argument('--force-off', action='store_true', help="Call the panel context's own off callback")
+            group.add_argument('--resume', action='store_true', help="Call the panel context's resume callback (panel init + brightness; what the auto panel uses)")
+            group.add_argument('--suspend', action='store_true', help="Call the panel context's suspend callback (SPI deep power down)")
         if command == 'fill':
             child.add_argument('--rect', type=lambda v: tuple(int(x) for x in v.split(',')), default=(0, 0, 640, 200),
                                help='x,y,w,h (even x and w)')

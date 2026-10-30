@@ -83,6 +83,10 @@ typedef int (*fw_system_power_fn)(uint8_t *state);
  * (0x49d9c), +0x10 on (0x49e48). panel_on powers the rail, re-initialises the
  * panel and sets +0x35c; panel_off clears it. Both take the context pointer. */
 typedef int (*fw_panel_cb_fn)(uint8_t *panel);
+#define FW_PANEL_CB_SUSPEND 0x04  /* panel_suspend 0x49dfc: SPI deep power down, powered flag 0 */
+#define FW_PANEL_CB_RESUME  0x08  /* panel_resume 0x49f28: panel_init + brightness, powered flag 1;
+                                   * returns -1 untouched when bit 8 of the halfword at
+                                   * panel+0x4fc is clear */
 #define FW_PANEL_CB_OFF 0x0c
 #define FW_PANEL_CB_ON  0x10
 /* panel_on (0x49e48) powers the panel and runs panel_init but leaves the

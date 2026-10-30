@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 33u
+#define CFW_PROTOCOL 34u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -470,6 +470,10 @@ static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
         FW_PANEL_CB_OF(state + FW_PANEL_OFFSET, FW_PANEL_CB_ON)(state + FW_PANEL_OFFSET);
     } else if (p[0] == 3) {
         FW_PANEL_CB_OF(state + FW_PANEL_OFFSET, FW_PANEL_CB_OFF)(state + FW_PANEL_OFFSET);
+    } else if (p[0] == 4) {
+        FW_PANEL_CB_OF(state + FW_PANEL_OFFSET, FW_PANEL_CB_SUSPEND)(state + FW_PANEL_OFFSET);
+    } else if (p[0] == 5) {
+        FW_PANEL_CB_OF(state + FW_PANEL_OFFSET, FW_PANEL_CB_RESUME)(state + FW_PANEL_OFFSET);
     } else {
         cfw_reply(CFW_PANEL, CFW_BAD_COMMAND, 0, 0);
         return;
@@ -1475,14 +1479,23 @@ static void cfw_auto_panel(cfw_input *in, int on)
     uint8_t *panel = cfw_panel();
     int powered = *(int *)(panel + FW_PANEL_POWERED) != 0;
     if (on && !powered) {
-        FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
-        /* panel_on leaves the brightness register dark (fw_abi.h). */
-        FW_PANEL_WRITE_BRIGHTNESS(panel[FW_PANEL_BRIGHTNESS_LEVEL]);
+        /* The stock silent-mode exit resumes the panel (init + brightness)
+         * rather than powering it; a panel powered through panel_on stayed
+         * dark on hardware even with the brightness written. Fall back to
+         * the power-on path only when resume refuses (fw_abi.h). */
+        FW_PANEL_CB_OF(panel, FW_PANEL_CB_RESUME)(panel);
+        if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
+            FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
+            FW_PANEL_WRITE_BRIGHTNESS(panel[FW_PANEL_BRIGHTNESS_LEVEL]);
+        }
         in->panel_autos++;
         cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
         cfw_flush(panel, &all);
     } else if (!on && powered) {
-        FW_PANEL_CB_OF(panel, FW_PANEL_CB_OFF)(panel);
+        FW_PANEL_CB_OF(panel, FW_PANEL_CB_SUSPEND)(panel);
+        if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
+            FW_PANEL_CB_OF(panel, FW_PANEL_CB_OFF)(panel);
+        }
         in->panel_autos++;
     }
 }

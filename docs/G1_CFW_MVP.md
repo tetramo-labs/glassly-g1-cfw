@@ -817,6 +817,27 @@ the stored level at panel+0x369. Our path came up at the reset brightness.
 `cfw_auto_panel` writes the stored brightness level to the panel right after
 the on callback, before the frame push.
 
+**Hardware result.** Still dark. On the head the right temple powered on at
+11.7 s (word 62-63) and off again at 32.7 s on the table (word 42), with the
+brightness written, and nothing showed. The stock silent-mode exit never
+powers the panel: `enter_silent_mode` suspends it (`panel_suspend`, SPI deep
+power down, the rail stays up) and `exit_silent_mode` resumes it
+(`panel_resume` = `panel_init` + brightness); the on/off callbacks have no
+runtime caller in the stock image. Calling the stock `global_system_suspend`
+through PANEL `00` on the left temple (auto panel disabled so the gate let it
+through) rebooted the temple: every counter restarted, so that path is
+unusable under the CFW even for experiments.
+
+### G1CFW/34: suspend and resume callbacks (2026-10-29)
+
+The auto panel now uses the panel's own suspend and resume callbacks, the
+sequence stock uses for silent mode: off is `panel_suspend`, on is
+`panel_resume` followed by the frame push. `panel_resume` returns without
+doing anything when bit 8 of the halfword at panel+0x4fc is clear, so when
+the powered flag is still 0 afterwards the CFW falls back to `panel_on` plus
+the brightness write. PANEL gained codes `04` (suspend callback) and `05`
+(resume callback) for manual tests.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;
