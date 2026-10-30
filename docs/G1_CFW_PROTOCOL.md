@@ -93,7 +93,9 @@ its `off` callback, bypassing that policy; use these to draw while docked.
 `mode` 4 calls the context's `suspend` callback (`panel_suspend`: SPI deep
 power down) and 5 its `resume` callback (`panel_resume`: panel init plus
 brightness; it refuses when bit 8 of the halfword at panel+0x4fc is clear),
-the pair the auto panel uses since G1CFW/34. Reply body:
+`mode` 6 and 7 call the driver's suspend and resume directly (SPI deep
+power down; `panel_init` plus brightness, rail untouched) and clear or set
+the powered flag, for experiments. Reply body:
 `[power_state][powered]`, where `power_state` is the stock byte (0 running,
 1 suspended, 2 suspending, 3 resuming) and `powered` is the panel context
 flag that FLUSH checks. While the glasses are docked the stock firmware
@@ -314,12 +316,13 @@ the glasses sense:
 
 **Panel follows wear (G1CFW/27, reworked in /28).** With the stock refresh
 pipeline stubbed nothing asks for the panel when the glasses are put on, so
-unless bit 4 is set the CFW switches it (G1CFW/34): on through the
-panel's resume callback (`panel_init` plus brightness, what the stock
-silent-mode exit does), falling back to the on callback plus a brightness
-write when resume refuses, then a push of the whole frame buffer (the panel
-comes up blank, the buffer survives); off through the suspend callback (SPI
-deep power down), falling back to the off callback. Two sources
+unless bit 4 is set the CFW switches it: on through the panel's resume
+callback, falling back to the on callback plus a brightness write when
+resume refuses (it does on these units), then a push of the whole frame
+buffer (the panel comes up blank, the buffer survives), repeated 600 ms and
+1.2 s later on the 200 ms ticks because the push made right after power-up
+shows nothing on hardware (G1CFW/35); off through the suspend callback,
+falling back to the off callback. Two sources
 feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
 and `case closed` (`0b`) only flow while a central is connected (the stock
 wear state machine resets when nothing is). The stock work-mode switch

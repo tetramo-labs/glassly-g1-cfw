@@ -838,6 +838,29 @@ the powered flag is still 0 afterwards the CFW falls back to `panel_on` plus
 the brightness write. PANEL gained codes `04` (suspend callback) and `05`
 (resume callback) for manual tests.
 
+**Hardware result.** Dark again, and the manual `PANEL 05` on the left
+temple returned with the powered flag still 0: `panel_resume` refused. The
+halfword it tests (state+0x1068, a bitfield of component-init flags) read
+`0x0cc0` on both temples, bit 8 clear, so the auto panel had taken the
+fallback every time, which is the rail path, and a panel brought up through
+`panel_on` is dark on hardware whatever is written afterwards. The flag at
+panel-0x48 that `panel_off` tests had also been set by the earlier
+`panel_on`, so `panel_suspend` was cutting the 1.8 V rail as well.
+
+Then the decisive experiment, suggested by the wearer: with G1CFW/34 on the
+right temple and the glasses on the head (panel brought up by the fallback
+path, word 56), a `draw` from the host two seconds and ten seconds later
+showed the test pattern. So the power-up path is fine and the frame buffer
+held the pattern; the one push the CFW makes right after power-up is what
+shows nothing.
+
+### G1CFW/35: push again after power-up (2026-10-29)
+
+The switching stays as in /34. After a power-up the CFW pushes the whole
+frame again on the third and sixth 200 ms tick (600 ms and 1.2 s later),
+while the panel is still powered. PANEL `06`/`07` expose the driver's own
+suspend/resume pair (`g1flash.py panel --sleep` / `--wake`) for experiments.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

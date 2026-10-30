@@ -89,6 +89,23 @@ typedef int (*fw_panel_cb_fn)(uint8_t *panel);
                                    * panel+0x4fc is clear */
 #define FW_PANEL_CB_OFF 0x0c
 #define FW_PANEL_CB_ON  0x10
+/* The driver pair behind the stock silent mode, taking the panel context:
+ * jbd_panel_suspend (0x4a5bc) sends the SPI deep-power-down command 0xb9,
+ * jbd_panel_resume (0x4a604) runs panel_init and writes the brightness
+ * register from panel+0x369. Neither touches the 1.8 V rail. The callback
+ * wrappers around them do: panel_suspend also runs panel_off (rail down when
+ * the flag at panel-0x48 is set) and panel_resume refuses outright when
+ * bit 8 of the halfword at panel+0x4fc is clear (it was on both temples
+ * here), and a panel brought back through the rail path (panel_on) came up
+ * dark on hardware. The CFW therefore calls the driver pair directly and
+ * keeps the powered flag at panel+0x35c itself. */
+typedef int (*fw_panel_drv_fn)(uint8_t *panel);
+#ifndef FW_JBD_PANEL_SUSPEND
+#define FW_JBD_PANEL_SUSPEND ((fw_panel_drv_fn)0x0004a5bd)
+#endif
+#ifndef FW_JBD_PANEL_RESUME
+#define FW_JBD_PANEL_RESUME ((fw_panel_drv_fn)0x0004a605)
+#endif
 /* panel_on (0x49e48) powers the panel and runs panel_init but leaves the
  * brightness register at its reset value, which is dark; panel_resume
  * (0x49f28) follows its init with 0x49eac(level), the register write, using

@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 34u
+#define CFW_PROTOCOL 35u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -474,6 +474,12 @@ static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
         FW_PANEL_CB_OF(state + FW_PANEL_OFFSET, FW_PANEL_CB_SUSPEND)(state + FW_PANEL_OFFSET);
     } else if (p[0] == 5) {
         FW_PANEL_CB_OF(state + FW_PANEL_OFFSET, FW_PANEL_CB_RESUME)(state + FW_PANEL_OFFSET);
+    } else if (p[0] == 6) {
+        FW_JBD_PANEL_SUSPEND(state + FW_PANEL_OFFSET);
+        *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
+    } else if (p[0] == 7) {
+        FW_JBD_PANEL_RESUME(state + FW_PANEL_OFFSET);
+        *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
     } else {
         cfw_reply(CFW_PANEL, CFW_BAD_COMMAND, 0, 0);
         return;
@@ -1450,8 +1456,9 @@ typedef struct {
     uint16_t checks;        /* check_work_mode passes seen (one per 200 ms) */
     uint16_t suspends_skipped; /* stock display suspends the CFW refused */
     uint8_t  wear_off;      /* wear word at or below this: not worn, panel off */
-    uint8_t  reserved;
+    uint8_t  push_ticks;    /* 200 ms passes left until the frame is pushed again after power-up */
 } cfw_input;
+#define CFW_PUSH_TICKS 6u       /* pushes again 600 ms and 1.2 s after power-up */
 #define CFW_INPUT_MAGIC 0x36504e49u  /* "INP6" */
 /* The stock classification (>= 0x33 worn, < 0x28 not worn) leaves a pair
  * lying unfolded on a table (47-50 here) in its dead band for ever; on a
@@ -1479,10 +1486,11 @@ static void cfw_auto_panel(cfw_input *in, int on)
     uint8_t *panel = cfw_panel();
     int powered = *(int *)(panel + FW_PANEL_POWERED) != 0;
     if (on && !powered) {
-        /* The stock silent-mode exit resumes the panel (init + brightness)
-         * rather than powering it; a panel powered through panel_on stayed
-         * dark on hardware even with the brightness written. Fall back to
-         * the power-on path only when resume refuses (fw_abi.h). */
+        /* Resume callback first (what the stock silent-mode exit uses); it
+         * refuses on these units, so the power-on path follows with the
+         * brightness write. On hardware the frame pushed right after the
+         * power-up shows nothing, while the same push a couple of seconds
+         * later does, so the push is repeated on later ticks (fw_abi.h). */
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_RESUME)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
             FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
@@ -1491,12 +1499,14 @@ static void cfw_auto_panel(cfw_input *in, int on)
         in->panel_autos++;
         cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
         cfw_flush(panel, &all);
+        in->push_ticks = CFW_PUSH_TICKS;
     } else if (!on && powered) {
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_SUSPEND)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
             FW_PANEL_CB_OF(panel, FW_PANEL_CB_OFF)(panel);
         }
         in->panel_autos++;
+        in->push_ticks = 0;
     }
 }
 
@@ -1661,6 +1671,16 @@ int cfw_work_mode_tick(void)
         state[FW_STATE_WEAR_DETECT] = 1;
     }
     cfw_panel_for_mode(in, state[FW_STATE_WORK_MODE]);
+    if (in->push_ticks) {
+        in->push_ticks--;
+        if (in->push_ticks == CFW_PUSH_TICKS / 2 || in->push_ticks == 0) {
+            uint8_t *panel = cfw_panel();
+            if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
+                cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+                cfw_flush(panel, &all);
+            }
+        }
+    }
     return 0;
 }
 

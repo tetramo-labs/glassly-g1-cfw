@@ -67,6 +67,10 @@ static int host_panel_off(uint8_t *panel);
 static int brightness_writes, last_brightness;
 static int host_write_brightness(uint32_t level) { brightness_writes++; last_brightness = (int)level; return 0; }
 #define FW_PANEL_WRITE_BRIGHTNESS host_write_brightness
+static int host_jbd_resume(uint8_t *panel);
+static int host_jbd_suspend(uint8_t *panel);
+#define FW_JBD_PANEL_RESUME host_jbd_resume
+#define FW_JBD_PANEL_SUSPEND host_jbd_suspend
 static int host_suspend(uint8_t *s);
 static int host_resume(uint8_t *s);
 #define FW_FRAME_OF(panel) ((void)(panel), host_frame)
@@ -123,6 +127,10 @@ static int host_panel_off(uint8_t *panel) { panel_cb_calls++; *(int *)(panel + F
 static int resume_calls, suspend_calls, resume_refuses;
 static int host_panel_resume(uint8_t *panel) { panel_cb_calls++; resume_calls++; if (resume_refuses) return -1; *(int *)(panel + FW_PANEL_POWERED) = 1; return 0; }
 static int host_panel_suspend(uint8_t *panel) { panel_cb_calls++; suspend_calls++; *(int *)(panel + FW_PANEL_POWERED) = 0; return 0; }
+/* The driver pair neither reads nor writes the powered flag; the CFW keeps it. */
+static int jbd_resume_calls, jbd_suspend_calls;
+static int host_jbd_resume(uint8_t *panel) { (void)panel; panel_cb_calls++; jbd_resume_calls++; return 0; }
+static int host_jbd_suspend(uint8_t *panel) { (void)panel; panel_cb_calls++; jbd_suspend_calls++; return 0; }
 
 static char utf_text[256]; static unsigned utf_font, utf_lines; static int utf_box[4], utf_calls, rows_set, manual_flush_calls; static void *rows_arg;
 static int host_utf_draw(int u, const char *t, unsigned f, int x0, int y0, int x1, int y1, unsigned l, unsigned d, int p10, void *cb, int p12)
@@ -184,7 +192,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/34", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/35", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -257,7 +265,7 @@ int main(void)
     uint8_t panel_force_on[] = { 0xF0, 0x05, 0x02 };
     CHECK(send_packet(panel_force_on, sizeof panel_force_on) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1 && panel_cb_calls == 2);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_OK);
-    uint8_t panel_bad[] = { 0xF0, 0x05, 0x07 };
+    uint8_t panel_bad[] = { 0xF0, 0x05, 0x09 };
     CHECK(send_packet(panel_bad, sizeof panel_bad) == 0 && last_reply[2] == CFW_BAD_COMMAND);
     CHECK(send_packet(panel_bad, 2) == 0 && last_reply[2] == CFW_BAD_LENGTH);
 
@@ -629,26 +637,37 @@ int main(void)
     host_frame[7] = 0xA5;
     pushed_row[7] = 0;
     panel[FW_PANEL_BRIGHTNESS_LEVEL] = 0x15;
-    brightness_writes = resume_calls = suspend_calls = 0;
-    cfw_work_mode(3);                       /* normal standby: worn, panel resumed, frame pushed */
-    CHECK(resume_calls == 1 && panel_cb_calls == 1 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5);
-    CHECK(brightness_writes == 0);          /* resume programs the brightness itself */
+    brightness_writes = resume_calls = suspend_calls = jbd_resume_calls = jbd_suspend_calls = 0;
+    resume_refuses = 1;                     /* as on hardware: resume refuses, the power-on path follows */
+    cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness written, frame pushed */
+    CHECK(resume_calls == 1 && panel_cb_calls == 2 && brightness_writes == 1 && last_brightness == 0x15);
+    CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5 && jbd_resume_calls == 0);
     cfw_work_mode(2);                       /* normal run: already on */
-    CHECK(resume_calls == 1);
-    cfw_work_mode(4);                       /* taken off: panel suspended */
-    CHECK(suspend_calls == 1 && panel_cb_calls == 2 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
+    CHECK(panel_cb_calls == 2);
+    /* The frame is pushed again 600 ms and 1.2 s after power-up (the first
+     * push shows nothing on hardware), on the 200 ms ticks. */
+    state[FW_STATE_WORK_MODE] = 3;
+    pushed_row[7] = 0;
+    cfw_work_mode_tick(); cfw_work_mode_tick();
+    CHECK(pushed_row[7] == 0);
+    cfw_work_mode_tick();                   /* third tick: push */
+    CHECK(pushed_row[7] == 0xA5 && panel_cb_calls == 2);
+    pushed_row[7] = 0;
+    cfw_work_mode_tick(); cfw_work_mode_tick();
+    CHECK(pushed_row[7] == 0);
+    cfw_work_mode_tick();                   /* sixth tick: push again */
+    CHECK(pushed_row[7] == 0xA5);
+    pushed_row[7] = 0;
+    cfw_work_mode_tick();                   /* and then no more */
+    CHECK(pushed_row[7] == 0);
+    cfw_work_mode(4);                       /* taken off: suspend callback (clears the flag) */
+    CHECK(suspend_calls == 1 && panel_cb_calls == 3 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
     cfw_work_mode(9);                       /* waking from deep sleep: left to the next check */
-    CHECK(suspend_calls == 1 && resume_calls == 1);
-    resume_refuses = 1;                     /* resume refused: power-on path plus the brightness write */
-    cfw_work_mode(3);
-    CHECK(resume_calls == 2 && panel_cb_calls == 4 && brightness_writes == 1 && last_brightness == 0x15
-          && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
+    CHECK(panel_cb_calls == 3);
     resume_refuses = 0;
-    cfw_work_mode(4);
-    CHECK(suspend_calls == 2 && panel_cb_calls == 5 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
-    panel_cb_calls = 2;                     /* the checks below predate the refused-resume detour */
+    panel_cb_calls = 2;                     /* the checks below count on/off style switches from here */
     state[FW_STATE_WORK_MODE] = 4;
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 7 && last_reply[15] == 4 && last_reply[16] == 4 && last_reply[17] == 6 && last_reply[18] == 0);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 5 && last_reply[15] == 4 && last_reply[16] == 9 && last_reply[17] == 4 && last_reply[18] == 7);
 
     /* The 200 ms checker pass reconciles the panel with the current mode
      * (the stock display-off path switches it without a mode change). */
@@ -664,7 +683,7 @@ int main(void)
     cfw_work_mode_tick();                   /* charging in the case: off */
     CHECK(panel_cb_calls == 4 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 0);
     CHECK(cfw_suspend_gate(state) == 1);    /* stock suspend refused while the CFW manages the panel */
-    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 9 && last_reply[17] == 6 && last_reply[18] == 3 && last_reply[19] == 1);
+    CHECK(send_packet(in_state, sizeof in_state) == 0 && last_reply[14] == 7 && last_reply[17] == 4 && last_reply[18] == 10 && last_reply[19] == 1);
     CHECK(send_packet(in_manual, sizeof in_manual) == 0 && last_reply[2] == CFW_OK);
     state[FW_STATE_WORK_MODE] = 3;
     state[FW_STATE_WEAR_DETECT] = 0;
