@@ -787,6 +787,21 @@ as two extra bytes and echoes it; `g1flash.py touch control --wear-on
 --wear-off`. The word is refreshed by the network core about every six
 seconds, so the lenses follow a take-off within roughly that.
 
+**Hardware result.** After the reboot the left temple read 39 on the table
+(stock low power, panel off) and the right 61 (normal standby, panel on):
+the two temples see different link values, each measuring what it hears
+from the other. Drawing to the left failed at its first flush with
+`panel-off`, two records in, leaving nothing for the panel to show when it
+comes on.
+
+### G1CFW/32: draws land while the panel is off (2026-10-29)
+
+A STREAM message no longer stops at a flush that meets the panel off: every
+record runs into the frame buffer, the reply carries `panel-off`, and the
+host reports the draw as deferred instead of failing. The frame goes out
+whole when the panel comes on (`cfw_auto_panel`), so a host can load the
+display of a pair lying on the table.
+
 ## References and remaining work
 
 - Decompilation pinned at `f571782aedb6fdefbcbfe2a4d1e309bb47143581` (1.6.3 reference;

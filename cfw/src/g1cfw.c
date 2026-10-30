@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 31u
+#define CFW_PROTOCOL 32u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -2023,6 +2023,7 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *done)
 {
     uint32_t pos = 0;
+    uint8_t deferred = 0;
     *done = 0;
     while (pos < n) {
         if (n - pos < 3) {
@@ -2035,13 +2036,17 @@ static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *done)
             return CFW_BAD_RECORD;
         }
         uint8_t status = cfw_run_record(cmd, m + pos, len);
-        if (status != CFW_OK) {
+        if (status == CFW_PANEL_OFF) {
+            /* The pixels are in the frame buffer and go out with the whole
+             * frame when the panel comes on: keep running the message. */
+            deferred = 1;
+        } else if (status != CFW_OK) {
             return status;
         }
         pos += len;
         (*done)++;
     }
-    return CFW_OK;
+    return deferred ? CFW_PANEL_OFF : CFW_OK;
 }
 
 #define CFW_STREAM_FIRST 0x01u
@@ -2109,7 +2114,9 @@ static void cfw_stream(const uint8_t *p, uint32_t n)
     }
     if (status != CFW_OK) {
         c->msg_active = 0;
-        c->stream_errors++;
+        if (status != CFW_PANEL_OFF) {
+            c->stream_errors++;   /* a deferred message ran in full */
+        }
     }
     c->last_status = status;
     cfw_reply(CFW_STREAM, status, body, sizeof body);

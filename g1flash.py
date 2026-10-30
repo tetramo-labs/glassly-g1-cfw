@@ -242,6 +242,7 @@ class StreamSender:
         self.link = link
         self.seq = 0
         self.packets = 0
+        self.deferred = False  # a flush met the panel off: pixels wait in the frame buffer
 
     async def send(self, message, timeout=10):
         if len(message) > CFW_MSG_MAX:
@@ -265,7 +266,9 @@ class StreamSender:
             reply = await asyncio.wait_for(self.link.replies.get(), timeout)
             if len(reply) >= 5 and reply[1] == CFW_STREAM:
                 status, seq, done = reply[2], reply[3], reply[4]
-                if status != 0:
+                if status == 4:
+                    self.deferred = True   # G1CFW/32+: every record ran, the panel is off
+                elif status != 0:
                     raise FirmwareError(f'stream message failed: {CFW_STATUS.get(status, status)} at seq {seq}, {done} records done')
                 return done
 
@@ -694,8 +697,11 @@ async def run_cfw_command(client, args, checkpoint):
                 if not args.no_flush:
                     await link.check(CFW_FLUSH, flush_rect)
                 result = {'drawn': [args.x, args.y, width, height], 'packets': sent}
-            result.update({'source': str(args.pbm or 'test-pattern'), 'flushed': not args.no_flush,
+            deferred = args.rle and sender.deferred
+            result.update({'source': str(args.pbm or 'test-pattern'), 'flushed': not args.no_flush and not deferred,
                            'seconds': round(asyncio.get_running_loop().time() - started, 2)})
+            if deferred:
+                result['deferred'] = 'panel off: the frame shows when it comes on'
         else:
             raise FirmwareError(args.command)
     checkpoint(args.command, result)

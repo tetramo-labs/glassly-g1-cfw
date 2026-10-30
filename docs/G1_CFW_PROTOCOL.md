@@ -195,7 +195,10 @@ after the message runs.
 A message is a list of records `[cmd:u8][len:u16][payload]` using the BLIT,
 FILL, FLUSH, TEXT and COPY payloads above, so one message can carry a clear, several
 compressed bands and a single flush. The first failing record stops the
-message; `records done` says how many ran.
+message; `records done` says how many ran. A flush that meets the panel off
+does not stop it (G1CFW/32): the pixels are in the frame buffer and go out
+with the whole frame when the panel comes on, every record runs, and the
+reply carries status `04` so the host knows nothing is visible yet.
 
 ## `11` STATS
 

@@ -175,7 +175,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/31", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/32", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -281,6 +281,13 @@ int main(void)
     CHECK(send_packet(s3, sizeof s3) == 0 && last_reply_len == 5 && last_reply[2] == CFW_OK && last_reply[3] == 9 && last_reply[4] == 2);
     CHECK(frame[6 * 320 + 2] == 0x77 && frame[6 * 320 + 5] == 0x77 && frame[6 * 320 + 6] == 0 && frame[7 * 320 + 2] == 0x77 && frame[8 * 320 + 2] == 0);
     CHECK(reflash_calls == 1 && last_rect[2] == 4 && last_rect[4] == 12 && last_rect[5] == 7);
+    /* With the panel off the records still run into the frame buffer and
+     * the message reports panel-off with every record done. */
+    *(int *)(panel + FW_PANEL_POWERED) = 0;
+    memset(frame, 0, 200 * 320);
+    CHECK(send_packet(s1, sizeof s1) == 0 && send_packet(s2, sizeof s2) == 0 && send_packet(s3, sizeof s3) == 0);
+    CHECK(last_reply[2] == CFW_PANEL_OFF && last_reply[4] == 2 && frame[6 * 320 + 2] == 0x77 && reflash_calls == 1);
+    *(int *)(panel + FW_PANEL_POWERED) = 1;
     /* Out-of-order sequence is refused and aborts the message. */
     CHECK(send_packet(s1, sizeof s1) == 0 && last_reply_len == 0);
     uint8_t bad_seq[sizeof s2]; memcpy(bad_seq, s2, sizeof s2); bad_seq[2] = 9;
@@ -319,7 +326,7 @@ int main(void)
 
     /* Stats reflect the traffic above. */
     const uint8_t stats[] = { 0xF0, 0x11 };
-    CHECK(send_packet(stats, sizeof stats) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 2 && last_reply[5] == 5 && last_reply[7] == 2);
+    CHECK(send_packet(stats, sizeof stats) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 3 && last_reply[5] == 5 && last_reply[7] == 2);
 
     /* TEXT: clear box, draw "Hi" with font 0 at (32,32)-(608,59), flush. */
     memset(frame, 0xAA, 200 * 320);
