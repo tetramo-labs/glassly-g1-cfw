@@ -49,6 +49,12 @@ typedef uint8_t *(*fw_get_state_fn)(void);
 #define FW_FRAME_WIDTH       640
 #define FW_FRAME_HEIGHT      200
 #define FW_FRAME_STRIDE      320
+/* Panel memory holds 480 rows of 320 bytes; the 200-row canvas sits at the
+ * row origin. The stock panel_init cleared all of it by pushing a zeroed
+ * frame at row offsets 0, 0xc0 and 0x180 (0x80d12: 0xf000 + 0xf000 + 0x7800
+ * bytes), the routine the CFW stubs since /36 because it also wiped the
+ * frame buffer. */
+#define FW_PANEL_MEM_ROWS    480
 #ifndef FW_FRAME_OF
 #define FW_FRAME_OF(panel) ((uint8_t *)(uintptr_t)(*(uint32_t *)((panel) + FW_PANEL_FRAME)))
 #endif

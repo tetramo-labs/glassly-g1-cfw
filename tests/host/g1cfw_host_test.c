@@ -101,12 +101,18 @@ static uint8_t *host_get_ctx(void) { return ctx; }
 static int host_hook(const void *data, uint32_t len) { (void)data; (void)len; hook_calls++; return 1; }
 static uint8_t *host_get_state(void) { return state; }
 static uint8_t pushed_row[320];   /* frame row 0 as it looked during the push */
+static int margin_rows, margin_dirty, margin_max_row;   /* single-row pushes of frame row 0 */
 static int host_reflash(int col, int row, int x0, int y0, int x1, int y1)
 {
     reflash_calls++;
     int r[6] = { col, row, x0, y0, x1, y1 };
     memcpy(last_rect, r, sizeof r);
     if (host_frame) memcpy(pushed_row, host_frame, sizeof pushed_row);
+    if (y0 == 0 && y1 == 0 && x0 == 0 && x1 == 640 && host_frame) {
+        margin_rows++;
+        if (row > margin_max_row) margin_max_row = row;
+        for (int i = 0; i < 320; i++) if (host_frame[i]) margin_dirty = 1;
+    }
     return 0;
 }
 
@@ -192,7 +198,7 @@ int main(void)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/36", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/37", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -639,9 +645,15 @@ int main(void)
     panel[FW_PANEL_BRIGHTNESS_LEVEL] = 0x15;
     brightness_writes = resume_calls = suspend_calls = jbd_resume_calls = jbd_suspend_calls = 0;
     resume_refuses = 1;                     /* as on hardware: resume refuses, the power-on path follows */
+    margin_rows = margin_dirty = margin_max_row = 0;
+    host_frame[0] = 0x3C;
     cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness written, frame pushed */
     CHECK(resume_calls == 1 && panel_cb_calls == 2 && brightness_writes == 1 && last_brightness == 0x15);
     CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5 && jbd_resume_calls == 0);
+    /* The 280 panel rows outside the canvas (row origin 35) were blanked
+     * with a zeroed copy of frame row 0, which is intact afterwards. */
+    CHECK(margin_rows == 280 && !margin_dirty && margin_max_row == 479 && host_frame[0] == 0x3C && host_frame[7] == 0xA5);
+    host_frame[0] = 0;
     cfw_work_mode(2);                       /* normal run: already on */
     CHECK(panel_cb_calls == 2);
     /* The frame is pushed again 600 ms and 1.2 s after power-up (the first

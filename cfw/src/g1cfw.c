@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 36u
+#define CFW_PROTOCOL 37u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -1481,6 +1481,33 @@ enum { CFW_STOCK_WORN = 6, CFW_STOCK_TAKEN_OFF = 7, CFW_STOCK_IN_CASE_OPEN = 8, 
  * push of the frame buffer, which survives the power cycle while the panel
  * comes up blank; off again when taken off or cased. Fed by the stock
  * events while a central is connected and by every work-mode change. */
+static cfw_input *cfw_input_state(void);
+
+/* The stock panel_init no longer clears the panel memory outside the canvas
+ * (fw_abi.h: FW_PANEL_MEM_ROWS), so after a power-up those rows show random
+ * content. Push one blanked frame row to every row outside the canvas; the
+ * row is saved in the CFW RAM region behind the input state and restored. */
+static void cfw_blank_margins(uint8_t *panel)
+{
+    uint8_t *row0 = FW_FRAME_OF(panel);
+    uint8_t *keep = (uint8_t *)cfw_input_state() + sizeof(cfw_input);
+    int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
+    int top = *(int *)(panel + FW_PANEL_ROW_OFFSET) + cfw_view_state()->dy;
+    for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
+        keep[i] = row0[i];
+        row0[i] = 0;
+    }
+    for (int y = 0; y < FW_PANEL_MEM_ROWS; y++) {
+        if (y >= top && y < top + FW_FRAME_HEIGHT) {
+            continue;
+        }
+        FW_REFLASH_FB(col, y, 0, 0, FW_FRAME_WIDTH, 0);   /* frame row 0 lands on panel row y */
+    }
+    for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
+        row0[i] = keep[i];
+    }
+}
+
 static void cfw_auto_panel(cfw_input *in, int on)
 {
     uint8_t *panel = cfw_panel();
@@ -1498,6 +1525,9 @@ static void cfw_auto_panel(cfw_input *in, int on)
             FW_PANEL_WRITE_BRIGHTNESS(panel[FW_PANEL_BRIGHTNESS_LEVEL]);
         }
         in->panel_autos++;
+        if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
+            cfw_blank_margins(panel);
+        }
         cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
         cfw_flush(panel, &all);
         in->push_ticks = CFW_PUSH_TICKS;
@@ -1510,6 +1540,9 @@ static void cfw_auto_panel(cfw_input *in, int on)
         in->push_ticks = 0;
     }
 }
+
+_Static_assert(sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_anims) + sizeof(cfw_input) + FW_FRAME_STRIDE <= FW_CFW_RAM2_SIZE,
+               "second CFW RAM region: objects, animations, input state and the margin row save");
 
 static cfw_input *cfw_input_state(void)
 {

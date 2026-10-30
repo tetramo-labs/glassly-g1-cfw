@@ -891,7 +891,20 @@ detection works end to end. Open: in the automatically pushed frame the
 first few and last few pixel rows of the pattern sit slightly left of the
 rest, and the whole display lights; a host `draw` right after (band pushes
 from the BLE handler) is the comparison for whether the whole-frame push
-from the 200 ms tick is what shifts them.
+from the 200 ms tick is what shifts them. Result: the band draw shows the
+same shift, so the frame and the push agree and the effect is in the panel
+or the optics at the canvas edges, not in the CFW. Also seen: the whole
+display lit above and below the canvas, because the stubbed routine was
+also what cleared the 480-row panel memory outside the canvas at power-up.
+
+### G1CFW/37: blank the panel margins at power-up (2026-10-29)
+
+After the panel comes on the CFW pushes one blanked frame row to each of
+the 280 panel rows outside the 200-row canvas (row origin plus the view
+`dy`), then the whole frame as before. Frame row 0 is saved behind the
+input state in the second RAM region and restored. A draw landing in row 0
+during those pushes (one stock push per row, about 1 ms each) is overwritten
+by the restore; that window is accepted.
 
 ## References and remaining work
 

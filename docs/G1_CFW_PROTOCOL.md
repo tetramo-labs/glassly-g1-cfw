@@ -322,7 +322,9 @@ resume refuses (it does on these units), then a push of the whole frame
 buffer, repeated 600 ms and 1.2 s later on the 200 ms ticks (G1CFW/35).
 The buffer survives the power-up: the whole-frame clear inside the stock
 `panel_init` and the panel's clear callback are stubbed (G1CFW/36), so the
-panel comes up showing what the host drew last, deferred draws included.
+panel comes up showing what the host drew last, deferred draws included,
+and the CFW blanks the 280 panel memory rows outside the canvas itself
+(G1CFW/37), which that stock routine used to do.
 Off goes through the suspend callback, falling back to the off callback. Two sources
 feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
 and `case closed` (`0b`) only flow while a central is connected (the stock
