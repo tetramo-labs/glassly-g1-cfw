@@ -1,6 +1,6 @@
 # G1 custom firmware plan
 
-Updated: 2026-10-28
+Updated: 2026-10-30
 
 ## Goal and current scope
 
@@ -150,10 +150,15 @@ offers about 38 KB more once its 80 entry points are stubbed. In order:
 6. **Assets.** Done in G1CFW/12 for images (1bpp/4bpp) and strings: a 48 KB
    heap arena with a 56-entry directory, PUT/DRAW/TEXT/CLEAR/INFO. Not yet:
    uploaded fonts, cached draw commands, LRU eviction (CLEAR only).
-7. **Vector shapes.** G1CFW/13 draws lines (brush width), rectangles,
-   circles/rings and triangles, filled or outlined, clipped and signed, as
-   16-byte records. Not yet: rounded rectangles, arcs/sectors, beziers, image
-   and text records inside a shape list. The **retained object cache**
+7. **Vector shapes.** G1CFW/38 draws g2flash's full record set (20-byte
+   records, types 1-13: capped lines, rounded rectangles, circles/rings,
+   triangles, quads, quadratic and cubic beziers, arcs, pies) with the
+   g2flash integer rasterizer, and object kind 4 holds one record whose
+   parameters, colour and stroke width tween (OBJ_ANIM entries merge by
+   object; `tools/shapes_suite.py` ports the glassly shapes suite and the
+   host test replays its dump). Not yet: filled SVG paths (type 18), rotation
+   (SHOW op 9), image and text records inside a shape list; flash is the
+   limit (2.5 KB left after the wider carve). The **retained object cache**
    (G1CFW/16: PUT/SHOW/HIDE/STATE/CONTROL, 96 descriptors in reclaimed RAM at
    `0x2001bf24`) and **animation** (G1CFW/17: eased glides stepped on the
    display thread via the hooked refresh handler, `k_msleep` and the stock
