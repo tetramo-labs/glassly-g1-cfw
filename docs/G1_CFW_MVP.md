@@ -1070,6 +1070,16 @@ replay. The suite's reset commands accept `panel-off` like the phone does
 `g1flash.py` points its UART timeout hint at the case lid. Blob 23,852
 bytes, 144 left.
 
+**Hardware result (both temples, 2026-10-30).** With G1CFW/43 on both
+temples (docked, lid open, panel forced on) `tools/shapes_suite.py` passed
+all 43 cases on both temples, stage 4 included, and `tools/vector_suite.py`
+had all 21 messages acknowledged (worst ack 153 ms). The first /43 build
+still answered PING with `G1CFW/42` because the blob's `CFW_PROTOCOL`
+constant had not moved with the `#t` marker; the shipped /43 image
+(`b409b3e`) reports 43 on both. The repository now lives at
+`~/dev/glassly-g1-cfw` (github.com/tetramo-labs/glassly-g1-cfw, private);
+the original decompilation stays reachable as the `upstream` remote.
+
 ### Hardware note: deep sleep silences the UART, not the firmware (2026-10-30)
 
 Flashing G1CFW/42 to both temples uploaded and activated cleanly (MCUmgr
