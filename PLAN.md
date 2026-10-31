@@ -14,7 +14,7 @@ port of the G2 graphics runtime or its features.
 
 ## Completed
 
-- Cloned `JohnRThomas/even_realities_decomp` into `~/dev/even-g1-decomp`.
+- Cloned `JohnRThomas/even_realities_decomp` into `~/dev/glassly-g1-cfw`.
 - Inspected `~/dev/g2flash` and reused its pinned-input, expected-byte patching,
   deterministic-output approach. G2 offsets and OTA protocol are not compatible.
 - Consulted Reverse Engineer Anything at `/tmp/g1-rea` as a reference; its
@@ -37,7 +37,7 @@ port of the G2 graphics runtime or its features.
 ## Reproduce the current build
 
 ```sh
-cd ~/dev/even-g1-decomp
+cd ~/dev/glassly-g1-cfw
 ./build_cfw.sh
 G1_STOCK_ZIP=build/g1-mvp/stock-firmware.zip .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python g1flash.py plan --firmware build/g1-mvp/app_update.bin
