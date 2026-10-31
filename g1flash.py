@@ -147,6 +147,7 @@ STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-
 WORK_MODES = {0: 'boot', 1: 'link-setup', 2: 'normal-run', 3: 'normal-standby', 4: 'normal-low-power',
               5: 'charging-run', 6: 'charging-low-power', 7: 'ship', 8: 'deep-sleep', 9: 'waking'}
 EVENT_CLASSES = {0: ('touch', TOUCH_CODES), 1: ('stock', STOCK_EVENTS)}
+CFW_STATUS_PANEL_OFF = 4
 CFW_STATUS = {0: 'ok', 1: 'bad-length', 2: 'bad-command', 3: 'bad-rect', 4: 'panel-off', 5: 'bad-seq',
               6: 'bad-crc', 7: 'too-big', 8: 'bad-record', 9: 'bad-rle', 10: 'bad-font', 11: 'no-memory',
               12: 'no-asset', 13: 'bad-asset', 14: 'no-object'}

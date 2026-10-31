@@ -1040,6 +1040,36 @@ blob segment. With this the g2flash drawing, object, animation and transport
 contract is ported except for lens-synchronised records (two connections on
 the G1) and the 64 KiB messages and zlib the G2 needs for its larger panel.
 
+### G1CFW/43: text boxes glide over odd columns (2026-10-30)
+
+First hardware run of the ported suites, on G1CFW/42 with both temples
+docked, lid open, panel forced on (`touch control --no-auto-panel`,
+`panel --force-on`): `tools/vector_suite.py` sent all 21 messages to both
+temples (worst ack 154 ms, no refusals; its checks are visual), and
+`tools/shapes_suite.py` passed 42 of 43 cases. `stage-4-text-animation`
+was refused with `bad-rect` at its third frame, 0 records done, and the
+host replay of the same dump passed. Replaying the frames by hand showed
+the refusal only when the frame arrived while the slide tweens were still
+running (1.0 s after the ANIM: refused; 2.0 s: accepted): the text drawer
+requires even x0 and x1 (two pixels per frame byte) and the scene encoder
+snaps static boxes, but a glide interpolates x on the glasses, so between
+frames the box sits on an odd column, `cfw_text` returns `bad-rect`, the
+tick path drops the status (the text flickers off for that frame) and a
+SHOW arriving mid-tween is refused with it. The host replay did tick the
+tweens but never looked at the render status, and the stage's 44-frame
+slides take longer than 33 ms a frame on the glasses, so the suite's
+2 s hold landed inside the tween there and after it on the host.
+
+G1CFW/43 widens a text object's box to whole byte columns and clips it to
+the frame before drawing; a box clipped away draws nothing, as the G2 clips
+its text. `cfw_anims` gains `render_errors` (object renders that returned a
+status while presenting) and the host replay reports any increase after a
+message or a wait, so a frame that an object refuses mid-tween fails the
+replay. The suite's reset commands accept `panel-off` like the phone does
+(the docked glasses write the frame and have nothing to show it on), and
+`g1flash.py` points its UART timeout hint at the case lid. Blob 23,852
+bytes, 144 left.
+
 ### Hardware note: deep sleep silences the UART, not the firmware (2026-10-30)
 
 Flashing G1CFW/42 to both temples uploaded and activated cleanly (MCUmgr

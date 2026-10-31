@@ -779,6 +779,17 @@ RESET_COMMANDS = [(OBJ_CONTROL, obj_control_payload()), (ASSET_CLEAR, b''), (OBJ
 SETUP_MESSAGE = b''.join(record(sub, payload) for sub, payload in RESET_COMMANDS)
 
 
+async def reset_check(link, sub, payload):
+    """A reset command's reply: ok, or panel-off (the docked glasses accepted
+    the command and wrote the frame but have nothing to show it on), which is
+    what the phone accepts too."""
+    import g1flash
+    status, body = await link.request(sub, payload)
+    if status not in (0, g1flash.CFW_STATUS_PANEL_OFF):
+        raise g1flash.FirmwareError(f'CFW command {sub:#x} failed: {g1flash.CFW_STATUS.get(status, status)}')
+    return body
+
+
 class Temple:
     def __init__(self, side, name, identity, link, sender):
         self.side = side
@@ -846,7 +857,7 @@ class Renderer:
             for temple in self.temples.values():
                 try:
                     for sub, payload in RESET_COMMANDS:
-                        await temple.link.check(sub, payload)
+                        await reset_check(temple.link, sub, payload)
                 except Exception:
                     pass
             raise
@@ -951,7 +962,7 @@ async def open_temples(stack, opts, required=REQUIRED_REVISION):
         if revision is None or revision < required:
             raise SystemExit(f'{side}: {names[device.address]} answers {identity!r}; this suite needs G1CFW/{required} or later')
         for sub, payload in RESET_COMMANDS:
-            await link.check(sub, payload)
+            await reset_check(link, sub, payload)
         temples[side] = Temple(side, names[device.address], identity, link, g1flash.StreamSender(link))
         print(f'{side}: {names[device.address]} {identity}', flush=True)
     return temples

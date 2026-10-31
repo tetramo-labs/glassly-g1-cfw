@@ -1743,6 +1743,8 @@ struct cfw_anims {
     uint32_t ticks;            /* frames rendered since boot */
     uint32_t full_pushes;      /* frames that needed a whole-frame push */
     uint16_t clip_y0, clip_y1; /* row clip for composition (exclusive end); 0,0 = none */
+    uint16_t render_errors;    /* object renders that returned a status while presenting */
+    uint16_t pad;
     cfw_anim items[CFW_ANIM_MAX];
 };
 #define CFW_ANIM_MAGIC 0x324d4e41u  /* "ANM2" */
@@ -2060,17 +2062,23 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
         return cfw_blit_from(buf, cfw_asset_bytes(c, a) + (uint32_t)r0 * stride, (uint32_t)(r1 - r0) * stride);
     }
     case CFW_OBJ_TEXT: {
-        int x1 = obj->p[0] + obj->p[2], y1 = obj->p[1] + obj->p[3] - 1;
-        if (obj->p[0] < 0 || obj->p[1] < 0 || x1 > FW_FRAME_WIDTH || y1 >= FW_FRAME_HEIGHT) {
-            return CFW_BAD_RECT;
-        }
-        if (y1 < cy0 || obj->p[1] >= cy1) {
+        /* A glide interpolates the box on the glasses, so it can sit on an
+         * odd column or partly off the canvas between frames: widen it to
+         * whole byte columns and clip it to the frame (G1CFW/43); what is
+         * clipped away draws nothing, as the G2 clips its text. */
+        int x0 = obj->p[0] & ~1, y0 = obj->p[1];
+        int x1 = (obj->p[0] + obj->p[2] + 1) & ~1, y1 = y0 + obj->p[3] - 1;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > FW_FRAME_WIDTH) x1 = FW_FRAME_WIDTH;
+        if (y1 >= FW_FRAME_HEIGHT) y1 = FW_FRAME_HEIGHT - 1;
+        if (x1 <= x0 || y1 < y0 || y1 < cy0 || y0 >= cy1) {
             return CFW_OK;
         }
         buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
         buf[2] = obj->font; buf[3] = 0;
-        buf[4] = (uint8_t)obj->p[0]; buf[5] = (uint8_t)(obj->p[0] >> 8);
-        buf[6] = (uint8_t)obj->p[1]; buf[7] = (uint8_t)(obj->p[1] >> 8);
+        buf[4] = (uint8_t)x0; buf[5] = (uint8_t)(x0 >> 8);
+        buf[6] = (uint8_t)y0; buf[7] = (uint8_t)(y0 >> 8);
         buf[8] = (uint8_t)x1; buf[9] = (uint8_t)(x1 >> 8);
         buf[10] = (uint8_t)y1; buf[11] = (uint8_t)(y1 >> 8);
         buf[12] = obj->lines ? obj->lines : 1;
@@ -2079,10 +2087,10 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
             /* The stock drawer only knows full brightness: scale the box's
              * pixels by the object's level so text can fade like a shape. */
             uint32_t level = obj->level & 0xF;
-            int r0 = obj->p[1] > cy0 ? obj->p[1] : cy0, r1 = y1 + 1 < cy1 ? y1 + 1 : cy1;
+            int r0 = y0 > cy0 ? y0 : cy0, r1 = y1 + 1 < cy1 ? y1 + 1 : cy1;
             for (int row = r0; row < r1; row++) {
-                uint8_t *b = cfw_row(cfw_panel(), (uint32_t)row, (uint32_t)obj->p[0]);
-                for (int i = 0; i < obj->p[2] / 2; i++) {
+                uint8_t *b = cfw_row(cfw_panel(), (uint32_t)row, (uint32_t)x0);
+                for (int i = 0; i < (x1 - x0) / 2; i++) {
                     b[i] = (uint8_t)((((b[i] >> 4) * level / 15) << 4) | ((b[i] & 0xF) * level / 15));
                 }
             }
@@ -2398,8 +2406,8 @@ static uint8_t cfw_obj_present(const cfw_rect *dirty)
     an->clip_y1 = dirty ? (uint16_t)row1 : 0;
     for (uint32_t i = 0; i < o->shown_count; i++) {
         cfw_obj *obj = cfw_obj_find(o, o->shown[i]);
-        if (obj) {
-            cfw_obj_render(obj);
+        if (obj && cfw_obj_render(obj) != CFW_OK) {
+            an->render_errors++;
         }
     }
     an->clip_y0 = an->clip_y1 = 0;

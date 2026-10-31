@@ -239,6 +239,7 @@ static int replay(const char *path, const char *dir)
     char label[300] = "start";
     int shots = 0, msgs = 0, errors = 0;
     uint8_t seq = 0;
+    uint16_t render_errors = cfw_animation()->render_errors;
     for (long pos = 0; pos < n;) {
         uint8_t tag = d[pos++];
         if (tag == 1 && pos + 2 <= n) {
@@ -274,6 +275,12 @@ static int replay(const char *path, const char *dir)
                 printf("replay: message %d (%s, %u bytes) refused: status %d after %d records\n", msgs, label, len, last_reply[2], last_reply[4]);
                 errors++;
             }
+            if (cfw_animation()->render_errors != render_errors) {
+                printf("replay: message %d (%s) left %u object renders failing while presenting\n", msgs, label,
+                       cfw_animation()->render_errors - render_errors);
+                render_errors = cfw_animation()->render_errors;
+                errors++;
+            }
         } else if (tag == 2 && pos + 4 <= n) {
             uint32_t ms = (uint32_t)rd32le(d + pos);
             pos += 4;
@@ -281,6 +288,14 @@ static int replay(const char *path, const char *dir)
             uint32_t period = a->period_ms ? a->period_ms : 20;
             for (uint32_t t = 0; t <= ms / period && a->active; t++) {
                 cfw_display_tick(state, 0x10, 0, 2);
+            }
+            if (a->render_errors != render_errors) {
+                /* A tween frame that an object refused to draw: on the glasses it flickers,
+                 * and a SHOW arriving mid-tween is refused with the same status. */
+                printf("replay: %u object renders failed during the %u ms wait after %s\n",
+                       a->render_errors - render_errors, ms, label);
+                render_errors = a->render_errors;
+                errors++;
             }
             if (dir) {
                 write_pgm(dir, shots, label);
@@ -901,6 +916,19 @@ int main(int argc, char **argv)
     CHECK(send_packet(dim_tween, sizeof dim_tween) == 0 && last_reply[2] == CFW_OK);
     cfw_display_tick(state, 0x10, 0, 2);
     CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[2] == CFW_OK);
+    /* A glide lands the text box on an odd column and past the right edge
+     * between frames (G1CFW/43): the box is widened to byte columns and
+     * clipped to the frame instead of refusing the frame, so the tick
+     * renders it and a SHOW arriving mid-tween is not refused. */
+    CHECK(cfw_animation()->render_errors == 0);
+    uint8_t odd_tween[] = { 0xF0, 0x25, 0, 1, 3, 0, 0x01, 0x00, 1, 0, 0x45, 0x00 };   /* x 32 -> 69 in one frame: box 69..645 */
+    CHECK(send_packet(odd_tween, sizeof odd_tween) == 0 && last_reply[2] == CFW_OK);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(cfw_animation()->render_errors == 0);
+    uint8_t show3push[] = { 0xF0, 0x21, 0x03, 1, 3, 0 };
+    CHECK(send_packet(show3push, sizeof show3push) == 0 && last_reply[2] == CFW_OK);
+    uint8_t back_tween[] = { 0xF0, 0x25, 0, 1, 3, 0, 0x01, 0x00, 0, 0, 32, 0 };        /* snap back to x 32 */
+    CHECK(send_packet(back_tween, sizeof back_tween) == 0 && last_reply[2] == CFW_OK);
 
     /* Paths (asset kind 3): commands in Q4 compiled on PUT; a square with a
      * same-winding square hole fills even-odd with the hole, nonzero without. */

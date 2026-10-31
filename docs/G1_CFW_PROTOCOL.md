@@ -218,6 +218,10 @@ engine or shape records, so showing a scene again costs one SHOW.
   OBJ_ANIM values 10-12 below); a PUT resets it to 0. A PUT stops any
   animation of that object. A wrong kind, a record type outside 1-13 or a
   body shorter than the kind needs is `08`/`01`.
+  Text objects (kind 1) are drawn with their box widened to even columns
+  and clipped to the frame (G1CFW/43): a glide interpolates the box on the
+  glasses, so between frames it can sit on an odd column or partly off the
+  canvas; what is clipped away draws nothing, as the G2 clips its text.
 - `21` OBJ_SHOW `[flags][count][ids:u16...]`: compose the listed objects in
   order; bit 0 clears the frame first, bit 1 pushes it afterwards. An unknown
   id refuses the whole SHOW before drawing.
