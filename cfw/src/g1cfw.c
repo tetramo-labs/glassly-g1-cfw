@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 43u
+#define CFW_PROTOCOL 44u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -362,19 +362,23 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
     /* The stock routine sends (x1 - x0) / 2 bytes per row, so x1 is exclusive
      * in pixels even though y1 is inclusive. Passing x0 + w - 1 would drop the
      * last pixel pair of every row (the stock full-frame caller passes 0x27f
-     * and loses columns 638-639); 640 is accepted by its clamp. */
-    if (v->dx == 0) {
-        return FW_REFLASH_FB(col, row, (int)r->x0, (int)r->y0, (int)(r->x0 + r->w),
-                             (int)(r->y0 + r->h - 1)) < 0 ? CFW_PANEL_OFF : CFW_OK;
-    }
+     * and loses columns 638-639); 640 is accepted by its clamp. The LCD
+     * mutex is held across the shift, the push and the restore (fw_abi.h:
+     * FW_LCD_LOCK), so no other thread's push sends a row while it is
+     * shifted or carries this push's header. */
     uint8_t *frame = FW_FRAME_OF(panel);
-    int px0, px1;
-    cfw_view_shift(frame, r, v->dx, &px0, &px1, 0);
-    int rc = 0;
+    int px0 = (int)r->x0, px1 = (int)(r->x0 + r->w), rc = 0;
+    FW_LCD_LOCK(-1);
+    if (v->dx) {
+        cfw_view_shift(frame, r, v->dx, &px0, &px1, 0);
+    }
     if (px1 > px0) {
         rc = FW_REFLASH_FB(col, row, px0, (int)r->y0, px1, (int)(r->y0 + r->h - 1));
     }
-    cfw_view_shift(frame, r, v->dx, &px0, &px1, 1);
+    if (v->dx) {
+        cfw_view_shift(frame, r, v->dx, &px0, &px1, 1);
+    }
+    FW_LCD_UNLOCK();
     return rc < 0 ? CFW_PANEL_OFF : CFW_OK;
 }
 
@@ -502,10 +506,13 @@ static void cfw_info(void)
     cfw_reply(CFW_INFO, CFW_OK, body, sizeof body);
 }
 
+static void cfw_panel_up(uint8_t *panel);
+
 /* [mode]: 1 resumes the panel through the stock system-resume path, 0 suspends
  * it; 2 calls the panel context's own on callback (bypassing the stock
- * wear/dock policy) and 3 its off callback. Reply body:
- * [power state byte][panel powered]. */
+ * wear/dock policy) and 3 its off callback. The modes that bring the panel
+ * up (1, 2, 5, 7) blank it outside the canvas and push the frame, like the
+ * wear switch. Reply body: [power state byte][panel powered]. */
 static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
 {
     uint8_t *state = FW_GET_STATE();
@@ -535,6 +542,9 @@ static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
     } else {
         cfw_reply(CFW_PANEL, CFW_BAD_COMMAND, 0, 0);
         return;
+    }
+    if ((0xA6u >> p[0]) & 1) {       /* modes 1, 2, 5 and 7 bring the panel up */
+        cfw_panel_up(state + FW_PANEL_OFFSET);
     }
     body[0] = state[FW_STATE_POWER_OFFSET];
     body[1] = *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) != 0;
@@ -2521,6 +2531,7 @@ static void cfw_blank_margins(uint8_t *panel)
     uint8_t *keep = cfw_margin_row();
     int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
     int top = *(int *)(panel + FW_PANEL_ROW_OFFSET) + cfw_view_state()->dy;
+    FW_LCD_LOCK(-1);                 /* no other push may send row 0 while it is zeroed */
     for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
         keep[i] = row0[i];
         row0[i] = 0;
@@ -2534,6 +2545,28 @@ static void cfw_blank_margins(uint8_t *panel)
     for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
         row0[i] = keep[i];
     }
+    FW_LCD_UNLOCK();
+}
+
+/* Blank the panel outside the canvas and push the whole frame. */
+static uint8_t cfw_repush(uint8_t *panel)
+{
+    if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
+        return CFW_PANEL_OFF;
+    }
+    cfw_blank_margins(panel);
+    cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
+    return cfw_flush(panel, &all);
+}
+
+/* The panel just came on, through the wear switch or a PANEL command: the
+ * memory outside the canvas powers up lit. Blank it and push the frame now
+ * and again on the 600 ms and 1.2 s ticks, since the panel may not take the
+ * first writes. */
+static void cfw_panel_up(uint8_t *panel)
+{
+    cfw_repush(panel);
+    cfw_input_state()->push_ticks = CFW_PUSH_TICKS;
 }
 
 static void cfw_auto_panel(cfw_input *in, int on)
@@ -2545,20 +2578,14 @@ static void cfw_auto_panel(cfw_input *in, int on)
          * refuses on these units, so the power-on path follows with the
          * brightness write. Both end in panel_init, whose whole-frame
          * clear is stubbed (tools/gen_profile.py) so the buffer survives
-         * the power-up; the push is repeated on later ticks in case the
-         * panel is not ready for the first one. */
+         * the power-up; cfw_panel_up blanks around it and pushes it. */
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_RESUME)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
             FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
             FW_PANEL_WRITE_BRIGHTNESS(panel[FW_PANEL_BRIGHTNESS_LEVEL]);
         }
         in->panel_autos++;
-        if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
-            cfw_blank_margins(panel);
-        }
-        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-        cfw_flush(panel, &all);
-        in->push_ticks = CFW_PUSH_TICKS;
+        cfw_panel_up(panel);
     } else if (!on && powered) {
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_SUSPEND)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
@@ -2734,11 +2761,7 @@ int cfw_work_mode_tick(void)
     if (in->push_ticks) {
         in->push_ticks--;
         if (in->push_ticks == CFW_PUSH_TICKS / 2 || in->push_ticks == 0) {
-            uint8_t *panel = cfw_panel();
-            if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
-                cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-                cfw_flush(panel, &all);
-            }
+            cfw_repush(cfw_panel());
         }
     }
     return 0;
@@ -2851,9 +2874,7 @@ static void cfw_view_cmd(const uint8_t *p, uint32_t n)
             /* The rows the canvas just left keep whatever was pushed there
              * (and a connecting host inherits the stock boot screens), so
              * blank everything outside the new canvas and push the frame. */
-            cfw_blank_margins(panel);
-            cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-            status = cfw_flush(panel, &all);
+            status = cfw_repush(panel);
         }
     }
     int col = *(int *)(panel + FW_PANEL_COL_OFFSET), row = *(int *)(panel + FW_PANEL_ROW_OFFSET);

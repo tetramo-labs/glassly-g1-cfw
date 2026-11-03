@@ -104,6 +104,12 @@ visible there. Under the CFW with the auto panel enabled the stock suspend
 is refused; with it disabled, `mode` 0 rebooted a temple on hardware, so
 prefer 3 or 4 to switch the panel off.
 
+From G1CFW/44 the modes that bring the panel up (1, 2, 5 and 7) do what the
+wear switch does after a power-up: blank the 280 panel rows outside the
+canvas (the panel memory powers up lit and the stock clear is stubbed), push
+the whole frame, and repeat both 600 ms and 1.2 s later. The reply comes
+after the first blank, about 0.3 s later than before.
+
 ## `06` TEXT: `[font][flags][x0:u16][y0:u16][x1:u16][y1:u16][max_lines][utf8...]`
 
 Draws left-aligned text with the stock font engine (`gui_utf_draw`) into the

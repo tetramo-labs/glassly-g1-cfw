@@ -1135,3 +1135,33 @@ command using the G1 panel path. Recover its addresses from the exact target
 binary, establish RAM/flash budgets, and exercise the handler under host tests
 before adding an injected code hook. G2's Apollo/FreeRTOS addresses, 4bpp shadow,
 and private SID framing cannot simply be used on G1's nRF5340/Zephyr image.
+
+### G1CFW/44: lit strips at the canvas edges (2026-11-02)
+
+Worn with Glassly connected, both lenses showed fully lit bars about 5 rows
+tall above and below the canvas and 2-3 columns wide on its right edge.
+Two causes, both in how the CFW talks to the panel.
+
+The rows: the panel memory powers up lit, and since /36 only the CFW blanks
+the 280 rows outside the canvas. It did so once, right after the wear
+switch's power-on, while the frame push after it is repeated at 600 ms and
+1.2 s because the panel may not take the first writes; and PANEL's power-on
+modes, which Glassly's silent-mode exit uses (5, falling back to 2), never
+blanked at all. The visible window reaches a few rows past the canvas, so
+those rows show. G1CFW/44 routes every power-up (wear switch and PANEL
+1, 2, 5, 7) through `cfw_panel_up`: blank, push the frame, and repeat both
+on the two later ticks.
+
+The columns: the stock row push (`0x4a22c`) builds its 5-byte SPI header
+(`02`, three address bytes, `ff`) in the 5 frame bytes before the row it
+sends, which for x0 = 0 are columns 630-639 of the row above, and puts them
+back after the per-row unlock. The CFW pushes from three threads (the BLE
+command worker, the display-thread animation tick and the 200 ms work-mode
+tick), so a push of the row above could send another push's header, and
+two overlapping pushes could save one header and restore it into the frame
+for good: columns 638-639 then stay at level 15. G1CFW/44 holds the stock
+LCD mutex (`0x2000a1fc`, through the lock helpers at `0x4a664`/`0x4a674`;
+Zephyr mutexes are recursive) around each whole CFW push, the depth-shift
+move and the margin blank included. The host test checks that every push
+runs under the lock. Blob 23,928 bytes, 68 left.
+

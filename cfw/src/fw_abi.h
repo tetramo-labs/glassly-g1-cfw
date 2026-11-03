@@ -68,6 +68,21 @@ typedef int (*fw_reflash_fn)(int col_off, int row_off, int x0, int y0, int x1, i
 #define FW_REFLASH_FB ((fw_reflash_fn)0x0004a22d)
 #endif
 
+/* 0x4a664 / 0x4a674: lock (timeout in r0:r1) and unlock the LCD mutex at
+ * 0x2000a1fc, the one 0x4a22c takes around each row's SPI transfer. 0x4a22c
+ * builds its 5-byte header in the 5 frame bytes before the row it sends (for
+ * x0 = 0 the tail of the row above; the last header byte is 0xff) and puts
+ * them back only after the unlock, so a push from another thread can send,
+ * or save and later restore, that header: columns 630-639 of the row above
+ * then show it, 638-639 fully lit. Zephyr mutexes are recursive, so the CFW
+ * holds this one around each whole push. */
+typedef int (*fw_lcd_lock_fn)(int64_t timeout);
+typedef int (*fw_lcd_unlock_fn)(void);
+#ifndef FW_LCD_LOCK
+#define FW_LCD_LOCK ((fw_lcd_lock_fn)0x0004a665)
+#define FW_LCD_UNLOCK ((fw_lcd_unlock_fn)0x0004a675)
+#endif
+
 /* Stock BLE receive path copies at most this many bytes per packet. */
 #define FW_MAX_PACKET 256
 

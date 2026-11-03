@@ -16,6 +16,11 @@ static int host_reflash(int col, int row, int x0, int y0, int x1, int y1);
 static uint32_t host_wear_word;
 #define FW_WEAR_WORD() host_wear_word
 #define FW_REFLASH_FB host_reflash
+static int host_lcd_depth, host_unlocked_pushes;   /* every push must hold the LCD mutex */
+static int host_lcd_lock(int64_t timeout) { (void)timeout; host_lcd_depth++; return 0; }
+static int host_lcd_unlock(void) { host_lcd_depth--; return 0; }
+#define FW_LCD_LOCK host_lcd_lock
+#define FW_LCD_UNLOCK host_lcd_unlock
 #define FW_SEND_OF(ctx) host_send
 #define FW_SYSTEM_SUSPEND host_suspend
 #define FW_SYSTEM_RESUME host_resume
@@ -105,6 +110,7 @@ static int margin_rows, margin_dirty, margin_max_row;   /* single-row pushes of 
 static int host_reflash(int col, int row, int x0, int y0, int x1, int y1)
 {
     reflash_calls++;
+    if (host_lcd_depth <= 0) host_unlocked_pushes++;
     int r[6] = { col, row, x0, y0, x1, y1 };
     memcpy(last_rect, r, sizeof r);
     if (host_frame) memcpy(pushed_row, host_frame, sizeof pushed_row);
@@ -357,7 +363,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/43", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/44", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -418,17 +424,24 @@ int main(int argc, char **argv)
     CHECK(send_packet(fill, sizeof fill) == 0 && last_reply[2] == CFW_PANEL_OFF && frame[20 * 320 + 5] == 0xCC);
 
     /* Panel power: suspend then resume through the stubbed stock entry points. */
+    /* The modes that bring the panel up blank the 280 rows outside the
+     * canvas (the panel memory powers up lit) and push the frame. */
     uint8_t panel_off_cmd[] = { 0xF0, 0x05, 0x00 };
+    margin_rows = 0;
     CHECK(send_packet(panel_off_cmd, sizeof panel_off_cmd) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 0);
-    CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_PANEL_OFF);
+    CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_PANEL_OFF && margin_rows == 0);
     uint8_t panel_on_cmd[] = { 0xF0, 0x05, 0x01 };
+    reflash_calls = 0;
     CHECK(send_packet(panel_on_cmd, sizeof panel_on_cmd) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1);
+    CHECK(margin_rows == 280 && reflash_calls == 281 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_OK);
     uint8_t panel_force_off[] = { 0xF0, 0x05, 0x03 };
     CHECK(send_packet(panel_force_off, sizeof panel_force_off) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 0 && panel_cb_calls == 1);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_PANEL_OFF);
+    CHECK(margin_rows == 280);
     uint8_t panel_force_on[] = { 0xF0, 0x05, 0x02 };
     CHECK(send_packet(panel_force_on, sizeof panel_force_on) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1 && panel_cb_calls == 2);
+    CHECK(margin_rows == 560);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_OK);
     uint8_t panel_bad[] = { 0xF0, 0x05, 0x09 };
     CHECK(send_packet(panel_bad, sizeof panel_bad) == 0 && last_reply[2] == CFW_BAD_COMMAND);
@@ -1317,6 +1330,7 @@ int main(int argc, char **argv)
     CHECK((uint8_t *)cfw_mic_state() + sizeof(cfw_mic) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
 
     guards_intact();
+    CHECK(host_unlocked_pushes == 0 && host_lcd_depth == 0);
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);
     return failures != 0;
 }
