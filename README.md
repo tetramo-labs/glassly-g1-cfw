@@ -2,9 +2,9 @@
 
 An attempt to recreate the FW for ER G1 glasses. This project uses the NRF DFu as a base to start getting the code to compile because the glasses are known to update with that method.
 
-## Minimal stock-based CFW
+## Glassly G1 CFW
 
-A signed diagnostic-marker MVP and G1-specific BLE tooling are now under active development. See [the build, evidence, and hardware workflow](docs/G1_CFW_MVP.md). **Offline verified; not flashed or hardware-tested.** The development-kit build below is not a replacement firmware for production glasses.
+The current build is **G1CFW/46 on stock 1.6.3**, with display rendering, animation, input, IMU and microphone control. Run `./build_cfw.sh --stock /path/to/even-g1-1.6.3.zip`; artifacts are written to `build/g1-1.6.3-cfw/`. See the [1.6.3 port and validation](docs/G1_CFW_163_PORT.md), [protocol](docs/G1_CFW_PROTOCOL.md), and [historical hardware workflow](docs/G1_CFW_MVP.md). **The 1.6.3 port is offline verified and has not been hardware-tested.** The development-kit build below is not a replacement firmware for production glasses.
 
 ## Progress
 

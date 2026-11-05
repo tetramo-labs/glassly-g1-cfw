@@ -1,18 +1,18 @@
 /*
- * G1CFW/2: injected handler for the private 0xF0 command on Even G1 1.5.60.
+ * G1CFW/46: injected handler for the private 0xF0 command on Even G1 1.6.3.
  *
  * Compiled by tools/build_blob.py into a position-independent blob that is
  * appended to the stock application image. The stock BLE receive entry calls
  * spec_ble_command_hook(data, len) and dispatches the packet further only when
  * the hook returns non-zero; the profile redirects that call here. Packets that
  * are not ours are passed through unchanged. Stock entry points are called via
- * absolute addresses verified against the exact 1.5.60 binary (see fw_abi.h).
+ * absolute addresses verified against the exact 1.6.3 binary (see fw_abi.h).
  */
 #include <stdint.h>
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 45u
+#define CFW_PROTOCOL 46u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -2813,7 +2813,7 @@ __attribute__((naked)) void cfw_work_mode_entry(void)
 __attribute__((naked)) void cfw_work_mode_tick_entry(void)
 {
     __asm__ volatile(
-        "push.w {r4, r5, r6, r7, r8, r9, r10, lr}\n\t"
+        "push.w {r4, r5, r6, r7, r8, lr}\n\t"
         "push {r0, r1, r2, r3}\n\t"
         "bl cfw_work_mode_tick\n\t"
         "pop {r0, r1, r2, r3}\n\t"

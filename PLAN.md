@@ -1,6 +1,11 @@
 # G1 custom firmware plan
 
-Updated: 2026-10-30
+Updated: 2026-11-05
+
+Current build: **G1CFW/46, stock 1.6.3**. The ABI and memory port is complete
+and passes offline tests; it has not been hardware-tested. See
+[port evidence and reproduction](docs/G1_CFW_163_PORT.md). Earlier sessions
+below refer to 1.5.60 unless explicitly stated otherwise.
 
 ## Goal and current scope
 
@@ -37,26 +42,17 @@ port of the G2 graphics runtime or its features.
 ## Reproduce the current build
 
 ```sh
-cd ~/dev/glassly-g1-cfw
-./build_cfw.sh
-G1_STOCK_ZIP=build/g1-mvp/stock-firmware.zip .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python g1flash.py plan --firmware build/g1-mvp/app_update.bin
-.venv/bin/python g1flash.py plan --firmware build/g1-mvp/stock-app_update.bin
+./build_cfw.sh --stock /path/to/even-g1-1.6.3.zip
+G1_STOCK_163_ZIP=build/g1-1.6.3-cfw/stock-firmware.zip \
+  G1_STOCK_ZIP=build/g1-mvp/stock-firmware.zip \
+  .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python g1flash.py plan --firmware build/g1-1.6.3-cfw/app_update.bin
+.venv/bin/python g1flash.py plan --firmware build/g1-1.6.3-cfw/stock-app_update.bin
 ```
 
-Artifacts under `build/g1-mvp/`:
-
-- `app_update.bin`: signed marker CFW, 976,509 bytes.
-- `g1-cfw-marker.zip`: application-only update package.
-- `stock-app_update.bin`: exact stock application for restore.
-- `stock-firmware.zip`: original vendor package.
-- `flash-plans.json` and `build-report.json`: identities and validation results.
-
-Expected CFW file SHA-256:
-`8719c710f78f9c4967f83a47e4617f9f9b3b10b69da0100c53a55616737f3177`.
-
-The signed-region hash used by SMP differs from the whole-file hash. The tools
-validate both; use their generated plans rather than substituting one for the other.
+Artifacts are under `build/g1-1.6.3-cfw/`: the 970,085-byte signed application,
+application-only ZIP, exact stock application/archive, and build/flash reports.
+The pinned profile records both the whole-file and MCUboot signed-region hashes.
 
 ## Done: validated on one temple, then the pair (2026-10-28)
 

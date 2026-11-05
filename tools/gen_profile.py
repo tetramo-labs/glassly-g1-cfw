@@ -20,97 +20,47 @@ from tools.build_blob import CFLAGS, CLANG, compile_blob, thumb_branch  # noqa: 
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import padding  # noqa: E402
 
-STOCK_SHA = '40f5839def1c00da3e0ffea9274dc0e04f249596d31787bd0c497be363cf6f8f'
+TARGET_PATH = ROOT / 'cfw/targets/g1-1.6.3.json'
 KEY_SHA = '1fc912d30251b821f251e127d4daf7ba9338dd5c04e5af100abfb5b7c7d4c022'
-SLOT_BASE = 0xc000
-SLOT_END = 0xfc000
-TRAILER_SECTOR = 0x1000
-MARKER_OFFSET = 0x95cf9
+SLOT_BASE, SLOT_END, TRAILER_SECTOR = 0xc000, 0xfc000, 0x1000
 MARKER_OLD = b'net build time:'
-# 1.5.60 BLE receive entry (1.6.3: FUN_00023d38): `bl spec_ble_command_hook`.
-HOOK_SITE = 0x2338e
-HOOK_OLD = bytes.fromhex('ebf7cbfd')
-# Stock code the CFW replaces. DashBoard_Reflash (0x399e0..0x3d7a4) is only
-# entered at its start (from ui_DashBoard_task); a 4-byte stub there returns 0
-# and the rest of the body becomes the injected blob (tools/g1carve.py). From
-# G1CFW/38 the region runs on through the dashboard UI task, the quick-note
-# task and the mic start helper only they use (0x3d7a4..0x3e7a8); G1CFW/39
-# through the even-ai task's helper, ui_even_ai_task and the screen helper
-# at 0x3f588 (..0x3f7a0). Every "pointer" tools/g1carve.py reports into
-# those tasks is an instruction word that happens to look like a Thumb
-# address (mvn r0,#3 = 0x0003f06f, orn r0,r1,r3 = 0x0003ea61, ...), so the
-# only real entries are the seven `bl` sites below; each becomes
-# `movs r0, #0; nop` and the whole range is one blob.
-CARVES = {
-    'dashboard': {'stub': 0x399e0, 'region': (0x399e4, 0x3f7a0), 'name': 'DashBoard_Reflash..ui_even_ai_task',
-                  'callers': [
-                      (0x4580e, 0x3d7a4, 'ui_raster_height_task -> dashboard helper'),
-                      (0x457be, 0x3d904, 'ui_raster_height_task -> ui_DashBoard_task'),
-                      (0x45834, 0x3d904, 'ui_raster_height_task -> ui_DashBoard_task'),
-                      (0x4bc88, 0x3d904, 'ui_refalsh_warp -> ui_DashBoard_task'),
-                      (0x4bcc0, 0x3e288, 'ui_refalsh_warp -> ui_QuickNote_task'),
-                      (0x4bd08, 0x3e970, 'ui_refalsh_warp -> ui_even_ai_task'),
-                      (0x4bc0a, 0x3f588, 'ui_refalsh_warp -> even-ai screen helper'),
-                  ]},
-}
-STUB = bytes.fromhex('00207047')  # movs r0, #0; bx lr
-CALL_STUB = bytes.fromhex('002000bf')  # movs r0, #0; nop (in place of a bl)
+STUB = bytes.fromhex('00207047')       # movs r0, #0; bx lr (also replaces tail calls)
+CALL_STUB = bytes.fromhex('002000bf')  # movs r0, #0; nop (replaces BL calls)
+BW_TEMPLATE = bytes.fromhex('00f00090')
 
 
-def bl_target(code, addr):
-    """Target of the Thumb-2 `bl` encoded in the 4 bytes `code` at `addr`."""
+def branch_target(code, addr):
+    """Decode a Thumb-2 BL or B.W; callers must preserve tail-call semantics."""
     hw1, hw2 = struct.unpack('<HH', code)
-    assert (hw1 >> 11) == 0x1e and (hw2 >> 14) == 0x3 and (hw2 >> 12) & 1, f'not a bl at {addr:#x}'
+    if (hw1 >> 11) != 0x1e or (hw2 & 0xd000) not in (0x9000, 0xd000):
+        raise ValueError(f'not BL/B.W at {addr:#x}')
     s, j1, j2 = (hw1 >> 10) & 1, (hw2 >> 13) & 1, (hw2 >> 11) & 1
     i1, i2 = ~(j1 ^ s) & 1, ~(j2 ^ s) & 1
     imm = (s << 24) | (i1 << 23) | (i2 << 22) | ((hw1 & 0x3ff) << 12) | ((hw2 & 0x7ff) << 1)
     if s:
         imm -= 1 << 25
     return addr + 4 + imm
-# Stock functions silenced so the stock display path never touches the frame
-# buffer or panel again (g2flash's framebuffer lease, by removal). Each is only
-# entered at its start (tools/g1carve.py) and its return value is unused.
-STUBS = {
-    'display': [
-        (0x80d58, 'whole-frame clear and push used on screen exit'),
-        (0x80d12, 'panel_init (every power-up) and screen exit: whole-frame clear and three-part push'),
-        (0x80b2e, 'panel clear callback (stock screen switches): whole-frame clear'),
-    ],
-}
-# Stock entry points redirected into blob functions with a B.W (same 4 bytes
-# as a stub). The blob function receives the stock arguments unchanged.
-HOOKS = {
-    'display': [
-        (0x4bee0, 'cfw_display_tick', 'display_reflash_handler: display-thread tick for CFW animation'),
-    ],    'input': [
-        (0x2ba48, 'cfw_touch_event', 'touch_key_thread signal helper: every gesture code passes through the CFW'),
-        (0x28f38, 'cfw_stock_event', 'stock event poster: head, wear, case and key events pass through the CFW'),
-        (0x16ee0, 'cfw_work_mode_entry', 'change_work_mode entry detour: every work-mode change passes through the CFW (panel follows wear without a central)'),
-        (0x28fa4, 'cfw_work_mode_tick_entry', 'check_work_mode entry detour: panel power reconciled with the work mode every 200 ms'),
-        (0x2d78c, 'cfw_suspend_entry', 'global_system_suspend entry detour: the stock display suspend is refused while the CFW manages the panel'),
-    ],
-}
-BW_TEMPLATE = bytes.fromhex('00f0009000')[:4]  # b.w placeholder; thumb_branch keeps the B.W opcode bits
-# Raw instruction patches (address, old bytes, new bytes, why).
-RAW = {
-    # Open link policy: let any central connect and stay connected while the
-    # glasses are worn. Stock accepts only the bonded phone's address and drops
-    # an unbonded central 30 s after connecting (tools/g1dis.py evidence in
-    # docs/G1_CFW_MVP.md). Both are stock behaviour the CFW does not need.
-    'link': [
-        (0x18c8e, 'c0b1', '18e0', 'ancs_connected: cbz -> b, accept any central address'),
-        (0x2c4be, '2df0cbfc', '00bf00bf', 'low_speed_peripheral_dispatch_thread: no 30 s unbonded disconnect'),
-    ],
-}
+
+
+def validate_target(stock, target):
+    if sha256(stock) != target['app_sha256']:
+        raise ValueError('Pinned stock application mismatch')
+    for guard in target['guards']:
+        off = guard['address'] - SLOT_BASE
+        expected = bytes.fromhex(guard['expected'])
+        if stock[off:off + len(expected)] != expected:
+            raise ValueError(f"Stock ABI guard failed: {guard['name']} at {guard['address']:#x}")
 
 
 def main():
+    target = json.loads(TARGET_PATH.read_text())
+    CARVES, STUBS, HOOKS, RAW = (target[k] for k in ('carves', 'stubs', 'hooks', 'raw'))
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stock', type=Path, default=ROOT / 'build/g1-mvp/stock-firmware.zip')
+    parser.add_argument('--stock', type=Path, default=ROOT / 'build/even-g1-1.6.3.zip')
     parser.add_argument('--key', type=Path, default=ROOT / 'build/keys/root-rsa-2048.pem')
     parser.add_argument('--source', type=Path, default=ROOT / 'cfw/src/g1cfw.c')
-    parser.add_argument('--protocol', type=int, default=2)
-    parser.add_argument('--out', type=Path, default=ROOT / 'profiles/g1-1.5.6-cfw.json')
+    parser.add_argument('--protocol', type=int, default=46)
+    parser.add_argument('--out', type=Path, default=ROOT / 'profiles/g1-1.6.3-cfw.json')
     parser.add_argument('--upgrade-from', type=Path, action='append', default=[],
                         help='Older profile whose installed image may be upgraded in place')
     parser.add_argument('--carve', choices=sorted(CARVES), help='Place the blob over this stock function instead of appending')
@@ -118,14 +68,21 @@ def main():
                         help='Also stub this group of stock functions (return 0 immediately)')
     args = parser.parse_args()
     package, pem = args.stock.read_bytes(), args.key.read_bytes()
-    if sha256(package) != STOCK_SHA or sha256(pem) != KEY_SHA:
+    if sha256(package) != target['package_sha256'] or sha256(pem) != KEY_SHA:
         raise SystemExit('Pinned stock ZIP or MCUboot development key mismatch')
     with zipfile.ZipFile(args.stock) as archive:
         stock = archive.read('app_update.bin')
         net = archive.read('net_core_app_update.bin')
+    validate_target(stock, target)
+    if sha256(net) != target['network_sha256']:
+        raise SystemExit('Pinned network image mismatch')
     public = (ROOT / 'profiles/mcuboot-development-public.pem').read_bytes()
     original = inspect_image(stock, public)
 
+    import re
+    revision = re.search(r'#define CFW_PROTOCOL (\d+)u', args.source.read_text())
+    if not revision or int(revision[1]) != args.protocol:
+        raise SystemExit('Protocol marker must match the source CFW_PROTOCOL')
     blob, funcs, rodata_len = compile_blob(args.source, ROOT / 'build/obj')
     entry = next(f for f in funcs if f['name'] == 'cfw_rx')
     budget = SLOT_END - TRAILER_SECTOR - SLOT_BASE
@@ -133,6 +90,13 @@ def main():
     if args.carve:
         carve = CARVES[args.carve]
         lo, hi = carve['region']
+        helpers = []
+        for helper in carve.get('relocated_helpers', []):
+            data = bytes.fromhex(helper['bytes'])
+            off = helper['address'] - SLOT_BASE
+            assert stock[off:off + len(data)] == data
+            helpers.append((helper, lo + len(blob)))
+            blob += data
         if len(blob) > hi - lo:
             raise SystemExit(f'Injected blob ({len(blob)} bytes) exceeds the {carve["name"]} region ({hi - lo} bytes)')
         append = b''
@@ -142,11 +106,24 @@ def main():
                         'new': STUB.hex(), 'description': f'{carve["name"]}: stub entry (return 0); body reused for CFW code'})
         patches.append({'offset': region_file, 'old': stock[region_file:region_file + len(blob)].hex(), 'new': blob.hex(),
                         'description': f'CFW blob over {carve["name"]} body at {lo:#x}'})
-        for site, target, why in carve.get('callers', []):
+        for caller in carve.get('callers', []):
+            site, callee = caller['address'], caller['target']
             off = site - SLOT_BASE
-            assert bl_target(stock[off:off + 4], site) == target, f'caller {site:#x} does not bl {target:#x}'
-            patches.append({'offset': off, 'old': stock[off:off + 4].hex(), 'new': CALL_STUB.hex(),
-                            'description': f'caller {site:#x}: {why} ({target:#x}) returns 0 without the call'})
+            code = stock[off:off + 4]
+            assert code.hex() == caller['expected'] and branch_target(code, site) == callee
+            replacement = CALL_STUB if struct.unpack('<HH', code)[1] & 0x4000 else STUB
+            patches.append({'offset': off, 'old': code.hex(), 'new': replacement.hex(),
+                            'description': f"caller {site:#x}: {caller['description']} returns 0"})
+        for helper, destination in helpers:
+            for site in helper['callers']:
+                off = site - SLOT_BASE
+                code = stock[off:off + 4]
+                assert branch_target(code, site) == helper['address']
+                branch = bytearray(code)
+                thumb_branch(branch, 0, destination - site)
+                patches.append({'offset': off, 'old': code.hex(), 'new': branch.hex(),
+                                'description': f'relocate quick-note reset helper to {destination:#x}'})
+
     else:
         place = (original.signed_end + 3) & ~3
         append = bytes(place - original.signed_end) + blob
@@ -171,6 +148,8 @@ def main():
             patches.append({'offset': off, 'old': stock[off:off + 4].hex(), 'new': site.hex(),
                             'description': f'hook {addr:#x}: b.w {fn_name} at {blob_addr + fn["offset"]:#x}; {why}'})
 
+    MARKER_OFFSET = target['marker_offset']
+    HOOK_SITE, HOOK_OLD = target['hook_site'], bytes.fromhex(target['hook_old'])
     marker_new = (f'G1CFW/{args.protocol} net bt:' if args.protocol < 10 else f'G1CFW/{args.protocol} netbt:').encode()
     assert len(marker_new) == len(MARKER_OLD) and stock.count(MARKER_OLD) == 1
     assert stock[MARKER_OFFSET:MARKER_OFFSET + len(MARKER_OLD)] == MARKER_OLD
@@ -195,12 +174,18 @@ def main():
     digest = hashlib.sha256(body).digest()
     key = serialization.load_pem_private_key(pem, password=None)
     signature = key.sign(bytes(body), padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32), hashes.SHA256())
-    upgrade_from = [json.loads(p.read_text())['output_image_hash'] for p in args.upgrade_from]
+    upgrade_from = set()
+    for path in args.upgrade_from:
+        previous = json.loads(path.read_text())
+        upgrade_from.update([previous['output_image_hash'], previous['stock_image_hash']])
+        upgrade_from.update(previous.get('upgrade_from_image_hashes', []))
+    upgrade_from = sorted(upgrade_from)
     clang_version = subprocess.run([CLANG, '--version'], capture_output=True, text=True, check=True).stdout.splitlines()[0]
     profile = {
-        'name': f'G1CFW/{args.protocol} injected 0xF0 handler; stock CDN package labelled 1.5.6',
-        'stock_url': 'https://cdn.evenreal.co/firmware/3adb8ebbd35c2343409d6d0c9fe6cbb9.zip',
-        'package_sha256': STOCK_SHA, 'app_sha256': sha256(stock), 'network_sha256': sha256(net),
+        'name': f'G1CFW/{args.protocol} injected 0xF0 handler; stock 1.6.3',
+        'stock_url': target['stock_url'], 'stock_cache': target['stock_cache'],
+        'base_version': target['version'], 'base_build': target['build'],
+        'package_sha256': target['package_sha256'], 'app_sha256': sha256(stock), 'network_sha256': sha256(net),
         'stock_image_hash': original.digest.hex(), 'output_sha256': None, 'output_image_hash': digest.hex(),
         'key_hash': original.key_hash.hex(), 'upgrade_from_image_hashes': upgrade_from,
         'max_image_bytes': budget, 'patches': patches, 'append': append.hex(), 'signature': signature.hex(),
@@ -208,7 +193,9 @@ def main():
                  'address': blob_addr, 'entry': entry_addr, 'bytes': len(blob), 'rodata_bytes': rodata_len,
                  'placement': f'carve:{args.carve}' if args.carve else 'append', 'stubs': args.stub,
                  'region_bytes': (CARVES[args.carve]['region'][1] - CARVES[args.carve]['region'][0]) if args.carve else budget - (len(stock) - len(blob)),
-                 'functions': funcs, 'compiler': clang_version, 'cflags': CFLAGS},
+                 'functions': funcs, 'compiler': clang_version, 'cflags': CFLAGS,
+                 'abi_sha256': sha256((ROOT / 'cfw/src/fw_abi.h').read_bytes()),
+                 'target_sha256': sha256(TARGET_PATH.read_bytes())},
     }
     tlvs = b''.join(struct.pack('<BBH', kind, 0, len(v)) + v for kind, v in
                     [(k, {0x01: original.key_hash, 0x10: digest, 0x20: signature}[k])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the G1 marker MVP by replaying a pinned patch set. Never flashes."""
+"""Build stock-based G1 CFW by replaying a pinned patch set. Never flashes."""
 import argparse
 import io
 import json
@@ -11,6 +11,7 @@ from cfw.image import FirmwareError, apply_profile, inspect_image, sha256
 
 ROOT = Path(__file__).resolve().parent
 PROFILES = sorted((ROOT / 'profiles').glob('g1-*.json'))
+DEFAULT_PROFILE = ROOT / 'profiles/g1-1.6.3-cfw.json'
 PUBLIC_KEY = ROOT / 'profiles/mcuboot-development-public.pem'
 
 
@@ -51,33 +52,41 @@ def build(package, profile, key):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stock', type=Path, help='Use an already downloaded stock ZIP')
-    parser.add_argument('--profile', type=Path, action='append', help='Profile JSON (default: every profiles/g1-*.json)')
+    parser.add_argument('--profile', type=Path, action='append', help='Profile JSON (default: current 1.6.3 CFW)')
     parser.add_argument('--out', type=Path, default=ROOT / 'build')
     args = parser.parse_args()
-    paths = args.profile or PROFILES
+    paths = args.profile or [DEFAULT_PROFILE]
     profiles = [json.loads(path.read_text()) for path in paths]
-    cache = args.out / 'g1-mvp/stock-firmware.zip'
-    if args.stock:
-        package = args.stock.read_bytes()
-    elif cache.exists():
-        package = cache.read_bytes()
-    else:
-        with urllib.request.urlopen(profiles[0]['stock_url'], timeout=60) as response:
-            package = response.read(2 * 1024 * 1024 + 1)
-    with zipfile.ZipFile(io.BytesIO(package)) as source:
-        stock = source.read('app_update.bin')
     from cfw.plan import plan_image
     reports = {}
     for path, profile in zip(paths, profiles):
+        # Each base has its own cache. Never apply a 1.6.3 profile to the old
+        # marker cache, or quietly reuse one archive for a mixed-base build.
+        cache = ROOT / profile.get('stock_cache', 'build/g1-mvp/stock-firmware.zip')
+        replay_cache = args.out / path.stem / 'stock-firmware.zip'
+        if args.stock:
+            package = args.stock.read_bytes()
+        elif cache.exists():
+            package = cache.read_bytes()
+        elif replay_cache.exists():
+            package = replay_cache.read_bytes()
+        elif profile.get('stock_url'):
+            with urllib.request.urlopen(profile['stock_url'], timeout=60) as response:
+                package = response.read(2 * 1024 * 1024 + 1)
+        else:
+            raise FirmwareError(f"Supply --stock with the pinned {profile.get('base_version', '')} ZIP "
+                                f"(SHA-256 {profile['package_sha256']}); no verified download URL is recorded")
         # The marker profile keeps its historical output directory.
         out = args.out / ('g1-mvp' if path.stem.endswith('marker') else path.stem)
         image, archive = build(package, profile, PUBLIC_KEY.read_bytes())
+        with zipfile.ZipFile(io.BytesIO(package)) as source:
+            stock = source.read('app_update.bin')
         out.mkdir(parents=True, exist_ok=True)
         (out / 'app_update.bin').write_bytes(image)
         (out / 'g1-cfw.zip').write_bytes(archive)
         (out / 'stock-app_update.bin').write_bytes(stock)
         (out / 'stock-firmware.zip').write_bytes(package)
-        plans = {name: plan_image(data, profiles, PUBLIC_KEY.read_bytes()).report()
+        plans = {name: plan_image(data, load_profiles() + profiles, PUBLIC_KEY.read_bytes()).report()
                  for name, data in [('install', image), ('restore', stock)]}
         (out / 'flash-plans.json').write_text(json.dumps(plans, indent=2) + '\n')
         report = {
@@ -86,7 +95,7 @@ def main():
             'image_hash': profile['output_image_hash'], 'zip_sha256': sha256(archive),
             'stock_zip_sha256': sha256(package), 'network_core_included': False,
             'stock_application_sha256': sha256(stock), 'image_bytes': len(image),
-            'output_dir': str(out.relative_to(ROOT)),
+            'output_dir': str(out),
         }
         (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
         reports[path.stem] = report

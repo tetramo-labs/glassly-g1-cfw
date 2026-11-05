@@ -1,0 +1,392 @@
+{
+  "schema": 1,
+  "version": "1.6.3",
+  "build": "2025-06-28 17:28:42",
+  "stock_url": null,
+  "stock_cache": "build/even-g1-1.6.3.zip",
+  "package_sha256": "2bcff7616c3508d41092b7cd3c93640d8bc29a57c76579a930b1220aee16d412",
+  "app_sha256": "4b366586d895abdd22c5b78cd433b40f64237cbb0b5a6a8f93a3166964cf52aa",
+  "network_sha256": "2fdd2862ba5c976ada4b3604c61dbe29cf6ac7d4c10caffebacdb66cd9028b6e",
+  "marker_offset": 614853,
+  "hook_site": 146766,
+  "hook_old": "ebf7ebf8",
+  "carves": {
+    "dashboard": {
+      "stub": 232900,
+      "region": [
+        232904,
+        257760
+      ],
+      "name": "DashBoard_Reflash..ui_even_ai_task",
+      "callers": [
+        {
+          "address": 283250,
+          "target": 248916,
+          "expected": "f7f7effc",
+          "description": "dashboard helper"
+        },
+        {
+          "address": 283170,
+          "target": 249268,
+          "expected": "f7f7c7fd",
+          "description": "dashboard UI"
+        },
+        {
+          "address": 283300,
+          "target": 249268,
+          "expected": "f7f786fd",
+          "description": "dashboard UI"
+        },
+        {
+          "address": 311714,
+          "target": 249268,
+          "expected": "f0f707be",
+          "description": "dashboard dispatch tail call"
+        },
+        {
+          "address": 311724,
+          "target": 251840,
+          "expected": "f1f708bb",
+          "description": "quick-note dispatch tail call"
+        },
+        {
+          "address": 311744,
+          "target": 254676,
+          "expected": "f2f788b8",
+          "description": "AI dispatch tail call"
+        }
+      ],
+      "relocated_helpers": [
+        {
+          "address": 251828,
+          "bytes": "0022014b9a747047204b0020",
+          "callers": [
+            132252,
+            132340,
+            133504,
+            133580
+          ]
+        }
+      ]
+    }
+  },
+  "stubs": {
+    "display": [
+      [
+        527804,
+        "whole-frame clear and push on screen exit"
+      ],
+      [
+        527734,
+        "panel_init clear and three-part push"
+      ],
+      [
+        527250,
+        "panel clear callback"
+      ]
+    ]
+  },
+  "hooks": {
+    "display": [
+      [
+        311864,
+        "cfw_display_tick",
+        "display-thread animation tick"
+      ]
+    ],
+    "input": [
+      [
+        180856,
+        "cfw_touch_event",
+        "touch signal helper"
+      ],
+      [
+        169844,
+        "cfw_stock_event",
+        "stock event poster"
+      ],
+      [
+        92608,
+        "cfw_work_mode_entry",
+        "work-mode entry detour"
+      ],
+      [
+        169952,
+        "cfw_work_mode_tick_entry",
+        "200 ms work-mode check detour"
+      ],
+      [
+        186616,
+        "cfw_suspend_entry",
+        "system suspend detour"
+      ]
+    ]
+  },
+  "raw": {
+    "link": [
+      [
+        100258,
+        "c0b1",
+        "18e0",
+        "accept any central address"
+      ],
+      [
+        183544,
+        "2df00cf8",
+        "00bf00bf",
+        "disable 30 s unbonded disconnect"
+      ]
+    ]
+  },
+  "guards": [
+    {
+      "name": "FW_GET_CTX",
+      "address": 99104,
+      "expected": "014b1868704700bf"
+    },
+    {
+      "name": "FW_SPEC_BLE_COMMAND_HOOK",
+      "address": 61224,
+      "expected": "2de9f043adf2dc5d"
+    },
+    {
+      "name": "FW_GET_STATE",
+      "address": 92188,
+      "expected": "014b1868704700bf"
+    },
+    {
+      "name": "FW_REFLASH_FB",
+      "address": 306128,
+      "expected": "2de9f04f1e460023"
+    },
+    {
+      "name": "FW_LCD_LOCK",
+      "address": 307024,
+      "expected": "02460b4601482af0"
+    },
+    {
+      "name": "FW_LCD_UNLOCK",
+      "address": 307040,
+      "expected": "01482af04dbc00bf"
+    },
+    {
+      "name": "FW_SYSTEM_SUSPEND",
+      "address": 186616,
+      "expected": "38b590f8ea3f0446"
+    },
+    {
+      "name": "FW_SYSTEM_RESUME",
+      "address": 186740,
+      "expected": "38b590f8ea3f0446"
+    },
+    {
+      "name": "FW_JBD_PANEL_SUSPEND",
+      "address": 306856,
+      "expected": "07b50d4b1b68022b"
+    },
+    {
+      "name": "FW_JBD_PANEL_RESUME",
+      "address": 306928,
+      "expected": "38b5124d04462b68"
+    },
+    {
+      "name": "FW_PANEL_WRITE_BRIGHTNESS",
+      "address": 305200,
+      "expected": "13b51a4b04461b68"
+    },
+    {
+      "name": "FW_GUI_UTF_DRAW",
+      "address": 287464,
+      "expected": "2de9f04f0d460027"
+    },
+    {
+      "name": "FW_GUI_SET_ROWS",
+      "address": 283376,
+      "expected": "014b186000207047"
+    },
+    {
+      "name": "FW_GUI_MANUAL_FLUSH",
+      "address": 283688,
+      "expected": "054bd3e8ef1f21f0"
+    },
+    {
+      "name": "FW_MALLOC",
+      "address": 499732,
+      "expected": "024b0146186800f0"
+    },
+    {
+      "name": "FW_DISPLAY_POST",
+      "address": 528330,
+      "expected": "012307b50221adf8"
+    },
+    {
+      "name": "FW_K_MSLEEP",
+      "address": 524022,
+      "expected": "014640f2e73008b5"
+    },
+    {
+      "name": "FW_K_SEM_GIVE",
+      "address": 523978,
+      "expected": "f5f72dbe30b589b0"
+    },
+    {
+      "name": "FW_ENQUEUE_BT_DATA",
+      "address": 98284,
+      "expected": "30b5c3b004460d46"
+    },
+    {
+      "name": "change_work_mode prologue",
+      "address": 92608,
+      "expected": "70b5044641f28836"
+    },
+    {
+      "name": "check_work_mode prologue",
+      "address": 169952,
+      "expected": "2de9f04104460e46"
+    },
+    {
+      "name": "global_system_suspend prologue",
+      "address": 186616,
+      "expected": "38b590f8ea3f044613f0"
+    },
+    {
+      "name": "get panel context +0xb6c",
+      "address": 527284,
+      "expected": "08b595f731fe00f66c3008bd"
+    },
+    {
+      "name": "main semaphore +0x68",
+      "address": 94282,
+      "expected": "04f16808"
+    },
+    {
+      "name": "GlassesState pointer",
+      "address": 92196,
+      "expected": "dc6b0020"
+    },
+    {
+      "name": "LCD mutex",
+      "address": 307036,
+      "expected": "40aa0020"
+    },
+    {
+      "name": "touch semaphore",
+      "address": 180876,
+      "expected": "fc840020"
+    },
+    {
+      "name": "touch ready flag",
+      "address": 180872,
+      "expected": "589a0120"
+    },
+    {
+      "name": "touch event",
+      "address": 181620,
+      "expected": "f8840020"
+    },
+    {
+      "name": "event pending",
+      "address": 169948,
+      "expected": "51300020"
+    },
+    {
+      "name": "wear word",
+      "address": 170676,
+      "expected": "c86b0020"
+    },
+    {
+      "name": "IMU attitude",
+      "address": 209240,
+      "expected": "84840020"
+    },
+    {
+      "name": "microphone mode",
+      "address": 197716,
+      "expected": "52300020"
+    },
+    {
+      "name": "microphone flash routing",
+      "address": 251788,
+      "expected": "58850020"
+    },
+    {
+      "name": "stubs: whole-frame clear and push on screen exit",
+      "address": 527804,
+      "expected": "08b5fff7daff9720"
+    },
+    {
+      "name": "stubs: panel_init clear and three-part push",
+      "address": 527734,
+      "expected": "70b50546fff71bff"
+    },
+    {
+      "name": "stubs: panel clear callback",
+      "address": 527250,
+      "expected": "d0f850230021406a"
+    },
+    {
+      "name": "hooks: cfw_display_tick",
+      "address": 311864,
+      "expected": "2de9f3471e46654d"
+    },
+    {
+      "name": "hooks: cfw_touch_event",
+      "address": 180856,
+      "expected": "034b1b7813b10348"
+    },
+    {
+      "name": "hooks: cfw_stock_event",
+      "address": 169844,
+      "expected": "37b50446eef7d2fd"
+    },
+    {
+      "name": "hooks: cfw_work_mode_entry",
+      "address": 92608,
+      "expected": "70b5044641f28836"
+    },
+    {
+      "name": "hooks: cfw_work_mode_tick_entry",
+      "address": 169952,
+      "expected": "2de9f04104460e46"
+    },
+    {
+      "name": "hooks: cfw_suspend_entry",
+      "address": 186616,
+      "expected": "38b590f8ea3f0446"
+    },
+    {
+      "name": "quick-note reset call",
+      "address": 132252,
+      "expected": "1df08af9"
+    },
+    {
+      "name": "quick-note reset call",
+      "address": 132340,
+      "expected": "1df05ef9"
+    },
+    {
+      "name": "quick-note reset call",
+      "address": 133504,
+      "expected": "1cf018ff"
+    },
+    {
+      "name": "quick-note reset call",
+      "address": 133580,
+      "expected": "1cf0f2fe"
+    }
+  ],
+  "ram_regions": [
+    [
+      536968496,
+      5120
+    ],
+    [
+      536987472,
+      5104
+    ],
+    [
+      536953808,
+      5028
+    ]
+  ]
+}

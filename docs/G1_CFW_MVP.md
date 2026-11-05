@@ -1,6 +1,10 @@
 # G1 CFW MVP
 
-Status: **flashed and read back on hardware (see the session section below)**.
+Current build: **G1CFW/46 on stock 1.6.3**, offline verified; see the
+[1.6.3 port](G1_CFW_163_PORT.md). The new base has not been hardware-tested.
+
+The sessions below document the earlier 1.5.60 builds, which were flashed
+and read back on hardware.
 
 The first milestone is a stock-firmware patch that answers the existing Nordic
 UART `#t` diagnostic command with `G1CFW/1 net bt:` instead of `net build time:`.

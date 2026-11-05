@@ -1,7 +1,8 @@
 # G1CFW private protocol (command byte `0xF0`)
 
-Injected by `cfw/src/g1cfw.c` on Even G1 application 1.5.60. The stock BLE
-receive entry at `0x23378` calls `spec_ble_command_hook(data, len)` and only
+G1CFW/46 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
+revisions through 45 used 1.5.60. See the [port evidence](G1_CFW_163_PORT.md).
+The stock BLE receive hook call at `0x23d4e` calls `spec_ble_command_hook(data, len)` and only
 forwards a packet to the request dispatcher when that hook returns non-zero;
 the profile redirects the call to `cfw_rx`, which consumes `0xF0` packets and
 passes everything else through unchanged. Each temple handles its own packets,

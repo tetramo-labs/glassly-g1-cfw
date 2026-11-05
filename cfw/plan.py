@@ -41,7 +41,11 @@ def plan_image(data, profiles, public_pem):
     if stock_of:
         if parsed.digest.hex() != stock_of[0]['stock_image_hash']:
             raise FirmwareError('Image digest disagrees with profile')
-        sources = sorted({p['output_image_hash'] for p in stock_of})
+        # A new-base CFW explicitly accepting an older stock hash also keeps
+        # that stock image available as an OTA restore target after migration.
+        stock_hashes = {p['stock_image_hash'] for p in stock_of}
+        sources = sorted({p['output_image_hash'] for p in profiles
+                          if p in stock_of or stock_hashes.intersection(p.get('upgrade_from_image_hashes', []))})
         return FlashPlan('restore-stock', 'stock base of ' + '; '.join(p.get('name', 'cfw') for p in stock_of), digest,
                          tuple(bytes.fromhex(h) for h in sources), parsed.digest, len(data))
     raise FirmwareError('Image is neither a pinned CFW nor its exact stock application')

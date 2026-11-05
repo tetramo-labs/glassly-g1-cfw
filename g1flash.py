@@ -64,7 +64,9 @@ def verify_reply(reply, expected):
     result = diagnostic(reply)
     if result['cfw_marker'] != (expected == 'cfw'):
         raise FirmwareError(f'Expected {expected} diagnostic marker was not observed')
-    if result['build'] != '2025-03-21 11:38:43' or result['version'] != '1.5.60':
+    if (result['version'], result['build']) not in {
+        ('1.5.60', '2025-03-21 11:38:43'), ('1.6.3', '2025-06-28 17:28:42')
+    }:
         raise FirmwareError('Diagnostic build/version does not match the pinned base')
     return result
 
@@ -137,10 +139,14 @@ CFW_MIC_CONTROL = 0x40
 UNSOLICITED = {0x32, 0x34}   # INPUT_EVENT, IMU_SAMPLE: never a reply to a request
 STOCK_AUDIO_SID = 0xF1
 DEPTH_SHIFT = {1: 22, 2: 8, 3: 0, 4: -4, 5: -8, 6: -10, 7: -12, 8: -14, 9: -16}  # stock cal_panel_canvas_coord, non-master sign
-STATE_ADDR = 0x200566e8          # GlassesState (1.5.60; pointer literal at 0x16d44 -> 0x20006b9c)
-WEAR_DETECT_OFFSET = 0x109d      # wear-detection user setting byte (1.6.3 state+0x10d4); 0 forces the wear word to 0x46
-WEAR_WORD_ADDR = 0x20006b88      # radio-link wear word the 200 ms checker classifies: >= 0x33 worn, < 0x28 not worn
-IMU_ATTITUDE_ADDR = 0x20007c40  # three int32 words, hundredths of a degree (1.5.60; 1.6.3 DAT_20008484/88/8c)
+# Raw diagnostic reads must follow the base reported by PING. GlassesState is
+# allocated by stock firmware: resolve its pointer instead of assuming a heap address.
+STOCK_LAYOUTS = {
+    (1, 5, 60): {'state_ptr': 0x20006b9c, 'wear_offset': 0x109d,
+                 'wear_word': 0x20006b88, 'imu': 0x20007c40},
+    (1, 6, 3): {'state_ptr': 0x20006bdc, 'wear_offset': 0x10d4,
+                'wear_word': 0x20006bc8, 'imu': 0x20008484},
+}
 TOUCH_CODES = {1: 'single', 2: 'double', 3: 'triple', 4: 'long-start', 5: 'long-end', 6: 'long-timeout'}
 STOCK_EVENTS = {2: 'head-up', 3: 'head-down', 6: 'worn', 7: 'taken-off', 8: 'in-case-open', 9: 'charging',
                 10: 'battery', 0x0b: 'in-case-closed', 0x0e: 'case-charging', 0x0f: 'case-battery', 0x11: 'bind-finished'}
@@ -196,6 +202,30 @@ class CfwLink:
         if status != 0:
             raise FirmwareError(f'CFW command {sub:#x} failed: {CFW_STATUS.get(status, status)}')
         return body
+
+    async def stock_layout(self):
+        body = await self.check(CFW_PING)
+        marker, sep, version = body.partition(b'\0')
+        if not sep or not re.fullmatch(rb'G1CFW/\d+', marker) or len(version) != 3:
+            raise FirmwareError('Invalid CFW PING base identity')
+        layout = STOCK_LAYOUTS.get(tuple(version))
+        if layout is None:
+            raise FirmwareError(f'Unsupported CFW base for RAM diagnostics: {tuple(version)}')
+        return layout
+
+    async def wear_state(self):
+        layout = await self.stock_layout()
+        pointer = await self.check(CFW_PEEK, struct.pack('<IB', layout['state_ptr'], 4))
+        if len(pointer) != 4:
+            raise FirmwareError('Incomplete GlassesState pointer')
+        state = struct.unpack('<I', pointer)[0]
+        if state % 4 or not 0x20000000 <= state < 0x20080000 - layout['wear_offset']:
+            raise FirmwareError('Invalid GlassesState RAM pointer')
+        word = await self.check(CFW_PEEK, struct.pack('<IB', layout['wear_word'], 4))
+        detect = await self.check(CFW_PEEK, struct.pack('<IB', state + layout['wear_offset'], 1))
+        if len(word) != 4 or len(detect) != 1:
+            raise FirmwareError('Incomplete wear diagnostics')
+        return {'wear_word': struct.unpack('<I', word)[0], 'wear_detect': bool(detect[0])}
 
 
 def crc16(data):
@@ -532,10 +562,7 @@ async def run_cfw_command(client, args, checkpoint):
             if args.action == 'state':
                 result = input_state(await link.check(CFW_INPUT_STATE))
                 # The wear word and its setting live in stock RAM; read them alongside.
-                word = await link.check(CFW_PEEK, struct.pack('<IB', WEAR_WORD_ADDR, 4))
-                detect = await link.check(CFW_PEEK, struct.pack('<IB', STATE_ADDR + WEAR_DETECT_OFFSET, 1))
-                result['wear_word'] = struct.unpack('<I', word)[0]
-                result['wear_detect'] = bool(detect[0])
+                result.update(await link.wear_state())
             elif args.action == 'control':
                 flags = ((0x01 if args.notify else 0) | (0x02 if args.swallow else 0)
                          | (0x04 if args.notify_events else 0) | (0x08 if args.swallow_events else 0)
@@ -665,17 +692,18 @@ async def run_cfw_command(client, args, checkpoint):
         elif args.command == 'imu':
             # Attitude words kept by the IMU fusion thread on the master (right) temple,
             # in hundredths of a degree; the third is the pitch the head-up detector uses.
+            imu_addr = (await link.stock_layout())['imu']
             samples = []
             for i in range(args.samples):
                 if i:
                     await asyncio.sleep(args.interval)
-                body = await link.check(CFW_PEEK, struct.pack('<IB', IMU_ATTITUDE_ADDR, 12))
+                body = await link.check(CFW_PEEK, struct.pack('<IB', imu_addr, 12))
                 a, b, pitch = struct.unpack('<iii', body)
                 sample = {'t': round(i * args.interval, 2), 'word0': a / 100, 'word1': b / 100, 'pitch': pitch / 100}
                 samples.append(sample)
                 if args.samples > 1:
                     print(json.dumps(sample), file=sys.stderr, flush=True)
-            result = {'address': hex(IMU_ATTITUDE_ADDR), 'samples': samples}
+            result = {'address': hex(imu_addr), 'samples': samples}
         elif args.command == 'stats':
             body = await link.check(CFW_STATS)
             result = {'messages': struct.unpack_from('<H', body, 0)[0], 'errors': struct.unpack_from('<H', body, 2)[0],

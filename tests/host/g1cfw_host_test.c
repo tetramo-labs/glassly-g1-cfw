@@ -39,7 +39,7 @@ static void *host_malloc(uint32_t size);
 #define FW_MALLOC host_malloc
 static uint8_t host_peek_mem[64];
 #define FW_PEEK_PTR(addr) (host_peek_mem + ((addr) & 63))
-static uint8_t host_ram2[0x140c + 64];
+static uint8_t host_ram2[0x13f0 + 64];
 #define FW_CFW_RAM2 (host_ram2 + 32)
 static uint8_t host_ram3[32 + 0x13a4 + 32];
 #define FW_CFW_RAM3 (host_ram3 + 32)
@@ -363,7 +363,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/45", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/46", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -1318,12 +1318,12 @@ int main(int argc, char **argv)
     CHECK(send_packet(mic_q, sizeof mic_q) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply_len == 10 && last_reply[8] == 1 && last_reply[9] == 0);
     uint8_t mic_on[] = { 0xF0, 0x40, 0x01 };
     CHECK(send_packet(mic_on, sizeof mic_on) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 1);
-    CHECK(host_mic_mode == 0 && host_mic_to_flash == 0 && (state[0x1065] & 4) && host_sem_gives == 1 && host_last_sem == state + 0x68);
+    CHECK(host_mic_mode == 0 && host_mic_to_flash == 0 && (state[FW_STATE_MIC_ARM] & 4) && host_sem_gives == 1 && host_last_sem == state + 0x68);
     CHECK(last_reply[8] == 0 && last_reply[9] == 4);
     CHECK(send_packet(mic_on, sizeof mic_on) == 0 && host_sem_gives == 1 && last_reply[4] == 2);   /* already armed: no second give */
     uint8_t mic_off[] = { 0xF0, 0x40, 0x00 };
     CHECK(send_packet(mic_off, sizeof mic_off) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && host_mic_mode == 1 && last_reply[6] == 1);
-    state[0x1065] &= (uint8_t)~4;   /* the main thread clears the bit when the session ends */
+    state[FW_STATE_MIC_ARM] &= (uint8_t)~4;   /* the main thread clears the bit when the session ends */
     CHECK(send_packet(mic_on, sizeof mic_on) == 0 && host_sem_gives == 2 && host_mic_mode == 0);
     uint8_t mic_bad[] = { 0xF0, 0x40, 0x03 };
     CHECK(send_packet(mic_bad, sizeof mic_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);

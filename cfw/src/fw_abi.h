@@ -1,337 +1,211 @@
-/*
- * Stock entry points of the Even G1 application 1.5.60 (app build
- * 2025-03-21 11:38:43). Every address was read from the exact binary with
- * tools/g1dis.py; the 1.6.3 decompilation names are given for reference only.
- * Thumb addresses carry bit 0.
+/* Stock ABI for the pinned G1 1.6.3 application (2025-06-28 17:28:42).
+ * Addresses and instruction guards: cfw/targets/g1-1.6.3.json.
+ * Port evidence and memory ownership: docs/G1_CFW_163_PORT.md.
+ * Thumb function addresses carry bit 0. Never use these with a 1.5.60 base.
+ * Host tests override calls/pointers, not the target's structure offsets.
  */
 #pragma once
 #include <stdint.h>
 
 #define FW_BASE_MAJOR 1
-#define FW_BASE_MINOR 5
-#define FW_BASE_PATCH 60
+#define FW_BASE_MINOR 6
+#define FW_BASE_PATCH 3
 
-/* 0x1880c: returns the BLE context (1.6.3: FUN_00018320). */
 typedef uint8_t *(*fw_get_ctx_fn)(void);
 #ifndef FW_GET_CTX
-#define FW_GET_CTX ((fw_get_ctx_fn)0x0001880d)
+#define FW_GET_CTX ((fw_get_ctx_fn)0x00018321)
 #endif
 
-/* ctx+0xc: synchronous Nordic UART notify, used by the stock #t reply. */
 typedef int (*fw_send_fn)(const void *data, uint32_t len);
 #define FW_CTX_SEND_OFFSET 0x0c
 #ifndef FW_SEND_OF
 #define FW_SEND_OF(ctx) (*(fw_send_fn *)((ctx) + FW_CTX_SEND_OFFSET))
 #endif
 
-/* 0xef28: stock text-command hook; non-zero return means "not consumed". */
 typedef int (*fw_hook_fn)(const void *data, uint32_t len);
 #ifndef FW_SPEC_BLE_COMMAND_HOOK
 #define FW_SPEC_BLE_COMMAND_HOOK ((fw_hook_fn)0x0000ef29)
 #endif
 
-/* 0x16d3c: returns the GlassesState singleton (1.6.3: __get_dashboard_state). */
 typedef uint8_t *(*fw_get_state_fn)(void);
 #ifndef FW_GET_STATE
-#define FW_GET_STATE ((fw_get_state_fn)0x00016d3d)
+#define FW_GET_STATE ((fw_get_state_fn)0x0001681d)
 #endif
 
-/* jdb_panel_context is embedded in GlassesState at +0xb6c. Offsets below are
- * relative to that context and were read from _reflash_fb_data_to_lcd (0x4a22c)
- * and its full-frame caller at 0x3eae8. */
+/* Panel context inside GlassesState; 640x200 canvas on a 640x480 panel. */
 #define FW_PANEL_OFFSET      0xb6c
-#define FW_PANEL_FRAME       0x344   /* uint8_t *frame_buffers: 200 rows x 320 bytes, 4bpp */
-#define FW_PANEL_COL_OFFSET  0x348   /* int: panel column origin */
-#define FW_PANEL_ROW_OFFSET  0x34c   /* int: panel row origin */
-#define FW_PANEL_POWERED     0x35c   /* int: non-zero while the panel accepts writes */
-#define FW_PANEL_HEIGHT_GEAR 0x354   /* uint8_t raster_height_gear 0-8: row origin = (8 - gear) * 35 */
-#define FW_PANEL_DEPTH_GEAR  0x355   /* uint8_t canvas_distance_gear 1-9 (cal_panel_canvas_coord) */
+#define FW_PANEL_FRAME       0x344
+#define FW_PANEL_COL_OFFSET  0x348
+#define FW_PANEL_ROW_OFFSET  0x34c
+#define FW_PANEL_POWERED     0x35c
+#define FW_PANEL_HEIGHT_GEAR 0x354
+#define FW_PANEL_DEPTH_GEAR  0x355
 #define FW_FRAME_WIDTH       640
 #define FW_FRAME_HEIGHT      200
 #define FW_FRAME_STRIDE      320
-/* Panel memory holds 480 rows of 320 bytes; the 200-row canvas sits at the
- * row origin. The stock panel_init cleared all of it by pushing a zeroed
- * frame at row offsets 0, 0xc0 and 0x180 (0x80d12: 0xf000 + 0xf000 + 0x7800
- * bytes), the routine the CFW stubs since /36 because it also wiped the
- * frame buffer. */
+
 #define FW_PANEL_MEM_ROWS    480
 #ifndef FW_FRAME_OF
 #define FW_FRAME_OF(panel) ((uint8_t *)(uintptr_t)(*(uint32_t *)((panel) + FW_PANEL_FRAME)))
 #endif
 
-/* 0x4a22c: push frame rows [y0,y1] (inclusive) columns [x0,x1) (x1 exclusive:
- * it sends x1/2 - x0/2 bytes per row) to the panel over SPI, taking the LCD
- * mutex per row and busy-waiting 1 ms at the end. Returns -1 when the panel
- * is not powered. x1 is clamped to 0x280, y1 to 200. */
+/* x1 exclusive, y1 inclusive. Caller holds the recursive LCD mutex across
+ * header writes, temporary frame shifts, SPI transfers, and restoration. */
 typedef int (*fw_reflash_fn)(int col_off, int row_off, int x0, int y0, int x1, int y1);
 #ifndef FW_REFLASH_FB
-#define FW_REFLASH_FB ((fw_reflash_fn)0x0004a22d)
+#define FW_REFLASH_FB ((fw_reflash_fn)0x0004abd1)
 #endif
 
-/* 0x4a664 / 0x4a674: lock (timeout in r0:r1) and unlock the LCD mutex at
- * 0x2000a1fc, the one 0x4a22c takes around each row's SPI transfer. 0x4a22c
- * builds its 5-byte header in the 5 frame bytes before the row it sends (for
- * x0 = 0 the tail of the row above; the last header byte is 0xff) and puts
- * them back only after the unlock, so a push from another thread can send,
- * or save and later restore, that header: columns 630-639 of the row above
- * then show it, 638-639 fully lit. Zephyr mutexes are recursive, so the CFW
- * holds this one around each whole push. */
 typedef int (*fw_lcd_lock_fn)(int64_t timeout);
 typedef int (*fw_lcd_unlock_fn)(void);
 #ifndef FW_LCD_LOCK
-#define FW_LCD_LOCK ((fw_lcd_lock_fn)0x0004a665)
-#define FW_LCD_UNLOCK ((fw_lcd_unlock_fn)0x0004a675)
+#define FW_LCD_LOCK ((fw_lcd_lock_fn)0x0004af51)
+#define FW_LCD_UNLOCK ((fw_lcd_unlock_fn)0x0004af61)
 #endif
 
-/* Stock BLE receive path copies at most this many bytes per packet. */
 #define FW_MAX_PACKET 256
 
-/* Panel power, as used by the stock silent-mode handlers. Both take the
- * GlassesState pointer and manage the state byte at +0xfea (0 running,
- * 1 suspended, 2 suspending, 3 resuming). Resume is a no-op unless suspended
- * and suspend is a no-op unless running. */
 typedef int (*fw_system_power_fn)(uint8_t *state);
 #ifndef FW_SYSTEM_SUSPEND
-#define FW_SYSTEM_SUSPEND ((fw_system_power_fn)0x0002d78d)   /* 0x2d78c: global_system_suspend */
+#define FW_SYSTEM_SUSPEND ((fw_system_power_fn)0x0002d8f9)
 #endif
 #ifndef FW_SYSTEM_RESUME
-#define FW_SYSTEM_RESUME ((fw_system_power_fn)0x0002d809)    /* 0x2d808: global_system_resume */
+#define FW_SYSTEM_RESUME ((fw_system_power_fn)0x0002d975)
 #endif
 #define FW_STATE_POWER_OFFSET 0xfea
 
-/* jdb_panel_context callback table (register_jdb_panel_context at 0x4a114):
- * +0x00 init, +0x04 suspend (0x49dfc), +0x08 resume (0x49f28), +0x0c off
- * (0x49d9c), +0x10 on (0x49e48). panel_on powers the rail, re-initialises the
- * panel and sets +0x35c; panel_off clears it. Both take the context pointer. */
 typedef int (*fw_panel_cb_fn)(uint8_t *panel);
-#define FW_PANEL_CB_SUSPEND 0x04  /* panel_suspend 0x49dfc: SPI deep power down, powered flag 0 */
-#define FW_PANEL_CB_RESUME  0x08  /* panel_resume 0x49f28: panel_init + brightness, powered flag 1;
-                                   * returns -1 untouched when bit 8 of the halfword at
-                                   * panel+0x4fc is clear */
+#define FW_PANEL_CB_SUSPEND 0x04
+#define FW_PANEL_CB_RESUME  0x08
 #define FW_PANEL_CB_OFF 0x0c
 #define FW_PANEL_CB_ON  0x10
-/* The driver pair behind the stock silent mode, taking the panel context:
- * jbd_panel_suspend (0x4a5bc) sends the SPI deep-power-down command 0xb9,
- * jbd_panel_resume (0x4a604) runs panel_init and writes the brightness
- * register from panel+0x369. Neither touches the 1.8 V rail. The callback
- * wrappers around them do: panel_suspend also runs panel_off (rail down when
- * the flag at panel-0x48 is set) and panel_resume refuses outright when
- * bit 8 of the halfword at panel+0x4fc is clear (it was on both temples
- * here), and a panel brought back through the rail path (panel_on) came up
- * dark on hardware. The CFW therefore calls the driver pair directly and
- * keeps the powered flag at panel+0x35c itself. */
+
 typedef int (*fw_panel_drv_fn)(uint8_t *panel);
 #ifndef FW_JBD_PANEL_SUSPEND
-#define FW_JBD_PANEL_SUSPEND ((fw_panel_drv_fn)0x0004a5bd)
+#define FW_JBD_PANEL_SUSPEND ((fw_panel_drv_fn)0x0004aea9)
 #endif
 #ifndef FW_JBD_PANEL_RESUME
-#define FW_JBD_PANEL_RESUME ((fw_panel_drv_fn)0x0004a605)
+#define FW_JBD_PANEL_RESUME ((fw_panel_drv_fn)0x0004aef1)
 #endif
-/* panel_on (0x49e48) powers the panel and runs panel_init but leaves the
- * brightness register at its reset value, which is dark; panel_resume
- * (0x49f28) follows its init with 0x49eac(level), the register write, using
- * the stored level at panel+0x369 (state+0xed5, the user setting, 0x15
- * after clear_user_settings). The CFW does the same after the on callback. */
+
 #define FW_PANEL_BRIGHTNESS_LEVEL 0x369
 typedef int (*fw_level_fn)(uint32_t level);
 #ifndef FW_PANEL_WRITE_BRIGHTNESS
-#define FW_PANEL_WRITE_BRIGHTNESS ((fw_level_fn)0x00049ead)
+#define FW_PANEL_WRITE_BRIGHTNESS ((fw_level_fn)0x0004a831)
 #endif
 #ifndef FW_PANEL_CB_OF
 #define FW_PANEL_CB_OF(panel, slot) ((fw_panel_cb_fn)(uintptr_t)(*(uint32_t *)((panel) + (slot))))
 #endif
 
-/* RAM owned by the CFW. The stock BMP flow (commands 0x15/0x16/0x20) stages
- * sectors in a 4 KB buffer at 0x200174e4 (1.6.3: DAT_20017d30) and spills
- * into the 1 KB after it; the next live variable is at 0x200188e4. The CFW
- * consumes those stock commands, so nothing else touches this range. */
-#define FW_CFW_RAM_BASE 0x200174e4u
+/* BMP staging [0x20017d30,0x20019130): stock 15/16/20 uploads are swallowed. */
+#define FW_CFW_RAM_BASE 0x20017d30u
 #define FW_CFW_RAM_SIZE 0x1400u
 #ifndef FW_CFW_RAM
 #define FW_CFW_RAM ((uint8_t *)FW_CFW_RAM_BASE)
 #endif
 
-/* Stock UTF-8 text drawer (gui_utf_draw at 0x466d4). Draws left-aligned text
- * into the frame buffer rows named by the global the setter below points at;
- * x/y are absolute frame pixels, (x1, y1) the box's bottom-right, max_lines
- * the line cap, dim_glyphs how many leading glyphs are dimmed, and the last
- * three must be 0/NULL/0 or it draws nothing. Font 0 is the proportional
- * 20 px face (26-row cells, 27 px pitch) from internal flash for ASCII; fonts
- * 1 and 2 are digit faces 32 and 39 rows tall. Non-ASCII glyphs are fetched
- * from external flash under a mutex, so call from thread context only. */
 typedef int (*fw_utf_draw_fn)(int unused, const char *utf8, unsigned font, int x0, int y0, int x1, int y1,
                               unsigned max_lines, unsigned dim_glyphs, int p10, void *effect_cb, int p12);
 #ifndef FW_GUI_UTF_DRAW
-#define FW_GUI_UTF_DRAW ((fw_utf_draw_fn)0x000466d5)
+#define FW_GUI_UTF_DRAW ((fw_utf_draw_fn)0x000462e9)
 #endif
-/* 0x45880: store the row-pointer array (panel + 0x24) in the drawer's global. */
+
 typedef int (*fw_set_rows_fn)(void *rows);
 #ifndef FW_GUI_SET_ROWS
-#define FW_GUI_SET_ROWS ((fw_set_rows_fn)0x00045881)
+#define FW_GUI_SET_ROWS ((fw_set_rows_fn)0x000452f1)
 #endif
-/* 0x459b8: clear flag bit 1 so the drawer neither clears the box nor flushes. */
+
 typedef int (*fw_void_fn)(void);
 #ifndef FW_GUI_MANUAL_FLUSH
-#define FW_GUI_MANUAL_FLUSH ((fw_void_fn)0x000459b9)
+#define FW_GUI_MANUAL_FLUSH ((fw_void_fn)0x00045429)
 #endif
-#define FW_PANEL_ROWS 0x24   /* int *rows[200] inside the panel context */
+#define FW_PANEL_ROWS 0x24
 
-/* 0x7a15c: stock malloc wrapper (the call that allocates the 64 KB frame
- * buffer at boot). Returns NULL when the heap is exhausted. The CFW takes one
- * arena at first use and never frees it. */
 typedef void *(*fw_malloc_fn)(uint32_t size);
 #ifndef FW_MALLOC
-#define FW_MALLOC ((fw_malloc_fn)0x0007a15d)
+#define FW_MALLOC ((fw_malloc_fn)0x0007a015)
 #endif
-/* Heap pointers are kept as 32-bit addresses in the CFW context. */
+
 #ifndef FW_ADDR_OF
 #define FW_ADDR_OF(ptr) ((uint32_t)(uintptr_t)(ptr))
 #define FW_PTR_OF(addr) ((uint8_t *)(uintptr_t)(addr))
 #endif
 
-/* Diagnostics: map a 32-bit address to a readable pointer (identity on the
- * target; the host test substitutes its own memory). */
 #ifndef FW_PEEK_PTR
 #define FW_PEEK_PTR(addr) ((const uint8_t *)(uintptr_t)(addr))
 #endif
 
-/* Second CFW RAM region: the stock navigation map buffer (0x1210 bytes at
- * 0x2001bf23, referenced only by the stubbed UI block) and the translate
- * screen's 512-byte buffer after it. PEEK showed it untouched after boot.
- * A third region, 0x20013b84..0x20014f28 (DashBoard_Reflash/navigation
- * scratch), is also free but unused so far. */
-#define FW_CFW_RAM2_BASE 0x2001bf24u
-#define FW_CFW_RAM2_SIZE 0x140cu
+/* Navigation/translation scratch ends BEFORE the live word at 0x2001db40.
+ * The display dispatch is replaced; this region has only 8 spare bytes. */
+#define FW_CFW_RAM2_BASE 0x2001c750u
+#define FW_CFW_RAM2_SIZE 0x13f0u
 #ifndef FW_CFW_RAM2
 #define FW_CFW_RAM2 ((uint8_t *)FW_CFW_RAM2_BASE)
 #endif
 
-/* Third CFW RAM region: DashBoard_Reflash / navigation scratch referenced
- * only by the stubbed UI block (tools/g1ram.py). Holds the per-row edge
- * bytes the depth shift saves during a push. */
-#define FW_CFW_RAM3_BASE 0x20013b84u
+/* Dashboard/navigation scratch; stores saved edges during depth shifts. */
+#define FW_CFW_RAM3_BASE 0x200143d0u
 #define FW_CFW_RAM3_SIZE 0x13a4u
 #ifndef FW_CFW_RAM3
 #define FW_CFW_RAM3 ((uint8_t *)FW_CFW_RAM3_BASE)
 #endif
 
-/* Display-thread tick for animation. 0x80ed8 posts a stock refresh message
- * for `screen` to the display queue (display_reflash + k_yield); the display
- * thread then calls display_reflash_handler(state, screen, p3, mode), which the
- * profile redirects to cfw_display_tick. 0x7ff98 is k_msleep(ms). */
 typedef int (*fw_display_post_fn)(uint8_t screen, uint32_t p2, uint32_t p3);
 #ifndef FW_DISPLAY_POST
-#define FW_DISPLAY_POST ((fw_display_post_fn)0x00080ed9)
+#define FW_DISPLAY_POST ((fw_display_post_fn)0x00080fcb)
 #endif
 typedef int (*fw_msleep_fn)(int ms);
 #ifndef FW_K_MSLEEP
-#define FW_K_MSLEEP ((fw_msleep_fn)0x0007ff99)
+#define FW_K_MSLEEP ((fw_msleep_fn)0x0007fef7)
 #endif
 #define FW_SCREEN_CFW 0x10
 
-/* Touch input (1.5.60). The aw9320x capacitive IRQ wakes touch_key_thread
- * (0x2ba60), which classifies the press history into a gesture code, stores
- * it in the key-event word and calls the 14-byte helper at 0x2ba48, which
- * gives the key-event semaphore when it has been initialised. The profile
- * redirects that helper to cfw_touch_event. Codes: 1 single, 2 double,
- * 3 triple, 4 long-press start (stock turns the mic on), 5 long-press end,
- * 6 long-press timeout. 5/6/10/11/15 taps act inside the thread (reboot,
- * force bind, user-data reset, ESB band) and never reach the helper. */
 #ifndef FW_TOUCH_EVENT
-#define FW_TOUCH_EVENT ((volatile uint32_t *)0x20007cb4u)   /* gesture code (1.6.3: DAT_200084f8) */
-#define FW_KEY_EVENT_SEM ((void *)0x20007cb8u)              /* struct k_sem __key_event_sem */
-#define FW_KEY_EVENT_SEM_READY ((volatile uint8_t *)0x2001920cu)  /* set once k_sem_init succeeded */
+#define FW_TOUCH_EVENT ((volatile uint32_t *)0x200084f8u)
+#define FW_KEY_EVENT_SEM ((void *)0x200084fcu)
+#define FW_KEY_EVENT_SEM_READY ((volatile uint8_t *)0x20019a58u)
 #endif
 typedef void (*fw_sem_give_fn)(void *sem);
 #ifndef FW_K_SEM_GIVE
-#define FW_K_SEM_GIVE ((fw_sem_give_fn)0x0007ff69)   /* 0x7ff68: k_sem_give trampoline */
+#define FW_K_SEM_GIVE ((fw_sem_give_fn)0x0007fecb)
 #endif
 
-/* Stock event poster (1.5.60 0x28f38; 1.6.3 FUN_00029774). Every stock
- * event the glasses report to the phone passes through it as a code in r0:
- * 2 look up, 3 bow head (imu_fusion_thread), 6 worn, 7 taken off out of the
- * case, 8 put in the open case, 0xb case closed (check_work_mode), plus key
- * and dashboard events. It parks the code in a pending byte and either
- * enqueues [F5][code][CB] for the connected central (enqueue_bt_data,
- * 0x184d8) or gives the BLE context's event semaphore at ctx+0x218 when the
- * link is not ready (ctx+0x248 and ctx+0x220 both zero). The profile
- * redirects its entry to cfw_stock_event, which re-implements this. */
 #ifndef FW_EVENT_PENDING
-#define FW_EVENT_PENDING ((volatile uint8_t *)0x20003035u)
+#define FW_EVENT_PENDING ((volatile uint8_t *)0x20003051u)
 #endif
-#define FW_CTX_EVENT_SEM    0x218   /* struct k_sem inside the BLE context */
-#define FW_CTX_EVENT_READY  0x220   /* uint32_t, non-zero: send directly */
-#define FW_CTX_EVENT_DIRECT 0x248   /* uint8_t, non-zero: send directly */
+#define FW_CTX_EVENT_SEM    0x218
+#define FW_CTX_EVENT_READY  0x220
+#define FW_CTX_EVENT_DIRECT 0x248
 typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #ifndef FW_ENQUEUE_BT_DATA
-#define FW_ENQUEUE_BT_DATA ((fw_enqueue_fn)0x000184d9)
+#define FW_ENQUEUE_BT_DATA ((fw_enqueue_fn)0x00017fed)
 #endif
 
-/* Work-mode switch (1.5.60 0x16ee0; 1.6.3 change_work_mode at 0x169c0),
- * r0 = new mode: 0 boot, 1 link setup, 2 normal run (worn, stock page up),
- * 3 normal standby (worn, no page), 4 normal low power (taken off), 5
- * charging run and 6 charging low power (in the case), 7 ship mode, 8 deep
- * sleep (lid closed, no charger, five minutes), 9 waking from 8. The
- * 200 ms low-speed thread (check_work_mode, 0x28fa4) drives 2..6 from the
- * wear sensor whether or not a central is connected; its event poster is
- * only fed while one is. The profile replaces the entry's first four bytes
- * (push {r4, r5, r6, lr}; mov r4, r0) with a branch to cfw_work_mode_entry,
- * which repeats them and resumes at 0x16ee4. The current mode is the byte
- * at state+1. */
 #define FW_STATE_WORK_MODE 0x1
-#define FW_CHANGE_WORK_MODE_RESUME_LO 0x6ee5
+/* Resume after the exact displaced instructions; see the naked detours. */
+#define FW_CHANGE_WORK_MODE_RESUME_LO 0x69c5
 #define FW_CHANGE_WORK_MODE_RESUME_HI 0x0001
-/* check_work_mode (1.5.60 0x28fa4) entry: push.w {r4-r8, sb, sl, lr} is
- * displaced, the detour resumes at 0x28fa8 (mov r4, r0) with r0-r2 intact. */
-#define FW_CHECK_WORK_MODE_RESUME_LO 0x8fa9
+
+#define FW_CHECK_WORK_MODE_RESUME_LO 0x97e5
 #define FW_CHECK_WORK_MODE_RESUME_HI 0x0002
-/* The wear sensor is the radio link between the temples: the network core
- * reports its ESB statistics over IPC about every six seconds and the
- * fourth word (1.5.60 0x20006b88; 1.6.3 DAT_20006bc8) is what
- * check_work_mode classifies, >= 0x33 worn and < 0x28 not worn. The IPC
- * handler (local_ipc_service_recv, case 7) overwrites that word with 0x46
- * (worn) when the wear-detection user setting at state+0x109d (1.6.3
- * state+0x10d4, byte 10 of the 0x2c-byte user record at flash 0x134000;
- * 1 after clear_user_settings) is 0, so with the setting off the glasses
- * never leave normal standby. The CFW turns the setting on in its 200 ms
- * pass while it manages the panel. */
-#define FW_STATE_WEAR_DETECT 0x109d
-#define FW_WEAR_WORD_ADDR 0x20006b88
+
+#define FW_STATE_WEAR_DETECT 0x10d4
+#define FW_WEAR_WORD_ADDR 0x20006bc8
 #ifndef FW_WEAR_WORD
 #define FW_WEAR_WORD() (*(volatile uint32_t *)FW_WEAR_WORD_ADDR)
 #endif
-/* global_system_suspend (1.5.60 0x2d78c): push {r3, r4, r5, lr} and
- * ldrb.w r3, [r0, #0xfea] are displaced (the detour covers 4 of their 6
- * bytes; the orphaned half-word at 0x2d790 is never executed), resume at
- * 0x2d792 (mov r4, r0). It sets the state byte at +0xfea to 2, sleeps
- * about 300 ms, calls the panel's suspend callback (+0x04) and leaves 1;
- * callers include the display-off path (0x2a2f8) that runs with the
- * glasses worn and no stock page, which is what blanked the lenses after
- * boot under G1CFW/28. */
-#define FW_SYSTEM_SUSPEND_RESUME_LO 0x7793
+
+#define FW_SYSTEM_SUSPEND_RESUME_LO 0xd8ff
 #define FW_SYSTEM_SUSPEND_RESUME_HI 0x0002
 
-/* IMU attitude (1.5.60): three int32 words in hundredths of a degree kept by
- * imu_fusion_thread on the master temple (1.6.3 DAT_20008484/88/8c). The
- * third is the pitch the head-up detector compares; the first behaves as
- * roll and the second as a drifting yaw. Zero on the non-master temple. */
 #ifndef FW_IMU_ATTITUDE
-#define FW_IMU_ATTITUDE ((volatile int32_t *)0x20007c40u)
+#define FW_IMU_ATTITUDE ((volatile int32_t *)0x20008484u)
 #endif
 
-/* Microphone (1.5.60). Capture is a session of do_pdm_transfer run by the
- * main thread: the phone's 0x0E 01 handler sets bit 2 of the byte at
- * state+0x1065 and gives the main semaphore at state+0x68 (dmic_record_start,
- * 0x3e1f0, does the same for quick notes); the session configures the PDM
- * device, reads 16 kHz blocks, LC3-encodes them (app_codec_lc3_test) and,
- * while the byte at 0x20003036 is 0, queues them for the BLE dispatcher,
- * which sends [F1][seq][200 bytes] (send_dmic_msg, 0x1a56a). That byte is
- * 1 to end the session (0x30ea8, from exit_mic_mode) and 2 to capture
- * without sending (0x30ecc). The word at 0x20007d14 non-zero diverts the
- * chunks to the quick-note flash recorder instead of BLE. */
-#define FW_STATE_MIC_ARM    0x1065   /* uint8_t: bit 2 asks the main thread for a capture session */
-#define FW_STATE_MAIN_SEM   0x68     /* struct k_sem the main thread waits on */
+/* Main-thread PDM capture request bit 2; mode 0 streams, 1 stops, 2 captures. */
+#define FW_STATE_MIC_ARM    0x106d
+#define FW_STATE_MAIN_SEM   0x68
 #ifndef FW_MIC_MODE
-#define FW_MIC_MODE ((volatile uint8_t *)0x20003036u)        /* 0 stream, 1 stop, 2 capture only */
-#define FW_MIC_TO_FLASH ((volatile uint32_t *)0x20007d14u)   /* non-zero: quick-note recorder owns the chunks */
+#define FW_MIC_MODE ((volatile uint8_t *)0x20003052u)
+#define FW_MIC_TO_FLASH ((volatile uint32_t *)0x20008558u)
 #endif
