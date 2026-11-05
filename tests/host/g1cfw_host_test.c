@@ -16,6 +16,12 @@ static int host_reflash(int col, int row, int x0, int y0, int x1, int y1);
 static uint32_t host_wear_word;
 #define FW_WEAR_WORD() host_wear_word
 #define FW_REFLASH_FB host_reflash
+static void host_panel_write(const void *data, uint32_t len);
+static void host_panel_command(uint32_t command);
+static void host_panel_wait(uint32_t ms);
+#define FW_PANEL_WRITE_DATA host_panel_write
+#define FW_PANEL_COMMAND host_panel_command
+#define FW_PANEL_WAIT_MS host_panel_wait
 static int host_lcd_depth, host_unlocked_pushes;   /* every push must hold the LCD mutex */
 static int host_lcd_lock(int64_t timeout) { (void)timeout; host_lcd_depth++; return 0; }
 static int host_lcd_unlock(void) { host_lcd_depth--; return 0; }
@@ -106,7 +112,41 @@ static uint8_t *host_get_ctx(void) { return ctx; }
 static int host_hook(const void *data, uint32_t len) { (void)data; (void)len; hook_calls++; return 1; }
 static uint8_t *host_get_state(void) { return state; }
 static uint8_t pushed_row[320];   /* frame row 0 as it looked during the push */
-static int margin_rows, margin_dirty, margin_max_row;   /* single-row pushes of frame row 0 */
+static int margin_rows, margin_dirty, margin_max_row;   /* physical cache clear coverage */
+static uint8_t panel_cache[480 * 320], panel_latch[480 * 320];
+static int panel_dark, panel_sync_busy, panel_order_errors, panel_raw_writes, reflash_fail;
+static void host_panel_write(const void *data, uint32_t len)
+{
+    const uint8_t *p = data;
+    if (host_lcd_depth <= 0 || !panel_dark || panel_sync_busy) panel_order_errors++;
+    if (len != 2566 || p[0] != 2 || p[3] != 0 || p[4] != 0xff) { panel_order_errors++; return; }
+    unsigned address = ((unsigned)p[1] << 16) | ((unsigned)p[2] << 8) | p[3];
+    unsigned row = address >> 10;
+    if ((address & 1023) != 0 || row > 472 || row % 8) { panel_order_errors++; return; }
+    panel_raw_writes++;
+    margin_rows += 8;
+    if ((int)row + 7 > margin_max_row) margin_max_row = (int)row + 7;
+    for (unsigned i = 5; i < len; i++) if (p[i]) margin_dirty = 1;
+    memcpy(panel_cache + row * 320, p + 5, 8 * 320);
+}
+static void host_panel_command(uint32_t command)
+{
+    if (host_lcd_depth <= 0 || panel_sync_busy) panel_order_errors++;
+    if (command == 0xa9) panel_dark = 1;
+    else if (command == 0xa3) {
+        /* Enabling must never expose a partially reloaded pixel latch. */
+        if (memcmp(panel_cache, panel_latch, sizeof panel_cache)) panel_order_errors++;
+        panel_dark = 0;
+    } else if (command == 0x97) {
+        memcpy(panel_latch, panel_cache, sizeof panel_cache);
+        panel_sync_busy = 1;
+    } else panel_order_errors++;
+}
+static void host_panel_wait(uint32_t ms)
+{
+    if (host_lcd_depth <= 0 || ms != 1 || !panel_sync_busy) panel_order_errors++;
+    panel_sync_busy = 0;
+}
 static int host_reflash(int col, int row, int x0, int y0, int x1, int y1)
 {
     reflash_calls++;
@@ -114,11 +154,17 @@ static int host_reflash(int col, int row, int x0, int y0, int x1, int y1)
     int r[6] = { col, row, x0, y0, x1, y1 };
     memcpy(last_rect, r, sizeof r);
     if (host_frame) memcpy(pushed_row, host_frame, sizeof pushed_row);
-    if (y0 == 0 && y1 == 0 && x0 == 0 && x1 == 640 && host_frame) {
-        margin_rows++;
-        if (row > margin_max_row) margin_max_row = row;
-        for (int i = 0; i < 320; i++) if (host_frame[i]) margin_dirty = 1;
+    if (reflash_fail) return -1;
+    if (panel_sync_busy) panel_order_errors++;
+    /* Stock transfer plus its final sync/delay, with physical edge clipping. */
+    for (int y = y0; y <= y1; y++) {
+        if (row + y < 0 || row + y >= 480) continue;
+        for (int x = x0 / 2; x < x1 / 2; x++) {
+            int dest = col / 2 + x;
+            if (dest >= 0 && dest < 320) panel_cache[(row + y) * 320 + dest] = host_frame[y * 320 + x];
+        }
     }
+    memcpy(panel_latch, panel_cache, sizeof panel_cache);
     return 0;
 }
 
@@ -352,6 +398,25 @@ int main(int argc, char **argv)
         return replay(argv[2], argc > 3 ? argv[3] : NULL);
     }
 
+    /* Cold init: panel memory is garbage, powered flag is still zero, and
+     * neither the viewport nor retained-frame contents may affect the clear. */
+    memset(panel_cache, 0xff, sizeof panel_cache);
+    memset(panel_latch, 0xff, sizeof panel_latch);
+    memset(frame, 0x3c, 200 * 320);
+    *(int *)(panel + FW_PANEL_POWERED) = 0;
+    CHECK(cfw_panel_init_clear() == 0);
+    CHECK(panel_dark && !panel_sync_busy && panel_raw_writes == 60 && margin_rows == 480);
+    CHECK(!panel_order_errors && !margin_dirty && margin_max_row == 479);
+    for (unsigned i = 0; i < sizeof panel_cache; i++) CHECK(panel_cache[i] == 0 && panel_latch[i] == 0);
+    for (unsigned i = 0; i < 200 * 320; i++) CHECK(frame[i] == 0x3c);
+    CHECK(*(int *)(panel + FW_PANEL_POWERED) == 0 && host_lcd_depth == 0);
+    /* Stock's later enable can only reveal black, before the retained redraw. */
+    FW_LCD_LOCK(-1); host_panel_command(0xa3); FW_LCD_UNLOCK();
+    CHECK(!panel_dark && !panel_order_errors);
+    *(int *)(panel + FW_PANEL_POWERED) = 1;
+    memset(frame, 0, 200 * 320);
+    margin_rows = margin_dirty = margin_max_row = panel_raw_writes = 0;
+
     /* Pass-through: anything that is not 0xF0 goes to the stock hook untouched. */
     const uint8_t stock[] = { 0x25, 0x06, 0x00 };  /* stock heartbeat: passed through */
     CHECK(send_packet(stock, sizeof stock) == 1 && hook_calls == 1 && last_reply_len == 0);
@@ -363,7 +428,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/46", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
+    CHECK(memcmp(last_reply + 3, "G1CFW/47", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -424,8 +489,8 @@ int main(int argc, char **argv)
     CHECK(send_packet(fill, sizeof fill) == 0 && last_reply[2] == CFW_PANEL_OFF && frame[20 * 320 + 5] == 0xCC);
 
     /* Panel power: suspend then resume through the stubbed stock entry points. */
-    /* The modes that bring the panel up blank the 280 rows outside the
-     * canvas (the panel memory powers up lit) and push the frame. */
+    /* The modes that bring the panel up clear all 480 physical rows and
+     * push the frame while output is disabled. */
     uint8_t panel_off_cmd[] = { 0xF0, 0x05, 0x00 };
     margin_rows = 0;
     CHECK(send_packet(panel_off_cmd, sizeof panel_off_cmd) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1 && last_reply[4] == 0);
@@ -433,15 +498,15 @@ int main(int argc, char **argv)
     uint8_t panel_on_cmd[] = { 0xF0, 0x05, 0x01 };
     reflash_calls = 0;
     CHECK(send_packet(panel_on_cmd, sizeof panel_on_cmd) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1);
-    CHECK(margin_rows == 280 && reflash_calls == 281 && last_rect[4] == 640 && last_rect[5] == 199);
+    CHECK(margin_rows == 480 && reflash_calls == 1 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_OK);
     uint8_t panel_force_off[] = { 0xF0, 0x05, 0x03 };
     CHECK(send_packet(panel_force_off, sizeof panel_force_off) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 0 && panel_cb_calls == 1);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_PANEL_OFF);
-    CHECK(margin_rows == 280);
+    CHECK(margin_rows == 480);
     uint8_t panel_force_on[] = { 0xF0, 0x05, 0x02 };
     CHECK(send_packet(panel_force_on, sizeof panel_force_on) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1 && panel_cb_calls == 2);
-    CHECK(margin_rows == 560);
+    CHECK(margin_rows == 960);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_OK);
     uint8_t panel_bad[] = { 0xF0, 0x05, 0x09 };
     CHECK(send_packet(panel_bad, sizeof panel_bad) == 0 && last_reply[2] == CFW_BAD_COMMAND);
@@ -1132,9 +1197,9 @@ int main(int argc, char **argv)
     cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness written, frame pushed */
     CHECK(resume_calls == 1 && panel_cb_calls == 2 && brightness_writes == 1 && last_brightness == 0x15);
     CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5 && jbd_resume_calls == 0);
-    /* The 280 panel rows outside the canvas (row origin 35) were blanked
-     * with a zeroed copy of frame row 0, which is intact afterwards. */
-    CHECK(margin_rows == 280 && !margin_dirty && margin_max_row == 479 && host_frame[0] == 0x3C && host_frame[7] == 0xA5);
+    /* All 480 physical rows were cleared independently of the nonzero
+     * viewport column; the retained frame is intact afterwards. */
+    CHECK(margin_rows == 480 && !margin_dirty && margin_max_row == 479 && host_frame[0] == 0x3C && host_frame[7] == 0xA5);
     host_frame[0] = 0;
     cfw_work_mode(2);                       /* normal run: already on */
     CHECK(panel_cb_calls == 2);
@@ -1227,16 +1292,48 @@ int main(int argc, char **argv)
     margin_rows = margin_dirty = margin_max_row = 0;
     uint8_t view_set[] = { 0xF0, 0x14, 0x00, 0xF8, 0xFF, 0x23, 0x00 };   /* dx -8, dy +35 */
     CHECK(send_packet(view_set, sizeof view_set) == 0 && last_reply[2] == CFW_OK);
-    /* The 280 panel rows outside the moved canvas (origin 210 + 35) are blanked, then the frame is pushed. */
-    CHECK(margin_rows == 280 && !margin_dirty && margin_max_row == 479);
-    CHECK(reflash_calls == 281 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
+    /* The physical cache is cleared, then the moved canvas (origin 210 + 35) is pushed. */
+    CHECK(margin_rows == 480 && !margin_dirty && margin_max_row == 479);
+    CHECK(reflash_calls == 1 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(last_reply[3] == 0xF8 && last_reply[4] == 0xFF && last_reply[5] == 0x23 && last_reply[9] == 210);
-    /* A panel power-up parks frame row 0 beside the view state, not over it (G1CFW/37 regression). */
+    /* A panel power-up uses separate scratch RAM, preserving view and microphone state. */
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
     cfw_work_mode(3);
     CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
     CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[3] == 0xF8 && last_reply[5] == 0x23);
     CHECK(send_packet(mic_q_early, sizeof mic_q_early) == 0 && last_reply[2] == CFW_OK);   /* and neither is the mic state */
+    /* White power-up cache must not survive at any physical border. */
+    memset(panel_cache, 0xff, sizeof panel_cache);
+    memset(panel_latch, 0xff, sizeof panel_latch);
+    CHECK(cfw_repush(panel) == CFW_OK && !panel_dark && !panel_sync_busy);
+    for (unsigned x = 0; x < 320; x++) CHECK(panel_cache[x] == 0 && panel_cache[479 * 320 + x] == 0);
+    CHECK(!panel_order_errors && host_lcd_depth == 0);
+    /* Both signs of the stock column origin must leave uncovered side strips
+     * black, independently of depth shifts; preserve every retained byte. */
+    uint8_t saved_frame[200 * 320];
+    memcpy(saved_frame, frame, sizeof saved_frame);
+    int saved_col = *(int *)(panel + FW_PANEL_COL_OFFSET);
+    for (int col = -8; col <= 8; col += 16) {
+        *(int *)(panel + FW_PANEL_COL_OFFSET) = col;
+        memset(panel_cache, 0xff, sizeof panel_cache);
+        CHECK(cfw_repush(panel) == CFW_OK && !panel_dark);
+        for (int y = 0; y < 480; y++) {
+            int edge = col > 0 ? 0 : 319;
+            CHECK(panel_cache[y * 320 + edge] == 0);
+        }
+        CHECK(memcmp(frame, saved_frame, sizeof saved_frame) == 0);
+    }
+    *(int *)(panel + FW_PANEL_COL_OFFSET) = saved_col;
+    reflash_fail = 1;
+    CHECK(cfw_repush(panel) == CFW_PANEL_OFF && panel_dark && !panel_sync_busy);
+    reflash_fail = 0;
+    CHECK(cfw_repush(panel) == CFW_OK && !panel_dark);
+    int saved_dy = cfw_view_state()->dy;
+    cfw_view_state()->dy = -480;  /* Entire canvas is outside the physical panel. */
+    CHECK(cfw_repush(panel) == CFW_OK && !panel_dark && !panel_sync_busy);
+    for (unsigned i = 0; i < sizeof panel_cache; i++) CHECK(panel_cache[i] == 0 && panel_latch[i] == 0);
+    CHECK(!panel_order_errors && host_lcd_depth == 0);
+    cfw_view_state()->dy = (int16_t)saved_dy;
     uint8_t view_far[] = { 0xF0, 0x14, 0x00, 0x00, 0x00, 0xE8, 0x03 };   /* dy 1000: out of range, no change */
     CHECK(send_packet(view_far, sizeof view_far) == 0 && last_reply[2] == CFW_BAD_RECT);
     CHECK(send_packet(view_get, sizeof view_get) == 0 && last_reply[3] == 0xF8 && last_reply[5] == 0x23);
@@ -1244,7 +1341,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(view_short, sizeof view_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
     uint8_t view_zero[] = { 0xF0, 0x14, 0x00, 0, 0, 0, 0 };
     reflash_calls = 0;
-    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 281 && last_rect[1] == 210);
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[1] == 210);
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
     reflash_calls = 0;
     CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 0);   /* panel off: nothing to blank */

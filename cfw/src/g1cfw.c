@@ -1,5 +1,5 @@
 /*
- * G1CFW/46: injected handler for the private 0xF0 command on Even G1 1.6.3.
+ * G1CFW/47: injected handler for the private 0xF0 command on Even G1 1.6.3.
  *
  * Compiled by tools/build_blob.py into a position-independent blob that is
  * appended to the stock application image. The stock BLE receive entry calls
@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 46u
+#define CFW_PROTOCOL 47u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -2527,49 +2527,75 @@ enum { CFW_STOCK_WORN = 6, CFW_STOCK_TAKEN_OFF = 7, CFW_STOCK_IN_CASE_OPEN = 8, 
  * events while a central is connected and by every work-mode change. */
 static cfw_input *cfw_input_state(void);
 
-/* The stock panel_init no longer clears the panel memory outside the canvas
- * (fw_abi.h: FW_PANEL_MEM_ROWS), so after a power-up those rows show random
- * content. Push one blanked frame row to every row outside the canvas; the
- * row is parked in the second CFW RAM region (cfw_margin_row) and restored. */
-static uint8_t *cfw_margin_row(void);
-static void cfw_blank_margins(uint8_t *panel)
+/* Restore the stock init-time clear without erasing the retained host frame.
+ * Eight physical rows per transaction fit the depth-shift scratch region.
+ * The LCD mutex owns that scratch across both uses. No powered flag or view
+ * state is required: panel_init calls this BEFORE marking the panel ready.
+ * Raw writes address physical (0,y), with the stock 02/address/FF header and
+ * trailing dummy byte; the viewport's column/row offsets do not apply. */
+#define CFW_CLEAR_ROWS 8u
+#define CFW_CLEAR_BYTES (5u + CFW_CLEAR_ROWS * FW_FRAME_STRIDE + 1u)
+_Static_assert(CFW_CLEAR_BYTES <= FW_CFW_RAM3_SIZE, "panel clear packet must fit scratch RAM");
+static void cfw_clear_panel_memory(void)
 {
-    uint8_t *row0 = FW_FRAME_OF(panel);
-    uint8_t *keep = cfw_margin_row();
-    int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
-    int top = *(int *)(panel + FW_PANEL_ROW_OFFSET) + cfw_view_state()->dy;
-    FW_LCD_LOCK(-1);                 /* no other push may send row 0 while it is zeroed */
-    for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
-        keep[i] = row0[i];
-        row0[i] = 0;
+    uint8_t *packet = FW_CFW_RAM3;
+    for (uint32_t i = 0; i < CFW_CLEAR_BYTES; i++) packet[i] = 0;
+    packet[0] = 2;
+    packet[4] = 0xff;
+    for (uint32_t y = 0; y < FW_PANEL_MEM_ROWS; y += CFW_CLEAR_ROWS) {
+        uint32_t address = y << 10;
+        packet[1] = (uint8_t)(address >> 16);
+        packet[2] = (uint8_t)(address >> 8);
+        FW_PANEL_WRITE_DATA(packet, CFW_CLEAR_BYTES);
     }
-    for (int y = 0; y < FW_PANEL_MEM_ROWS; y++) {
-        if (y >= top && y < top + FW_FRAME_HEIGHT) {
-            continue;
-        }
-        FW_REFLASH_FB(col, y, 0, 0, FW_FRAME_WIDTH, 0);   /* frame row 0 lands on panel row y */
-    }
-    for (uint32_t i = 0; i < FW_FRAME_STRIDE; i++) {
-        row0[i] = keep[i];
-    }
-    FW_LCD_UNLOCK();
 }
 
-/* Blank the panel outside the canvas and push the whole frame. */
+static void cfw_panel_sync(void)
+{
+    FW_PANEL_COMMAND(0x97);
+    FW_PANEL_WAIT_MS(1);  /* cache must not be written during pixel-latch reload */
+}
+
+/* Replaces stock 0x80d76, called inside panel_init before its LED enable.
+ * Leave output disabled; stock finishes its initialization and enables it
+ * only after the entire physical cache and pixel latch contain black. */
+int cfw_panel_init_clear(void)
+{
+    FW_LCD_LOCK(-1);
+    FW_PANEL_COMMAND(0xa9);
+    cfw_clear_panel_memory();
+    cfw_panel_sync();
+    FW_LCD_UNLOCK();
+    return 0;
+}
+
+/* Keep LEDs disabled throughout clear + redraw. The old row-by-row margin
+ * clear ran after enable and used the shifted viewport origin, exposing
+ * uninitialized memory and leaving physical edge strips untouched. */
 static uint8_t cfw_repush(uint8_t *panel)
 {
+    FW_LCD_LOCK(-1);
     if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
+        FW_LCD_UNLOCK();
         return CFW_PANEL_OFF;
     }
-    cfw_blank_margins(panel);
+    FW_PANEL_COMMAND(0xa9);
+    cfw_clear_panel_memory();
     cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-    return cfw_flush(panel, &all);
+    uint8_t status = cfw_flush(panel, &all);
+    /* Includes the completely clipped viewport case: latch the black cache
+     * before enabling output, even when cfw_flush performed no transfers. */
+    cfw_panel_sync();
+    if (status == CFW_OK) {
+        FW_PANEL_COMMAND(0xa3);
+        cfw_panel_sync();
+    }
+    FW_LCD_UNLOCK();
+    return status;
 }
 
-/* The panel just came on, through the wear switch or a PANEL command: the
- * memory outside the canvas powers up lit. Blank it and push the frame now
- * and again on the 600 ms and 1.2 s ticks, since the panel may not take the
- * first writes. */
+/* Retry the retained frame on the 600 ms and 1.2 s ticks for units that do
+ * not accept the first post-wake draw. Each retry stays dark until complete. */
 static void cfw_panel_up(uint8_t *panel)
 {
     cfw_repush(panel);
@@ -2584,8 +2610,9 @@ static void cfw_auto_panel(cfw_input *in, int on)
         /* Resume callback first (what the stock silent-mode exit uses); it
          * refuses on these units, so the power-on path follows with the
          * brightness write. Both end in panel_init, whose whole-frame
-         * clear is stubbed (tools/gen_profile.py) so the buffer survives
-         * the power-up; cfw_panel_up blanks around it and pushes it. */
+         * clear is replaced with cfw_panel_init_clear so panel memory is
+         * black before LED enable and the host frame survives. cfw_panel_up
+         * then restores that frame with output disabled until complete. */
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_RESUME)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
             FW_PANEL_CB_OF(panel, FW_PANEL_CB_ON)(panel);
@@ -2988,8 +3015,8 @@ typedef struct {
 #define CFW_MIC_MAGIC 0x3243494du  /* "MIC2" */
 
 _Static_assert(sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_anims) + sizeof(cfw_input) + sizeof(cfw_view)
-               + sizeof(cfw_imu) + sizeof(cfw_mic) + FW_FRAME_STRIDE <= FW_CFW_RAM2_SIZE,
-               "second CFW RAM region: objects, animations, input, view, IMU and mic state, then the parked margin row");
+               + sizeof(cfw_imu) + sizeof(cfw_mic) <= FW_CFW_RAM2_SIZE,
+               "second CFW RAM region: objects, animations, input, view, IMU and mic state");
 
 static cfw_mic *cfw_mic_state(void)
 {
@@ -3002,12 +3029,6 @@ static cfw_mic *cfw_mic_state(void)
         m->magic = CFW_MIC_MAGIC;
     }
     return m;
-}
-
-/* Where frame row 0 is parked while the panel margins are blanked. */
-static uint8_t *cfw_margin_row(void)
-{
-    return (uint8_t *)cfw_mic_state() + sizeof(cfw_mic);
 }
 
 static void cfw_mic_control(const uint8_t *p, uint32_t n)

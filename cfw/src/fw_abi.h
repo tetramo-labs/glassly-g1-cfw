@@ -136,14 +136,15 @@ typedef void *(*fw_malloc_fn)(uint32_t size);
 #endif
 
 /* Navigation/translation scratch ends BEFORE the live word at 0x2001db40.
- * The display dispatch is replaced; this region has only 8 spare bytes. */
+ * The display dispatch is replaced; this region has 328 spare bytes. */
 #define FW_CFW_RAM2_BASE 0x2001c750u
 #define FW_CFW_RAM2_SIZE 0x13f0u
 #ifndef FW_CFW_RAM2
 #define FW_CFW_RAM2 ((uint8_t *)FW_CFW_RAM2_BASE)
 #endif
 
-/* Dashboard/navigation scratch; stores saved edges during depth shifts. */
+/* Dashboard/navigation scratch: depth-shift edges or physical clear packet,
+ * always held under the LCD mutex. */
 #define FW_CFW_RAM3_BASE 0x200143d0u
 #define FW_CFW_RAM3_SIZE 0x13a4u
 #ifndef FW_CFW_RAM3
@@ -208,4 +209,19 @@ typedef int (*fw_enqueue_fn)(const void *data, uint32_t len);
 #ifndef FW_MIC_MODE
 #define FW_MIC_MODE ((volatile uint8_t *)0x20003052u)
 #define FW_MIC_TO_FLASH ((volatile uint32_t *)0x20008558u)
+#endif
+
+/* Stock SPI helpers, valid during panel_init before the powered flag is set.
+ * WRITE_DATA takes a RAM packet (EasyDMA) and preserves its CS framing. */
+typedef void (*fw_panel_write_fn)(const void *data, uint32_t len);
+typedef void (*fw_panel_command_fn)(uint32_t command);
+typedef void (*fw_panel_wait_fn)(uint32_t ms);
+#ifndef FW_PANEL_WRITE_DATA
+#define FW_PANEL_WRITE_DATA ((fw_panel_write_fn)0x00080f09)
+#endif
+#ifndef FW_PANEL_COMMAND
+#define FW_PANEL_COMMAND ((fw_panel_command_fn)0x00080ecf)
+#endif
+#ifndef FW_PANEL_WAIT_MS
+#define FW_PANEL_WAIT_MS ((fw_panel_wait_fn)0x00080ec5)
 #endif

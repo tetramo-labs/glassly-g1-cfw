@@ -147,6 +147,21 @@ class SignedPortTests(unittest.TestCase):
         self.assertEqual(self.image[offset:offset + 12], bytes.fromhex(helper['bytes']))
         self.assertEqual(struct.unpack_from('<I', self.image, offset + 8)[0], 0x20004b20)
 
+    def test_init_clear_hook_precedes_stock_led_enable(self):
+        fn = next(f for f in PROFILE['blob']['functions'] if f['name'] == 'cfw_panel_init_clear')
+        offset = 0x80d76 - 0xc000
+        self.assertEqual(branch_target(self.image[offset:offset + 4], 0x80d76),
+                         PROFILE['blob']['address'] + fn['offset'])
+        self.assertEqual(struct.unpack_from('<HH', self.image, offset)[1] & 0xd000, 0x9000)
+        # Stock init calls the replacement after reset/write setup, before its
+        # C0/power sequence and A3. Guard the entire intervening instruction run.
+        call = 0x80e50 - 0xc000
+        self.assertEqual(branch_target(self.stock[call:call + 4], 0x80e50), 0x80d76)
+        self.assertEqual(self.stock[0x80eae - 0xc000:0x80eb0 - 0xc000], bytes.fromhex('a320'))
+        guard = next(g for g in TARGET['guards'] if g['name'] == 'panel_init clear before LED enable')
+        self.assertLessEqual(guard['address'], 0x80e50)
+        self.assertGreaterEqual(guard['address'] + len(bytes.fromhex(guard['expected'])), 0x80eb4)
+
     def test_naked_detours_replay_stock_stack_and_resume(self):
         # The 1.6.3 checker saves six registers; replaying the old eight corrupts the return stack.
         cases = [('cfw_work_mode_entry', 0x169c0, 2, 0x169c5),

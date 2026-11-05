@@ -1,7 +1,7 @@
 # G1 CFW MVP
 
-Current build: **G1CFW/46 on stock 1.6.3**, offline verified; see the
-[1.6.3 port](G1_CFW_163_PORT.md). The new base has not been hardware-tested.
+Current build: **G1CFW/47 on stock 1.6.3**, offline verified; see the
+[1.6.3 port](G1_CFW_163_PORT.md) and [panel wake fix](G1_CFW_47_PANEL_WAKE.md). The new base has not been hardware-tested.
 
 The sessions below document the earlier 1.5.60 builds, which were flashed
 and read back on hardware.

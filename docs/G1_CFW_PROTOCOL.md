@@ -1,6 +1,6 @@
 # G1CFW private protocol (command byte `0xF0`)
 
-G1CFW/46 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
+G1CFW/47 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
 revisions through 45 used 1.5.60. See the [port evidence](G1_CFW_163_PORT.md).
 The stock BLE receive hook call at `0x23d4e` calls `spec_ble_command_hook(data, len)` and only
 forwards a packet to the request dispatcher when that hook returns non-zero;
@@ -110,11 +110,13 @@ visible there. Under the CFW with the auto panel enabled the stock suspend
 is refused; with it disabled, `mode` 0 rebooted a temple on hardware, so
 prefer 3 or 4 to switch the panel off.
 
-From G1CFW/44 the modes that bring the panel up (1, 2, 5 and 7) do what the
-wear switch does after a power-up: blank the 280 panel rows outside the
-canvas (the panel memory powers up lit and the stock clear is stubbed), push
-the whole frame, and repeat both 600 ms and 1.2 s later. The reply comes
-after the first blank, about 0.3 s later than before.
+From G1CFW/47, panel initialization clears the physical 640×480 cache before
+stock enables the LEDs, without erasing the retained framebuffer. Modes 1, 2,
+5 and 7 then restore the frame with LEDs disabled until clear, redraw and
+latch synchronization finish. The wear path uses the same sequence, repeated
+600 ms and 1.2 s later for post-wake reliability. Physical clears ignore view
+origins, so displaced canvases cannot leave lit edge strips. See the
+[panel wake fix](G1_CFW_47_PANEL_WAKE.md).
 
 ## `06` TEXT: `[font][flags][x0:u16][y0:u16][x1:u16][y1:u16][max_lines][utf8...]`
 
@@ -350,8 +352,8 @@ coordinates and content near the far edge is cropped. `dx` must be even
 and within +/-24 (the stock table tops out at 22); `dy` within +/-480.
 `op` bit 0 = query only. Reply body `[dx:i16][dy:i16][stock_col:i16]
 [stock_row:i16][height_gear][depth_gear]`. From G1CFW/38 setting the view
-while the panel is powered also blanks every panel row outside the new
-canvas and pushes the whole frame (op bit 1, the old explicit push, is
+while the panel is powered also clears the physical panel and pushes the
+whole frame (with LEDs disabled during the operation since /47) (op bit 1, the old explicit push, is
 accepted and redundant), so a connecting host that places the canvas wipes
 whatever the stock screens left on the panel before it. `g1flash.py view
 --height H --depth D` map the stock gears per temple, `--dx/--dy` set the
@@ -437,11 +439,11 @@ unless bit 4 is set the CFW switches it: on through the panel's resume
 callback, falling back to the on callback plus a brightness write when
 resume refuses (it does on these units), then a push of the whole frame
 buffer, repeated 600 ms and 1.2 s later on the 200 ms ticks (G1CFW/35).
-The buffer survives the power-up: the whole-frame clear inside the stock
-`panel_init` and the panel's clear callback are stubbed (G1CFW/36), so the
-panel comes up showing what the host drew last, deferred draws included,
-and the CFW blanks the 280 panel memory rows outside the canvas itself
-(G1CFW/37), which that stock routine used to do.
+The buffer survives power-up: revision 47 replaces the stock initialization
+clear with a raw physical-cache clear that does not touch the frame. It runs
+before stock LED enable; the CFW then keeps output disabled throughout the
+full-cache clear and retained-frame redraw. Stock screen-exit clears remain
+stubbed. This replaces the visible row-by-row margin clear used in /37–46.
 Off goes through the suspend callback, falling back to the off callback. Two sources
 feed it. The stock events `worn` (6), `taken off` (7), `in case open` (8)
 and `case closed` (`0b`) only flow while a central is connected (the stock
@@ -489,14 +491,14 @@ development firmware.
 ## Stock commands the CFW swallows
 
 `0x15` (BMP data), `0x16` (BMP CRC) and `0x20` (BMP end) are consumed without
-reply: their staging RAM at `0x200174e4` (5,120 bytes) now holds the CFW
+reply: their staging RAM at `0x20017d30` on 1.6.3 (5,120 bytes) now holds the CFW
 context and the 4 KB message buffer.
 
 ## Caveats
 
 - From G1CFW/8 the stock UI refresh pipeline (`display_reflash_handler`) and
-  the whole-frame clear are stubbed, so the stock display thread never writes
-  the frame buffer or panel again. The CFW owns the frame; stock screens no
+  screen-exit clear are stubbed. Since /47 the initialization clear is
+  replaced with a CFW physical-cache clear; it preserves the framebuffer. The CFW owns the frame; stock screens no
   longer draw.
 - Flushing runs on the BLE worker thread and takes about 1 ms plus SPI time
   per call. Prefer one FLUSH per frame over flushing every BLIT.

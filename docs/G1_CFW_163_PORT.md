@@ -1,6 +1,10 @@
 # G1CFW/46: stock 1.6.3 port
 
-The current CFW uses the exact Even G1 **1.6.3** application, build
+This records the baseline revision 46 port. The current revision 47 adds the
+[panel wake fix](G1_CFW_47_PANEL_WAKE.md); its output hashes and memory usage
+are recorded there. The pins and validation counts below describe revision 46.
+
+The CFW uses the exact Even G1 **1.6.3** application, build
 **2025-06-28 17:28:42**. Revision 46 retains the display, input, microphone,
 IMU and STREAM features of revision 45. It changes the stock ABI, injection
 sites and borrowed memory. Offline validation passes; this port has not been

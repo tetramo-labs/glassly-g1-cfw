@@ -77,10 +77,6 @@
         "whole-frame clear and push on screen exit"
       ],
       [
-        527734,
-        "panel_init clear and three-part push"
-      ],
-      [
         527250,
         "panel clear callback"
       ]
@@ -92,6 +88,11 @@
         311864,
         "cfw_display_tick",
         "display-thread animation tick"
+      ],
+      [
+        527734,
+        "cfw_panel_init_clear",
+        "clear physical cache before stock panel enable, preserving retained frame"
       ]
     ],
     "input": [
@@ -315,7 +316,7 @@
       "expected": "08b5fff7daff9720"
     },
     {
-      "name": "stubs: panel_init clear and three-part push",
+      "name": "hooks: cfw_panel_init_clear",
       "address": 527734,
       "expected": "70b50546fff71bff"
     },
@@ -373,6 +374,26 @@
       "name": "quick-note reset call",
       "address": 133580,
       "expected": "1cf0f2fe"
+    },
+    {
+      "name": "FW_PANEL_WRITE_DATA",
+      "address": 528136,
+      "expected": "2de9f04385b00e46"
+    },
+    {
+      "name": "FW_PANEL_COMMAND",
+      "address": 528078,
+      "expected": "002310b586b08df8"
+    },
+    {
+      "name": "FW_PANEL_WAIT_MS",
+      "address": 528068,
+      "expected": "4ff47a73584308f033be"
+    },
+    {
+      "name": "panel_init clear before LED enable",
+      "address": 527930,
+      "expected": "08b5fff7ebff062000f044f810210120fff75eff0020fff791ff00210846fff762ff14210020fff75eff00211820fff75aff14211820fff756ff0a210c20fff752ff712000f026f8972000f023f8012000f01bf8732000f01df8972000f01af8012000f012f80f20fff750ff04213120fff72effa32000f00df8972000f00af8bde808400120"
     }
   ],
   "ram_regions": [
