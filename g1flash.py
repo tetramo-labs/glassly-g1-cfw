@@ -270,6 +270,7 @@ class StreamSender:
             pos += len(chunk)
             chunks.append((first, (header if first else b'') + chunk))
             first = False
+        first_seq = self.seq
         for i, (is_first, data) in enumerate(chunks):
             # Bit 2 (G1CFW/41): a repeat of the message that ran last is acknowledged, not re-run.
             flags = (0x01 if is_first else 0) | (0x06 if i == len(chunks) - 1 else 0)
@@ -277,10 +278,21 @@ class StreamSender:
             await self.link.client.write_gatt_char(self.link.rx, packet, response=False)
             self.seq = (self.seq + 1) & 0xFF
             self.packets += 1
+        last_seq = (self.seq - 1) & 0xFF
+        deadline = asyncio.get_running_loop().time() + timeout
         while True:
-            reply = await asyncio.wait_for(self.link.replies.get(), timeout)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError('Timed out waiting for STREAM acknowledgement')
+            reply = await asyncio.wait_for(self.link.replies.get(), remaining)
             if len(reply) >= 5 and reply[1] == CFW_STREAM:
                 status, seq, done = reply[2], reply[3], reply[4]
+                # Only the final packet can acknowledge execution; errors may
+                # refer to any packet in this message, including across wrap.
+                if ((seq - first_seq) & 0xFF) >= len(chunks):
+                    continue
+                if status in (0, CFW_STATUS_PANEL_OFF) and seq != last_seq:
+                    continue
                 if status == 4:
                     self.deferred = True   # G1CFW/32+: every record ran, the panel is off
                 elif status != 0:

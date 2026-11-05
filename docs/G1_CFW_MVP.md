@@ -1165,3 +1165,15 @@ Zephyr mutexes are recursive) around each whole CFW push, the depth-shift
 move and the margin blank included. The host test checks that every push
 runs under the lock. Blob 23,928 bytes, 68 left.
 
+### G1CFW/45: transport replies and panel bounds (2026-11-05)
+
+The [Scouter Kit comparison](SCOUTER_KIT_REVIEW.md) led to three fixes:
+keep ONCE's cached execution status independent of later transport errors;
+match host STREAM acknowledgements to the current packet sequences under one
+deadline; clip vertical VIEW pushes to the physical 480-row panel instead of
+letting stock mask out-of-range row addresses. The blob uses 23,984 bytes,
+leaving 12 bytes in the existing carve. The current signed profile preserves
+the /44 image and its accepted upgrade history. Offline verified only;
+not flashed or hardware-tested. The review records remaining panel-tail,
+case-link, microphone-lease and wake-latency investigations.
+

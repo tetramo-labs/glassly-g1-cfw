@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 44u
+#define CFW_PROTOCOL 45u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -56,7 +56,8 @@ typedef struct {
     uint16_t done_crc;
     uint8_t  done_records; /* its records-done count */
     uint8_t  done_valid;
-    uint16_t pad;
+    uint8_t  done_status;  /* result of the last executed message, independent of transport errors */
+    uint8_t  pad;
 } cfw_ctx;                 /* 40 bytes, then the message buffer, then the directory */
 
 /* --- asset store: directory in the reclaimed RAM, bytes in a heap arena --- */
@@ -359,6 +360,12 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
     v->flushes++;
     int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
     int row = *(int *)(panel + FW_PANEL_ROW_OFFSET) + v->dy;
+    /* The stock driver masks row addresses to nine bits. Clip in canvas
+     * coordinates before calling it, so an off-panel VIEW cannot wrap. */
+    int y0 = (int)r->y0, y1 = (int)(r->y0 + r->h - 1);
+    if (y0 + row < 0) y0 = -row;
+    if (y1 + row >= FW_PANEL_MEM_ROWS) y1 = FW_PANEL_MEM_ROWS - 1 - row;
+    if (y0 > y1) return CFW_OK;
     /* The stock routine sends (x1 - x0) / 2 bytes per row, so x1 is exclusive
      * in pixels even though y1 is inclusive. Passing x0 + w - 1 would drop the
      * last pixel pair of every row (the stock full-frame caller passes 0x27f
@@ -373,7 +380,7 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
         cfw_view_shift(frame, r, v->dx, &px0, &px1, 0);
     }
     if (px1 > px0) {
-        rc = FW_REFLASH_FB(col, row, px0, (int)r->y0, px1, (int)(r->y0 + r->h - 1));
+        rc = FW_REFLASH_FB(col, row, px0, y0, px1, y1);
     }
     if (v->dx) {
         cfw_view_shift(frame, r, v->dx, &px0, &px1, 1);
@@ -3330,7 +3337,7 @@ static void cfw_stream(const uint8_t *p, uint32_t n)
         } else if ((flags & CFW_STREAM_ONCE) && c->done_valid && c->done_total == c->msg_total && c->done_crc == c->msg_crc) {
             /* The host lost our reply and sent the message again: answer as
              * before without restarting its glides (g2flash's request ids). */
-            status = c->last_status;
+            status = c->done_status;
             body[1] = c->done_records;
         } else {
             status = cfw_run_message(buf, c->msg_len, &body[1]);
@@ -3338,6 +3345,7 @@ static void cfw_stream(const uint8_t *p, uint32_t n)
             c->done_total = c->msg_total;
             c->done_crc = c->msg_crc;
             c->done_records = body[1];
+            c->done_status = status;
             c->done_valid = 1;
         }
     }

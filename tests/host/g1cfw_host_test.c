@@ -363,7 +363,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/44", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
+    CHECK(memcmp(last_reply + 3, "G1CFW/45", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 5 && last_reply[14] == 60);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -1329,6 +1329,57 @@ int main(int argc, char **argv)
     CHECK(send_packet(mic_bad, sizeof mic_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     CHECK((uint8_t *)cfw_mic_state() + sizeof(cfw_mic) <= FW_CFW_RAM2 + FW_CFW_RAM2_SIZE);
 
+    /* A corrupt retry must not overwrite the cached execution result. Test
+     * success, deferred drawing and a message with a partially applied error. */
+    for (int result = 0; result < 3; result++) {
+        const uint8_t *m = result == 2 ? msg2 : msg;
+        unsigned n = result == 2 ? sizeof msg2 : sizeof msg;
+        uint16_t sum = cfw_crc16(m, n);
+        uint8_t packet[64] = {0xF0, 0x10, 30, 3, (uint8_t)n, 0, (uint8_t)sum, (uint8_t)(sum >> 8)};
+        memcpy(packet + 8, m, n);
+        *(int *)(panel + FW_PANEL_POWERED) = result != 1;
+        CHECK(send_packet(packet, n + 8) == 0);
+        uint8_t expected = result == 0 ? CFW_OK : result == 1 ? CFW_PANEL_OFF : CFW_BAD_RECT;
+        CHECK(last_reply[2] == expected);
+        uint8_t done = last_reply[4];
+        int pushes = reflash_calls, messages = cfw_context()->stream_msgs;
+        packet[6] ^= 1;
+        CHECK(send_packet(packet, n + 8) == 0 && last_reply[2] == CFW_BAD_CRC);
+        CHECK(cfw_context()->last_status == CFW_BAD_CRC);
+        packet[6] ^= 1;
+        packet[2] = 31;
+        packet[3] |= CFW_STREAM_ONCE;
+        CHECK(send_packet(packet, n + 8) == 0 && last_reply[2] == expected && last_reply[4] == done);
+        CHECK(reflash_calls == pushes && cfw_context()->stream_msgs == messages);
+    }
+
+    /* VIEW may place only part (or none) of a canvas on the physical panel.
+     * No negative/480+ row reaches the stock driver's nine-bit address mask;
+     * horizontal shifting still restores every framebuffer byte. */
+    *(int *)(panel + FW_PANEL_POWERED) = 1;
+    *(int *)(panel + FW_PANEL_ROW_OFFSET) = 0;
+    memcpy(snapshot, frame, sizeof snapshot);
+    const int clips[][5] = {
+        {0, 0, 200, 0, 199}, {-10, 0, 200, 10, 199},
+        {400, 0, 200, 0, 79}, {-199, 0, 200, 199, 199},
+        {479, 0, 200, 0, 0}, {-200, 0, 200, 0, -1},
+        {480, 0, 200, 0, -1}, {-55, 50, 10, 55, 59},
+        {425, 50, 10, 50, 54}, {-60, 50, 10, 0, -1}
+    };
+    for (unsigned i = 0; i < sizeof clips / sizeof clips[0]; i++) {
+        cfw_view_state()->dy = (int16_t)clips[i][0];
+        cfw_view_state()->dx = i & 1 ? -8 : 8;
+        cfw_rect r = {0, (uint16_t)clips[i][1], 640, (uint16_t)clips[i][2]};
+        reflash_calls = 0;
+        CHECK(cfw_flush(panel, &r) == CFW_OK);
+        if (clips[i][4] < 0) {
+            CHECK(reflash_calls == 0);
+        } else {
+            CHECK(reflash_calls == 1 && last_rect[3] == clips[i][3] && last_rect[5] == clips[i][4]);
+            CHECK(last_rect[1] + last_rect[3] >= 0 && last_rect[1] + last_rect[5] < 480);
+        }
+        CHECK(memcmp(frame, snapshot, sizeof snapshot) == 0);
+    }
     guards_intact();
     CHECK(host_unlocked_pushes == 0 && host_lcd_depth == 0);
     printf(failures ? "FAILED (%d)\n" : "OK\n", failures);

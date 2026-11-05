@@ -76,6 +76,11 @@ passes `x0 + w`, so the full width including columns 638-639 is pushed. The
 stock full-frame refresh passes 639 and clips those two columns, which is
 visible as a missing right border on stock screens.
 
+From G1CFW/45, the destination rows are clipped to the physical panel's
+0..479 range after applying VIEW. A fully off-panel rectangle succeeds
+without a transfer; its framebuffer contents are retained. This avoids
+the stock driver's nine-bit row-address wrapping.
+
 ## `04` INFO
 
 Reply body: `[powered][max_packet][col_off:i16][row_off:i16][frame_ptr:u32][width/4][height]`.
@@ -302,6 +307,13 @@ message in flight, a declared length over 4096, or more data than declared is
 refused with status `05`/`07` and the message is dropped. Mid-message packets
 get no reply. The last packet is answered `F0 10 <status> <seq> <records done>`
 after the message runs.
+
+G1CFW/45 keeps the cached execution status separate from the latest transport
+error, so a malformed retry cannot change the result returned by ONCE.
+The host matches replies to the current message's packet sequence range
+(including 255-to-0 wrap), accepts success/deferred only for its final
+packet, and uses one acknowledgement deadline even when stale replies arrive.
+This remains a length/CRC-based replay cache, not a unique request ID.
 
 A message is a list of records `[cmd:u8][len:u16][payload]` using the BLIT,
 FILL, FLUSH and TEXT payloads above, so one message can carry a clear, several
