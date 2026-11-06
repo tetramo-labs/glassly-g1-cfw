@@ -4,7 +4,7 @@ An attempt to recreate the FW for ER G1 glasses. This project uses the NRF DFu a
 
 ## Glassly G1 CFW
 
-The current build is **G1CFW/48 on stock 1.6.3**, with display rendering, animation, input, IMU and microphone control. Run `./build_cfw.sh --stock /path/to/even-g1-1.6.3.zip`; artifacts are written to `build/g1-1.6.3-cfw/`. See the [wear-off grace](docs/G1_CFW_48_WEAR_GRACE.md), [panel wake fix](docs/G1_CFW_47_PANEL_WAKE.md), [1.6.3 port and validation](docs/G1_CFW_163_PORT.md), [protocol](docs/G1_CFW_PROTOCOL.md), and [historical hardware workflow](docs/G1_CFW_MVP.md). **The 1.6.3 port is offline verified and has not been hardware-tested.** The development-kit build below is not a replacement firmware for production glasses.
+The current build is **G1CFW/49 on stock 1.6.3**, with display rendering (a 640x380 canvas), timed animation, input, IMU and microphone control. Run `./build_cfw.sh --stock /path/to/even-g1-1.6.3.zip`; artifacts are written to `build/g1-1.6.3-cfw/`. See the [canvas and timing notes](docs/G1_CFW_49_CANVAS_AND_TIMING.md), [wear-off grace](docs/G1_CFW_48_WEAR_GRACE.md), [panel wake fix](docs/G1_CFW_47_PANEL_WAKE.md), [1.6.3 port and validation](docs/G1_CFW_163_PORT.md), [protocol](docs/G1_CFW_PROTOCOL.md), and [historical hardware workflow](docs/G1_CFW_MVP.md). **The 1.6.3 port is offline verified and has not been hardware-tested.** The development-kit build below is not a replacement firmware for production glasses.
 
 ## Progress
 

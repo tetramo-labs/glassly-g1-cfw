@@ -137,6 +137,14 @@
         "00bf00bf",
         "disable 30 s unbonded disconnect"
       ]
+    ],
+    "display": [
+      [
+        527372,
+        "a8bfc826",
+        "00bf00bf",
+        "glyph rows may start below row 200 (CFW row table)"
+      ]
     ]
   },
   "guards": [
@@ -394,6 +402,16 @@
       "name": "panel_init clear before LED enable",
       "address": 527930,
       "expected": "08b5fff7ebff062000f044f810210120fff75eff0020fff791ff00210846fff762ff14210020fff75eff00211820fff75aff14211820fff756ff0a210c20fff752ff712000f026f8972000f023f8012000f01bf8732000f01df8972000f01af8012000f012f80f20fff750ff04213120fff72effa32000f00df8972000f00af8bde808400120"
+    },
+    {
+      "name": "FW_TICKS32",
+      "address": 564800,
+      "expected": "08b5eef7e5f908bd"
+    },
+    {
+      "name": "__copy_to_frame_buffer row clamp",
+      "address": 527370,
+      "expected": "c82ea8bfc826"
     }
   ],
   "ram_regions": [

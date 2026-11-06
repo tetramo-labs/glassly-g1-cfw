@@ -2,7 +2,7 @@
 """Compile injected C to a position-independent Thumb-2 blob for the G1 app core.
 
 Adapted from g2flash's build.py (same idea, retargeted to ARMv8-M mainline with
-FPv5 and verified relocation families). The output is .text followed by any
+FPv5 and verified relocation families, plus R_ARM_REL32 literals). The output is .text followed by any
 referenced read-only data. Intra-blob BL/B.W and PC-relative movw/movt (-fropi)
 relocations are resolved here; anything else is an error, so firmware entry
 points must be called through absolute-constant function pointers.
@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 
+R_ARM_REL32 = 3
 R_ARM_THM_CALL = 10
 R_ARM_THM_JUMP24 = 30
 R_ARM_THM_MOVW_PREL_NC = 49
@@ -127,6 +128,10 @@ def compile_blob(src, obj_dir, defines=()):
             pos = base[rs['info']] + r_offset
             if r_type in (R_ARM_THM_CALL, R_ARM_THM_JUMP24) and rs['info'] == text_idx and sym['shndx'] == text_idx:
                 thumb_branch(blob, pos, sym['value'] & ~1)
+            elif r_type == R_ARM_REL32 and sym['shndx'] in base:
+                # PC-relative literal (size-optimized code): S + A - P, both inside the blob.
+                addend = struct.unpack_from('<i', blob, pos)[0]
+                struct.pack_into('<I', blob, pos, (base[sym['shndx']] + sym['value'] + addend - pos) & 0xFFFFFFFF)
             elif r_type in (R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL) and sym['shndx'] in base:
                 movwt(blob, pos, base[sym['shndx']] + sym['value'], r_type == R_ARM_THM_MOVT_PREL)
             else:

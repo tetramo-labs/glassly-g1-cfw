@@ -49,10 +49,17 @@ static uint8_t host_ram2[0x13f0 + 64];
 #define FW_CFW_RAM2 (host_ram2 + 32)
 static uint8_t host_ram3[32 + 0x13a4 + 32];
 #define FW_CFW_RAM3 (host_ram3 + 32)
+/* Host pointers are 8 bytes: the text row table and its scratch row get their own array. */
+static uint8_t *host_text_rows[420 + 336 / sizeof(uint8_t *) + 1];
+#define CFW_TEXT_TABLE host_text_rows
 static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3);
 static int host_msleep(int ms);
 #define FW_DISPLAY_POST host_display_post
 #define FW_K_MSLEEP host_msleep
+/* Kernel ticks at 32768 Hz; host_msleep advances them, nothing else does. */
+static uint32_t host_ticks = 0x7fff0000u;
+static uint32_t host_ticks32(void) { return host_ticks; }
+#define FW_TICKS32 host_ticks32
 static uint32_t host_touch_code; static uint8_t host_key_sem_ready; static int host_sem_gives; static void *host_last_sem;
 static uint8_t host_key_sem[16];
 static void host_sem_give(void *sem);
@@ -147,9 +154,12 @@ static void host_panel_wait(uint32_t ms)
     if (host_lcd_depth <= 0 || ms != 1 || !panel_sync_busy) panel_order_errors++;
     panel_sync_busy = 0;
 }
+static uint32_t reflash_cost_ticks;   /* kernel ticks one push takes */
 static int host_reflash(int col, int row, int x0, int y0, int x1, int y1)
 {
     reflash_calls++;
+    host_ticks += reflash_cost_ticks;
+    if (y0 < 0 || y1 > 199 || y0 > y1) abort();   /* never outside the stock buffer */
     if (host_lcd_depth <= 0) host_unlocked_pushes++;
     int r[6] = { col, row, x0, y0, x1, y1 };
     memcpy(last_rect, r, sizeof r);
@@ -191,11 +201,30 @@ static int host_jbd_resume(uint8_t *panel) { (void)panel; panel_cb_calls++; jbd_
 static int host_jbd_suspend(uint8_t *panel) { (void)panel; panel_cb_calls++; jbd_suspend_calls++; return 0; }
 
 static char utf_text[256]; static unsigned utf_font, utf_lines; static int utf_box[4], utf_calls, rows_set, manual_flush_calls; static void *rows_arg;
+/* Rows the engine would write for the box's first and last row, and the
+ * scratch row the CFW gives rows outside the band. */
+static uint8_t *utf_row_first, *utf_row_last, *utf_spare;
+static uint8_t utf_ink; static int utf_ink_bytes;   /* when set, the stub fills each box row like glyphs */
+static uint8_t *utf_firsts[8], *utf_tenths[8], *utf_lasts[8];   /* per call: box rows 0, 10 and last */
 static int host_utf_draw(int u, const char *t, unsigned f, int x0, int y0, int x1, int y1, unsigned l, unsigned d, int p10, void *cb, int p12)
 {
     if (u || d || p10 || cb || p12) abort();
+    if (rows_arg != (void *)host_text_rows || y0 < 0 || y1 >= 420) abort();
     strncpy(utf_text, t, sizeof utf_text - 1); utf_font = f; utf_lines = l;
     utf_box[0] = x0; utf_box[1] = y0; utf_box[2] = x1; utf_box[3] = y1; utf_calls++;
+    utf_row_first = host_text_rows[y0];
+    utf_row_last = host_text_rows[y1];
+    if (utf_calls <= 8) {
+        utf_firsts[utf_calls - 1] = host_text_rows[y0];
+        utf_tenths[utf_calls - 1] = y0 + 10 <= y1 ? host_text_rows[y0 + 10] : NULL;
+        utf_lasts[utf_calls - 1] = host_text_rows[y1];
+    }
+    utf_spare = (uint8_t *)(host_text_rows + 420);
+    /* Like __copy_to_frame_buffer: writes go through the row table. */
+    for (int y = y0; y <= y1; y++) {
+        if (utf_ink) memset(host_text_rows[y] + x0 / 2, utf_ink, (size_t)utf_ink_bytes);
+        else host_text_rows[y][x0 / 2] |= 0;
+    }
     return 0;
 }
 static int host_set_rows(void *rows) { rows_arg = rows; rows_set++; return 0; }
@@ -209,7 +238,7 @@ static void host_sem_give(void *sem) { host_sem_gives++; host_last_sem = sem; }
 static int host_enqueue(const void *data, uint32_t len) { if (len > sizeof host_enqueued) abort(); memcpy(host_enqueued, data, len); host_enqueued_len = len; host_enqueues++; return 0; }
 static int post_calls, sleep_calls, last_sleep; static uint8_t last_screen;
 static int host_display_post(uint8_t screen, uint32_t p2, uint32_t p3) { (void)p2; (void)p3; post_calls++; last_screen = screen; return 0; }
-static int host_msleep(int ms) { sleep_calls++; last_sleep = ms; return 0; }
+static int host_msleep(int ms) { sleep_calls++; last_sleep = ms; host_ticks += (uint32_t)ms * 32768u / 1000u; return 0; }
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -428,7 +457,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/48", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
+    CHECK(memcmp(last_reply + 3, "G1CFW/49", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -440,6 +469,7 @@ int main(int argc, char **argv)
     const uint8_t info[] = { 0xF0, 0x04 };
     CHECK(send_packet(info, 2) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 1);
     CHECK(last_reply[5] == 7 && last_reply[7] == 35 && last_reply[13] == 160 && last_reply[14] == 200);
+    CHECK(last_reply_len == 17 && (last_reply[15] | last_reply[16] << 8) == 380);   /* canvas rows */
 
     /* Fill with flush. */
     uint8_t fill[12] = { 0xF0, 0x02, 0x02, 10, 0, 20, 0, 8, 0, 3, 0, 0x0C };
@@ -498,7 +528,8 @@ int main(int argc, char **argv)
     uint8_t panel_on_cmd[] = { 0xF0, 0x05, 0x01 };
     reflash_calls = 0;
     CHECK(send_packet(panel_on_cmd, sizeof panel_on_cmd) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 0 && last_reply[4] == 1);
-    CHECK(margin_rows == 480 && reflash_calls == 1 && last_rect[4] == 640 && last_rect[5] == 199);
+    /* The canvas is re-composed: rows 200..379 through the buffer, then the window. */
+    CHECK(margin_rows == 480 && reflash_calls == 2 && last_rect[1] == 35 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(send_packet(flush, sizeof flush) == 0 && last_reply[2] == CFW_OK);
     uint8_t panel_force_off[] = { 0xF0, 0x05, 0x03 };
     CHECK(send_packet(panel_force_off, sizeof panel_force_off) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 0 && panel_cb_calls == 1);
@@ -606,8 +637,10 @@ int main(int argc, char **argv)
     reflash_calls = 0;
     uint8_t textpk[] = { 0xF0, 0x06, 0, 0x03, 32, 0, 32, 0, 0x60, 0x02, 59, 0, 1, 'H', 'i' };
     CHECK(send_packet(textpk, sizeof textpk) == 0 && last_reply[2] == CFW_OK && utf_calls == 1);
-    CHECK(strcmp(utf_text, "Hi") == 0 && utf_font == 0 && utf_lines == 1 && utf_box[0] == 32 && utf_box[1] == 32 && utf_box[2] == 608 && utf_box[3] == 59);
-    CHECK(rows_set == 1 && rows_arg == panel + FW_PANEL_ROWS && manual_flush_calls == 1);
+    /* The box is translated to engine row 0 over the CFW's row table, which the stock table replaces again. */
+    CHECK(strcmp(utf_text, "Hi") == 0 && utf_font == 0 && utf_lines == 1 && utf_box[0] == 32 && utf_box[1] == 0 && utf_box[2] == 608 && utf_box[3] == 27);
+    CHECK(utf_row_first == frame + 32 * 320 && utf_row_last == frame + 59 * 320);
+    CHECK(rows_set == 2 && rows_arg == panel + FW_PANEL_ROWS && manual_flush_calls == 1);
     CHECK(frame[32 * 320 + 16] == 0 && frame[59 * 320 + 303] == 0 && frame[32 * 320 + 15] == 0xAA && frame[60 * 320 + 16] == 0xAA);
     CHECK(reflash_calls == 1 && last_rect[2] == 32 && last_rect[3] == 32 && last_rect[4] == 608 && last_rect[5] == 59);
     /* Refusals: font 3, odd x, box too low for a 26-row cell, empty textpk, too long. */
@@ -655,7 +688,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(puts, sizeof puts) == 0 && last_reply[2] == CFW_OK);
     uint8_t atext[] = { 0xF0, 0x0A, 9, 0, 0, 0x02, 32, 0, 32, 0, 0x60, 0x02, 59, 0, 1 };
     utf_calls = 0;
-    CHECK(send_packet(atext, sizeof atext) == 0 && last_reply[2] == CFW_OK && utf_calls == 1 && strcmp(utf_text, "Hey") == 0 && utf_box[3] == 59);
+    CHECK(send_packet(atext, sizeof atext) == 0 && last_reply[2] == CFW_OK && utf_calls == 1 && strcmp(utf_text, "Hey") == 0 && utf_box[3] == 27);
     CHECK(send_packet(drawa, 8) == 0 && last_reply[2] == CFW_BAD_LENGTH);
     uint8_t text_as_img[] = { 0xF0, 0x09, 9, 0, 0x00, 0, 0, 0, 0 };
     CHECK(send_packet(text_as_img, sizeof text_as_img) == 0 && last_reply[2] == CFW_BAD_ASSET);
@@ -760,10 +793,12 @@ int main(int argc, char **argv)
     memset(frame, 0x33, 200 * 320);
     utf_calls = 0; reflash_calls = 0;
     uint8_t show[] = { 0xF0, 0x21, 0x03, 3, 1, 0, 2, 0, 3, 0 };
-    CHECK(send_packet(show, sizeof show) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[4] == 640);
+    /* A pushed SHOW is the whole canvas: rows 200..379 through the buffer, then the window. */
+    CHECK(send_packet(show, sizeof show) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2 && last_rect[4] == 640);
     CHECK(frame[0] == 0 && frame[10 * 320 + 5] == 0xCC && frame[13 * 320 + 8] == 0xCC && frame[14 * 320 + 5] == 0);
     CHECK(frame[50 * 320 + 10] == 0xFF && frame[50 * 320 + 14] == 0 && frame[51 * 320 + 14] == 0xFF);
-    CHECK(utf_calls == 1 && strcmp(utf_text, "Yo") == 0 && utf_box[0] == 32 && utf_box[2] == 608 && utf_box[3] == 59);
+    CHECK(utf_calls == 1 && strcmp(utf_text, "Yo") == 0 && utf_box[0] == 32 && utf_box[2] == 608 && utf_box[3] == 27);
+    CHECK(utf_row_first == frame + 32 * 320);
     const uint8_t ostate[] = { 0xF0, 0x23 };
     CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[2] == CFW_OK && last_reply[5] == 3 && last_reply[6] == 3 && last_reply[7] == 1 && last_reply[9] == 1 && last_reply[11] == 2 && last_reply[15] == 3 && last_reply[17] == 7);
     /* Unknown id refused before anything is drawn; hide blanks; control drops one object. */
@@ -771,12 +806,12 @@ int main(int argc, char **argv)
     memset(frame, 0x33, 200 * 320);
     CHECK(send_packet(show_bad, sizeof show_bad) == 0 && last_reply[2] == CFW_NO_OBJECT && frame[0] == 0x33);
     const uint8_t hide[] = { 0xF0, 0x22 };
-    CHECK(send_packet(hide, sizeof hide) == 0 && last_reply[2] == CFW_OK && frame[0] == 0 && frame[64000 - 1] == 0 && reflash_calls == 2);
+    CHECK(send_packet(hide, sizeof hide) == 0 && last_reply[2] == CFW_OK && frame[0] == 0 && frame[64000 - 1] == 0 && reflash_calls == 4);
     uint8_t drop[] = { 0xF0, 0x24, 1, 2, 0 };
     CHECK(send_packet(drop, sizeof drop) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(ostate, sizeof ostate) == 0 && last_reply[5] == 2 && last_reply[6] == 0);
     uint8_t show2[] = { 0xF0, 0x21, 0x00, 2, 1, 0, 3, 0 };
-    CHECK(send_packet(show2, sizeof show2) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2);
+    CHECK(send_packet(show2, sizeof show2) == 0 && last_reply[2] == CFW_OK && reflash_calls == 4);   /* no push: the window only */
     CHECK(send_packet(show, sizeof show) == 0 && last_reply[2] == CFW_NO_OBJECT);
     uint8_t clear_all[] = { 0xF0, 0x24, 0 };
     CHECK(send_packet(clear_all, sizeof clear_all) == 0 && last_reply[2] == CFW_OK);
@@ -841,7 +876,7 @@ int main(int argc, char **argv)
         15, 0, 15, 1, 100, 0, 100, 0, 64, 0, 40, 0, 9, 0, 2, 0, 0, 0, 0, 0 };       /* text asset 9 in (100,100) 64x40, font 1, 2 lines */
     CHECK(send_packet(shapes_assets, sizeof shapes_assets) == 0 && last_reply[2] == CFW_OK);
     CHECK(px(20, 50) == 9 && px(27, 50) == 9 && px(28, 50) == 0 && px(20, 51) == 0 && px(28, 51) == 9);
-    CHECK(utf_calls == 1 && utf_font == 1 && utf_lines == 2 && utf_box[0] == 100 && utf_box[2] == 164 && utf_box[3] == 139);
+    CHECK(utf_calls == 1 && utf_font == 1 && utf_lines == 2 && utf_box[0] == 100 && utf_box[2] == 164 && utf_box[3] == 39);
     uint8_t shapes_no_asset[24] = { 0xF0, 0x0D, 0x00, 1, 14, 0, 15, 0, 0, 0, 0, 0, 77, 0 };
     CHECK(send_packet(shapes_no_asset, sizeof shapes_no_asset) == 0 && last_reply[2] == CFW_OK);   /* unknown asset: draws nothing */
 
@@ -856,7 +891,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(o6_bad, sizeof o6_bad) == 0 && last_reply[2] == CFW_BAD_RECORD);
     uint8_t show6[] = { 0xF0, 0x21, 0x03, 1, 6, 0 };
     reflash_calls = 0;
-    CHECK(send_packet(show6, sizeof show6) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1);
+    CHECK(send_packet(show6, sizeof show6) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2);
     CHECK(px(100, 100) == 15 && px(100, 80) == 15 && px(100, 79) == 0 && px(120, 100) == 15 && px(121, 100) == 0 && px(0, 0) == 0);
     /* Tween centre x, radius and colour over 4 frames; each frame pushes the union of the boxes. */
     post_calls = 0; reflash_calls = 0;
@@ -949,7 +984,7 @@ int main(int argc, char **argv)
     cfw_display_tick(state, 0x10, 0, 2);                                             /* cx 325 */
     reflash_calls = 0;
     uint8_t finish_all[] = { 0xF0, 0x24, 3 };
-    CHECK(send_packet(finish_all, sizeof finish_all) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && px(100, 100) == 8 && px(325, 100) == 0);
+    CHECK(send_packet(finish_all, sizeof finish_all) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2 && px(100, 100) == 8 && px(325, 100) == 0);
     cfw_display_tick(state, 0x10, 0, 2);
     CHECK(send_packet(astate, sizeof astate) == 0 && last_reply[3] == 0);
     /* A PUT or a HIDE stops the object's tween; the set holds 16 objects. */
@@ -979,17 +1014,16 @@ int main(int argc, char **argv)
     CHECK(host_ram2[0] == 0 && host_ram2[sizeof host_ram2 - 1] == 0);
     guards_intact();
 
-    /* Text level: the stock drawer writes full-bright glyphs (the host stub
-     * writes nothing, so the box is prefilled), which the object scales. */
+    /* Text level: the stock drawer writes full-bright glyphs (the stub inks
+     * every box row through the row table), which the object scales. */
     CHECK(send_packet(puts2, sizeof puts2) == 0 && last_reply[2] == CFW_OK);        /* string asset 9 again */
     uint8_t o3dim[] = { 0xF0, 0x20, 3, 0, 8, 0, 1, 0x01, 32, 0, 32, 0, 0x40, 0x02, 28, 0, 9, 0, 0x05, 0, 1 };  /* text at level 5 */
     CHECK(send_packet(o3dim, sizeof o3dim) == 0 && last_reply[2] == CFW_OK);
     memset(frame, 0, 200 * 320);
-    for (int row = 32; row < 60; row++) memset(frame + row * 320 + 16, 0xF9, 288);  /* 15 and 9 inside the box */
-    frame[32 * 320 + 15] = 0xFF;                                                     /* just left of the box */
-    uint8_t show3[] = { 0xF0, 0x21, 0x02, 1, 3, 0 };                                   /* no clear: the prefill stands in for glyphs */
+    utf_ink = 0xF9; utf_ink_bytes = 288;                                             /* 15 and 9 inside the box */
+    uint8_t show3[] = { 0xF0, 0x21, 0x02, 1, 3, 0 };
     CHECK(send_packet(show3, sizeof show3) == 0 && last_reply[2] == CFW_OK);
-    CHECK(frame[32 * 320 + 16] == 0x53 && frame[59 * 320 + 303] == 0x53 && frame[32 * 320 + 15] == 0xFF && frame[60 * 320 + 16] == 0 && frame[32 * 320 + 304] == 0);
+    CHECK(frame[32 * 320 + 16] == 0x53 && frame[59 * 320 + 303] == 0x53 && frame[32 * 320 + 15] == 0 && frame[60 * 320 + 16] == 0 && frame[32 * 320 + 304] == 0);
     uint8_t dim_tween[] = { 0xF0, 0x25, 0, 1, 3, 0, 0x00, 0x01, 1, 0, 15, 0 };         /* level back to 15 in one frame */
     CHECK(send_packet(dim_tween, sizeof dim_tween) == 0 && last_reply[2] == CFW_OK);
     cfw_display_tick(state, 0x10, 0, 2);
@@ -1007,6 +1041,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(show3push, sizeof show3push) == 0 && last_reply[2] == CFW_OK);
     uint8_t back_tween[] = { 0xF0, 0x25, 0, 1, 3, 0, 0x01, 0x00, 0, 0, 32, 0 };        /* snap back to x 32 */
     CHECK(send_packet(back_tween, sizeof back_tween) == 0 && last_reply[2] == CFW_OK);
+    utf_ink = 0;
 
     /* Paths (asset kind 3): commands in Q4 compiled on PUT; a square with a
      * same-winding square hole fills even-odd with the hole, nonzero without. */
@@ -1067,7 +1102,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(show10, sizeof show10) == 0 && last_reply[2] == CFW_OK && px(310, 90) == 15 && px(350, 50) == 0);
     uint8_t rot90[] = { 0xF0, 0x25, 0, 1, 10, 0, 0x00, 0x1C, 0, 0, 0xA0, 0x05, 0x5E, 0x01, 90, 0 };   /* angle 1440 (90 deg), pivot (350,90), snap */
     reflash_calls = 0;
-    CHECK(send_packet(rot90, sizeof rot90) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[4] == 640);
+    CHECK(send_packet(rot90, sizeof rot90) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2 && last_rect[4] == 640);
     CHECK(px(350, 50) == 15 && px(350, 130) == 15 && px(350, 30) == 0 && px(310, 90) == 0 && px(380, 90) == 0 && px(345, 90) == 15);
     uint8_t rot_back[] = { 0xF0, 0x25, 0, 1, 10, 0, 0x00, 0x04, 2, 0, 0, 0 };                      /* angle back to 0 over 2 frames */
     CHECK(send_packet(rot_back, sizeof rot_back) == 0 && last_reply[2] == CFW_OK);
@@ -1184,23 +1219,29 @@ int main(int argc, char **argv)
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 1;
 
     /* Work-mode changes do the same without a central connected, and the
-     * frame buffer is pushed again after the panel comes on. */
+     * canvas is re-composed from the shown objects and pushed after the
+     * panel comes on; the work-mode thread only asks, the display thread
+     * composes. A 2x1 rect at (14,0), level 5, marks frame row 0 byte 7. */
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
+    uint8_t mark[] = { 0xF0, 0x20, 50, 0, 1, 0, 2, 0x01, 14, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0x05, 0, 0 };
+    uint8_t show_mark[] = { 0xF0, 0x21, 0x00, 1, 50, 0 };
+    CHECK(send_packet(mark, sizeof mark) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(show_mark, sizeof show_mark) == 0 && last_reply[2] == CFW_OK);
     panel_cb_calls = 0;
-    host_frame[7] = 0xA5;
     pushed_row[7] = 0;
     panel[FW_PANEL_BRIGHTNESS_LEVEL] = 0x15;
     brightness_writes = resume_calls = suspend_calls = jbd_resume_calls = jbd_suspend_calls = 0;
     resume_refuses = 1;                     /* as on hardware: resume refuses, the power-on path follows */
     margin_rows = margin_dirty = margin_max_row = 0;
-    host_frame[0] = 0x3C;
-    cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness written, frame pushed */
+    cfw_work_mode(3);                       /* normal standby: worn, panel on, brightness written, push owed */
     CHECK(resume_calls == 1 && panel_cb_calls == 2 && brightness_writes == 1 && last_brightness == 0x15);
-    CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5 && jbd_resume_calls == 0);
+    CHECK(*(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0 && jbd_resume_calls == 0);
+    CHECK(cfw_animation()->repush == 1 && cfw_animation()->ticking == 1 && margin_rows == 0);
+    cfw_display_tick(state, 0x10, 0, 2);    /* the display thread composes and pushes */
+    CHECK(cfw_animation()->repush == 0 && cfw_animation()->ticking == 0 && pushed_row[7] == 0x55);
     /* All 480 physical rows were cleared independently of the nonzero
-     * viewport column; the retained frame is intact afterwards. */
-    CHECK(margin_rows == 480 && !margin_dirty && margin_max_row == 479 && host_frame[0] == 0x3C && host_frame[7] == 0xA5);
-    host_frame[0] = 0;
+     * viewport column; the window holds the composed objects afterwards. */
+    CHECK(margin_rows == 480 && !margin_dirty && margin_max_row == 479 && host_frame[0] == 0 && host_frame[7] == 0x55);
     cfw_work_mode(2);                       /* normal run: already on */
     CHECK(panel_cb_calls == 2);
     /* The frame is pushed again 600 ms and 1.2 s after power-up (the first
@@ -1210,14 +1251,18 @@ int main(int argc, char **argv)
     cfw_work_mode_tick(); cfw_work_mode_tick();
     CHECK(pushed_row[7] == 0);
     cfw_work_mode_tick();                   /* third tick: push */
-    CHECK(pushed_row[7] == 0xA5 && panel_cb_calls == 2);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(pushed_row[7] == 0x55 && panel_cb_calls == 2);
     pushed_row[7] = 0;
     cfw_work_mode_tick(); cfw_work_mode_tick();
+    cfw_display_tick(state, 0x10, 0, 2);
     CHECK(pushed_row[7] == 0);
     cfw_work_mode_tick();                   /* sixth tick: push again */
-    CHECK(pushed_row[7] == 0xA5);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(pushed_row[7] == 0x55);
     pushed_row[7] = 0;
     cfw_work_mode_tick();                   /* and then no more */
+    cfw_display_tick(state, 0x10, 0, 2);
     CHECK(pushed_row[7] == 0);
     cfw_work_mode(4);                       /* taken off: the passes wait it out */
     CHECK(suspend_calls == 0 && panel_cb_calls == 2 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1);
@@ -1239,7 +1284,8 @@ int main(int argc, char **argv)
     state[FW_STATE_WEAR_DETECT] = 0;        /* wear detection switched off in the user settings */
     pushed_row[7] = 0;
     cfw_work_mode_tick();                   /* worn, panel found off: back on, frame pushed */
-    CHECK(panel_cb_calls == 3 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0xA5);
+    cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(panel_cb_calls == 3 && *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) == 1 && pushed_row[7] == 0x55);
     CHECK(state[FW_STATE_WEAR_DETECT] == 1); /* and the setting is back on */
     cfw_work_mode_tick();                   /* steady: nothing */
     CHECK(panel_cb_calls == 3);
@@ -1338,9 +1384,11 @@ int main(int argc, char **argv)
     margin_rows = margin_dirty = margin_max_row = 0;
     uint8_t view_set[] = { 0xF0, 0x14, 0x00, 0xF8, 0xFF, 0x23, 0x00 };   /* dx -8, dy +35 */
     CHECK(send_packet(view_set, sizeof view_set) == 0 && last_reply[2] == CFW_OK);
-    /* The physical cache is cleared, then the moved canvas (origin 210 + 35) is pushed. */
+    /* The physical cache is cleared, then the moved canvas (origin 210 + 35) is
+     * pushed: rows 200..379 first (panel rows 445..479; the rest is off the
+     * panel), then the window. */
     CHECK(margin_rows == 480 && !margin_dirty && margin_max_row == 479);
-    CHECK(reflash_calls == 1 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
+    CHECK(reflash_calls == 2 && last_rect[0] == 0 && last_rect[1] == 245 && last_rect[2] == 0 && last_rect[4] == 640 && last_rect[5] == 199);
     CHECK(last_reply[3] == 0xF8 && last_reply[4] == 0xFF && last_reply[5] == 0x23 && last_reply[9] == 210);
     /* A panel power-up uses separate scratch RAM, preserving view and microphone state. */
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
@@ -1387,7 +1435,7 @@ int main(int argc, char **argv)
     CHECK(send_packet(view_short, sizeof view_short) == 0 && last_reply[2] == CFW_BAD_LENGTH);
     uint8_t view_zero[] = { 0xF0, 0x14, 0x00, 0, 0, 0, 0 };
     reflash_calls = 0;
-    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 1 && last_rect[1] == 210);
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2 && last_rect[1] == 210);
     *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) = 0;
     reflash_calls = 0;
     CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK && reflash_calls == 0);   /* panel off: nothing to blank */
@@ -1395,15 +1443,17 @@ int main(int argc, char **argv)
     uint8_t flush_all[] = { 0xF0, 0x03, 0, 0, 0, 0, 0x80, 0x02, 0xC8, 0x00 };
     CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK && last_rect[0] == 0 && last_rect[1] == 210);
 
-    /* Depth shift: content moves inside the frame during the push and comes back. */
+    /* Depth shift: content moves inside the frame during the push and comes
+     * back. A VIEW change re-composes the canvas, so the direct pixels go in
+     * after it. */
+    uint8_t view_dx[] = { 0xF0, 0x14, 0x00, 8, 0, 0, 0 };     /* dx +8 (right lens, near gear) */
+    CHECK(send_packet(view_dx, sizeof view_dx) == 0 && last_reply[2] == CFW_OK && cfw_animation()->window);
     memset(frame, 0, 200 * 320);
     frame[0 * 320 + 50] = 0xF0;       /* canvas pixel (100, 0) */
     frame[3 * 320 + 319] = 0x0F;      /* canvas pixel (639, 3) at the right edge */
     frame[5 * 320 + 0] = 0xF0;        /* canvas pixel (0, 5) at the left edge */
     uint8_t snapshot[200 * 320];
     memcpy(snapshot, frame, sizeof snapshot);
-    uint8_t view_dx[] = { 0xF0, 0x14, 0x00, 8, 0, 0, 0 };     /* dx +8 (right lens, near gear) */
-    CHECK(send_packet(view_dx, sizeof view_dx) == 0 && last_reply[2] == CFW_OK);
     CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK);
     CHECK(last_rect[0] == 0 && last_rect[2] == 0 && last_rect[4] == 640);
     CHECK(pushed_row[54] == 0xF0 && pushed_row[50] == 0 && pushed_row[0] == 0 && pushed_row[3] == 0);
@@ -1414,6 +1464,7 @@ int main(int argc, char **argv)
     CHECK(memcmp(frame, snapshot, sizeof snapshot) == 0);
     uint8_t view_dxn[] = { 0xF0, 0x14, 0x00, 0xF4, 0xFF, 0, 0 };   /* dx -12 (left lens, far gear) */
     CHECK(send_packet(view_dxn, sizeof view_dxn) == 0 && last_reply[2] == CFW_OK);
+    memcpy(frame, snapshot, sizeof snapshot);
     CHECK(send_packet(flush_all, sizeof flush_all) == 0 && last_reply[2] == CFW_OK && last_rect[2] == 0 && last_rect[4] == 640);
     CHECK(pushed_row[44] == 0xF0 && pushed_row[50] == 0);
     CHECK(memcmp(frame, snapshot, sizeof snapshot) == 0);
@@ -1424,7 +1475,105 @@ int main(int argc, char **argv)
     CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK);
     for (int i = 0; i < 32; i++) { CHECK(host_ram3[i] == 0); CHECK(host_ram3[sizeof host_ram3 - 1 - i] == 0); }
 
+    /* The 640x380 canvas: rows 200..379 are composed through the buffer in a
+     * band of their own and pushed at the row origin + 200. */
+    cfw_display_tick(state, 0x10, 0, 2);
+    uint8_t view_tall[] = { 0xF0, 0x14, 0x00, 0, 0, 0x92, 0xFF };   /* dy -110: origin 100, the canvas on rows 100..479 */
+    CHECK(send_packet(view_tall, sizeof view_tall) == 0 && last_reply[2] == CFW_OK);
+    uint8_t low[] = { 0xF0, 0x20, 51, 0, 1, 0, 2, 0x01, 20, 0, 0x2C, 0x01, 8, 0, 4, 0, 0, 0, 0x09, 0, 0 };   /* rect 8x4 at (20,300), level 9 */
+    CHECK(send_packet(low, sizeof low) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show_low[] = { 0xF0, 0x21, 0x02, 2, 50, 0, 51, 0 };
+    reflash_calls = 0;
+    memset(panel_cache, 0, sizeof panel_cache);
+    CHECK(send_packet(show_low, sizeof show_low) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2 && cfw_animation()->window);
+    CHECK(panel_cache[400 * 320 + 10] == 0x99 && panel_cache[403 * 320 + 13] == 0x99 && panel_cache[404 * 320 + 10] == 0 && panel_cache[400 * 320 + 14] == 0);
+    CHECK(panel_cache[100 * 320 + 7] == 0x55 && frame[7] == 0x55 && frame[100 * 320 + 10] == 0);   /* the window is in the buffer again */
+    /* A glide down there composes only its rows, with buffer row 0 = the band's first row. */
+    uint8_t glide_low[] = { 0xF0, 0x25, 33, 1, 51, 0, 0x02, 0x00, 4, 0, 0x5E, 0x01 };   /* y 300 -> 350 in 4 frames */
+    post_calls = 0; reflash_calls = 0;
+    CHECK(send_packet(glide_low, sizeof glide_low) == 0 && last_reply[2] == CFW_OK && post_calls == 1);
+    cfw_display_tick(state, 0x10, 0, 2);     /* y 312: rows 300..315 */
+    CHECK(reflash_calls == 1 && last_rect[1] == 400 && last_rect[3] == 0 && last_rect[5] == 15 && last_rect[2] == 20 && last_rect[4] == 28);
+    CHECK(!cfw_animation()->window && panel_cache[412 * 320 + 10] == 0x99 && panel_cache[400 * 320 + 10] == 0);
+    for (int i = 0; i < 3; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(!cfw_animation()->active && panel_cache[450 * 320 + 10] == 0x99 && panel_cache[412 * 320 + 10] == 0);
+    /* A direct draw first gets the window back from the objects. */
+    uint8_t fill_w[] = { 0xF0, 0x02, 0x00, 0, 0, 0, 0, 4, 0, 1, 0, 0x03 };              /* (0,0) 4x1 level 3, no push */
+    CHECK(send_packet(fill_w, sizeof fill_w) == 0 && last_reply[2] == CFW_OK && cfw_animation()->window);
+    CHECK(frame[0] == 0x33 && frame[1] == 0x33 && frame[7] == 0x55 && frame[50 * 320 + 10] == 0);
+    uint8_t fill_low[] = { 0xF0, 0x02, 0x00, 0, 0, 0x2C, 0x01, 4, 0, 1, 0, 0x03 };       /* direct draws stay in rows 0..199 */
+    CHECK(send_packet(fill_low, sizeof fill_low) == 0 && last_reply[2] == CFW_BAD_RECT);
+    /* FLUSH of the whole canvas: the window as drawn, rows 200..379 re-composed. */
+    uint8_t flush_canvas[] = { 0xF0, 0x03, 0, 0, 0, 0, 0x80, 0x02, 0x7C, 0x01 };
+    reflash_calls = 0;
+    memset(panel_cache, 0, sizeof panel_cache);
+    CHECK(send_packet(flush_canvas, sizeof flush_canvas) == 0 && last_reply[2] == CFW_OK && reflash_calls == 2);
+    CHECK(panel_cache[100 * 320] == 0x33 && panel_cache[100 * 320 + 7] == 0x55 && panel_cache[450 * 320 + 10] == 0x99);
+    flush_canvas[8] = 0x7D;                                                              /* 381 rows */
+    CHECK(send_packet(flush_canvas, sizeof flush_canvas) == 0 && last_reply[2] == CFW_BAD_RECT);
+    /* Text across the band edge is drawn in both bands through the CFW row
+     * table: canvas rows outside the band go to the scratch row. */
+    uint8_t put_hello[] = { 0xF0, 0x08, 12, 0, 0x02, 0x00, 0, 0, 0, 0, 'H', 'e', 'l', 'l', 'o' };
+    CHECK(send_packet(put_hello, sizeof put_hello) == 0 && last_reply[2] == CFW_OK);
+    uint8_t edge_text[] = { 0xF0, 0x20, 52, 0, 1, 0, 1, 0x01, 40, 0, 190, 0, 200, 0, 27, 0, 12, 0, 0x0F, 0, 1 };   /* (40,190) 200x27 */
+    CHECK(send_packet(edge_text, sizeof edge_text) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show_edge[] = { 0xF0, 0x21, 0x02, 1, 52, 0 };
+    utf_calls = 0;
+    CHECK(send_packet(show_edge, sizeof show_edge) == 0 && last_reply[2] == CFW_OK && utf_calls == 2 && utf_box[1] == 0 && utf_box[3] == 26);
+    CHECK(utf_firsts[0] == utf_spare && utf_tenths[0] == frame && utf_lasts[0] == frame + 16 * 320);       /* band 200..379 */
+    CHECK(utf_firsts[1] == frame + 190 * 320 && utf_tenths[1] == utf_spare && utf_lasts[1] == utf_spare);  /* the window */
+    /* A text box as tall as the canvas: the engine sees rows 0..349, all mapped. */
+    uint8_t tall_text[] = { 0xF0, 0x20, 52, 0, 2, 0, 1, 0x01, 0, 0, 10, 0, 0x80, 0x02, 0x5E, 0x01, 12, 0, 0x0F, 0, 12 };   /* (0,10) 640x350 */
+    CHECK(send_packet(tall_text, sizeof tall_text) == 0 && last_reply[2] == CFW_OK);
+    utf_calls = 0;
+    CHECK(send_packet(show_edge, sizeof show_edge) == 0 && last_reply[2] == CFW_OK && utf_calls == 2 && utf_box[3] == 349 && utf_lines == 12);
+    CHECK(utf_firsts[1] == frame + 10 * 320 && utf_lasts[1] == utf_spare && utf_lasts[0] == frame + 159 * 320);
+    guards_intact();
+    /* A frame slower than the period skips ahead instead of stretching the glide:
+     * 10 frames of 33 ms with every push taking 50 ms end in about 330 ms. */
+    CHECK(send_packet(show_low, sizeof show_low) == 0 && last_reply[2] == CFW_OK);
+    uint8_t glide_slow[] = { 0xF0, 0x25, 33, 1, 51, 0, 0x02, 0x00, 10, 0, 0xFA, 0x00 };  /* y 350 -> 250 in 10 frames */
+    CHECK(send_packet(glide_slow, sizeof glide_slow) == 0 && last_reply[2] == CFW_OK);
+    reflash_cost_ticks = 50u * 32768u / 1000u;
+    uint32_t slow_start = host_ticks;
+    int slow_ticks = 0;
+    while (cfw_animation()->active && slow_ticks < 40) {
+        cfw_display_tick(state, 0x10, 0, 2);
+        slow_ticks++;
+    }
+    uint32_t slow_ms = (host_ticks - slow_start) * 1000u / 32768u;
+    reflash_cost_ticks = 0;
+    CHECK(slow_ticks >= 5 && slow_ticks <= 8 && slow_ms >= 280 && slow_ms <= 400 && last_sleep == (int)CFW_TICK_REST);
+    CHECK(panel_cache[350 * 320 + 10] == 0x99 && cfw_animation()->frame_ms >= 49 && cfw_animation()->frame_ms <= 50);
+    /* With pushes cheaper than the period, the tick sleeps the rest of it. */
+    CHECK(send_packet(glide_low, sizeof glide_low) == 0 && last_reply[2] == CFW_OK);
+    reflash_cost_ticks = 10u * 32768u / 1000u;
+    cfw_display_tick(state, 0x10, 0, 2);
+    reflash_cost_ticks = 0;
+    CHECK(last_sleep == 23 || last_sleep == 24);
+    for (int i = 0; i < 4; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(!cfw_animation()->active);
+    /* A tick whose message was lost (queue full) is restarted by the next tween. */
+    cfw_animation()->ticking = 1;
+    cfw_animation()->ticked = cfw_clock() - 2048u;
+    post_calls = 0;
+    CHECK(send_packet(glide_low, sizeof glide_low) == 0 && last_reply[2] == CFW_OK && post_calls == 1);
+    for (int i = 0; i < 4; i++) cfw_display_tick(state, 0x10, 0, 2);
+    CHECK(!cfw_animation()->active && !cfw_animation()->ticking);
+    /* An object that cannot draw still leaves the rest of the canvas lit after a wake. */
+    uint8_t lost[] = { 0xF0, 0x20, 53, 0, 1, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 99, 0, 0x0F, 0, 0 };   /* image of asset 99 */
+    CHECK(send_packet(lost, sizeof lost) == 0 && last_reply[2] == CFW_OK);
+    uint8_t show_lost[] = { 0xF0, 0x21, 0x00, 2, 50, 0, 53, 0 };
+    CHECK(send_packet(show_lost, sizeof show_lost) == 0 && last_reply[2] == CFW_NO_ASSET);
+    CHECK(cfw_repush(panel) == CFW_NO_ASSET && !panel_dark && !panel_order_errors && frame[7] == 0x55);
+    uint8_t drop53[] = { 0xF0, 0x24, 1, 53, 0 };
+    CHECK(send_packet(drop53, sizeof drop53) == 0 && last_reply[2] == CFW_OK);
+    CHECK(send_packet(view_zero, sizeof view_zero) == 0 && last_reply[2] == CFW_OK);
+    guards_intact();
+
     /* IMU streaming rides the display-thread tick. */
+    cfw_display_tick(state, 0x10, 0, 2);   /* run the push the wear tests above left owed */
+    CHECK(!cfw_animation()->ticking && !cfw_animation()->repush);
     host_imu[0] = 16623; host_imu[1] = -32906; host_imu[2] = 1325;
     post_calls = 0; sleep_calls = 0;
     uint8_t imu_go[] = { 0xF0, 0x33, 50, 3, 0 };

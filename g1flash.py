@@ -161,6 +161,15 @@ CFW_MSG_MAX = 4096
 FRAME_W, FRAME_H, MAX_PACKET = 640, 200, 255
 
 
+def canvas_row_origin(gear, canvas_h):
+    """Panel row of the canvas top for a stock height gear (0-8): the stock
+    (8 - gear) * 35 for the 200-row canvas; a taller canvas (G1CFW/49) spreads
+    the gears over the 480 - height rows it can move."""
+    if canvas_h <= FRAME_H:
+        return (8 - gear) * 35
+    return (8 - gear) * (480 - canvas_h) // 8
+
+
 class CfwLink:
     """Request/reply helper for the private 0xF0 protocol over the Nordic UART service."""
 
@@ -397,7 +406,8 @@ async def run_cfw_command(client, args, checkpoint):
                 raise FirmwareError('Short INFO reply')
             result = {'panel_powered': bool(body[0]), 'max_packet': body[1],
                       'col_offset': struct.unpack_from('<h', body, 2)[0], 'row_offset': struct.unpack_from('<h', body, 4)[0],
-                      'frame_buffer': hex(struct.unpack_from('<I', body, 6)[0]), 'width': body[10] * 4, 'height': body[11]}
+                      'frame_buffer': hex(struct.unpack_from('<I', body, 6)[0]), 'width': body[10] * 4, 'height': body[11],
+                      'canvas_height': struct.unpack_from('<H', body, 12)[0] if len(body) >= 14 else body[11]}
         elif args.command == 'panel':
             mode = {'on': 1, 'off': 0, 'force_on': 2, 'force_off': 3, 'resume': 5, 'suspend': 4, 'wake': 7, 'sleep': 6}
             requested = next(name for name in mode if getattr(args, name))
@@ -614,7 +624,9 @@ async def run_cfw_command(client, args, checkpoint):
                 if args.dy is not None:
                     dy = args.dy
                 if args.height is not None:
-                    dy = (8 - args.height) * 35 - current['stock_row']
+                    info = await link.check(CFW_INFO)
+                    canvas_h = struct.unpack_from('<H', info, 12)[0] if len(info) >= 14 else FRAME_H
+                    dy = canvas_row_origin(args.height, canvas_h) - current['stock_row']
                 if args.depth is not None:
                     # The master (right) temple shifts the opposite way, as the stock UI does.
                     dx = DEPTH_SHIFT[args.depth] * (-1 if args.side == 'R' else 1)

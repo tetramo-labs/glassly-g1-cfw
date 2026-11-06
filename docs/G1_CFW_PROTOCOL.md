@@ -1,7 +1,8 @@
 # G1CFW private protocol (command byte `0xF0`)
 
-G1CFW/48 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
-revisions through 45 used 1.5.60. See the [port evidence](G1_CFW_163_PORT.md).
+G1CFW/49 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
+revisions through 45 used 1.5.60. See the [port evidence](G1_CFW_163_PORT.md)
+and, for the 640x380 canvas and timed tweens, [G1CFW/49](G1_CFW_49_CANVAS_AND_TIMING.md).
 The stock BLE receive hook call at `0x23d4e` calls `spec_ble_command_hook(data, len)` and only
 forwards a packet to the request dispatcher when that hook returns non-zero;
 the profile redirects the call to `cfw_rx`, which consumes `0xF0` packets and
@@ -37,8 +38,13 @@ reply:    F0 <sub> <status> <body...>
 
 A bare `F0` with no sub-command is answered `F0 FF 01`.
 
-Little-endian 16-bit fields are written `u16`. The frame is 640x200 at 4 bits
-per pixel, two pixels per byte, high nibble on the left, 320 bytes per row.
+Little-endian 16-bit fields are written `u16`. The frame buffer is 640x200 at
+4 bits per pixel, two pixels per byte, high nibble on the left, 320 bytes per
+row. From G1CFW/49 the canvas is **640x380**: retained objects are composed
+through the buffer in bands of up to 200 rows for every push, and the direct
+draws below (BLIT, FILL, TEXT, SHAPES, ASSET_DRAW, ASSET_TEXT) use canvas rows
+0..199, the window, which is re-composed from the objects first when a lower
+band went through the buffer since.
 Rectangles are `[x0:u16][y0:u16][w:u16][h:u16]` with even `x0` and `w`.
 
 ## `00` PING
@@ -70,7 +76,9 @@ Fills the rectangle with `level & 0xF`. `flags` bit 1 pushes it afterwards.
 
 ## `03` FLUSH: `[rect]`
 
-Pushes the rectangle from the frame buffer to the panel using the stock
+The rectangle is in canvas rows (0..379 from G1CFW/49): rows 0..199 go out
+from the buffer as drawn, the rows below are re-composed from the shown
+objects. Pushes the rectangle from the frame buffer to the panel using the stock
 `_reflash_fb_data_to_lcd` path with the stock column/row origins. The stock
 routine's x1 is exclusive (it sends `x1/2 - x0/2` bytes per row); the CFW
 passes `x0 + w`, so the full width including columns 638-639 is pushed. The
@@ -84,8 +92,9 @@ the stock driver's nine-bit row-address wrapping.
 
 ## `04` INFO
 
-Reply body: `[powered][max_packet][col_off:i16][row_off:i16][frame_ptr:u32][width/4][height]`.
-`max_packet` is 255; `width/4` is 160.
+Reply body: `[powered][max_packet][col_off:i16][row_off:i16][frame_ptr:u32][width/4][height][canvas_height:u16]`.
+`max_packet` is 255; `width/4` is 160; `height` is the buffer's 200 and
+`canvas_height` (G1CFW/49) 380.
 
 ## `05` PANEL: `[mode]`
 
@@ -126,8 +135,12 @@ line would pass `y1`. Font 0 is the proportional 20 px face (26-row cells,
 27 px line pitch; ASCII from internal flash, other scripts fetched from the
 external flash at draw time); fonts 1 and 2 are the stock digit faces, 32 and
 39 rows tall. `flags` bit 0 clears the box to black first, bit 1 pushes the
-box afterwards. `x0` and `x1` must be even, and `y1` plus the cell height
-must stay within 200 rows (so `y1 <= 173` for font 0). Text is 1-240 bytes;
+box afterwards. `x0` and `x1` must be even; a box that is cleared or pushed
+must keep `y1` plus the cell height within 200 rows (so `y1 <= 173` for font
+0), otherwise the text is clipped to the window. From G1CFW/49 the engine
+draws through a CFW row table with the box moved to engine row 0, so text
+objects clip at band and canvas edges and a box may be up to 380 rows tall.
+Text is 1-240 bytes;
 `\n` moves to the next line. Glyphs are only on or off; there is no grey
 level. TEXT is also a valid stream record.
 
@@ -236,10 +249,13 @@ engine or shape records, so showing a scene again costs one SHOW.
   and clipped to the frame (G1CFW/43): a glide interpolates the box on the
   glasses, so between frames it can sit on an odd column or partly off the
   canvas; what is clipped away draws nothing, as the G2 clips its text.
-- `21` OBJ_SHOW `[flags][count][ids:u16...]`: compose the listed objects in
-  order; bit 0 clears the frame first, bit 1 pushes it afterwards. An unknown
-  id refuses the whole SHOW before drawing.
-- `22` OBJ_HIDE `[flags]`: blank the frame (bit 1 pushes) and stop every
+- `21` OBJ_SHOW `[flags][count][ids:u16...]`: the listed objects, in order,
+  are the scene. Bit 1 composes and pushes the whole canvas; without it only
+  the window is composed (for direct draws and a FLUSH to follow). From
+  G1CFW/49 the canvas is always composed from cleared rows (bit 0 is
+  implied), every object is drawn, and the reply is the first object's render
+  status. An unknown id refuses the whole SHOW before drawing.
+- `22` OBJ_HIDE `[flags]`: blank the canvas (bit 1 pushes) and stop every
   animation; objects stay.
 - `23` OBJ_STATE: reply `[revision:u16][count][shown][id,version x up to 4]`
   of the shown list; with a `[page]` byte (G1CFW/40) the reply is
@@ -276,7 +292,10 @@ engine or shape records, so showing a scene again costs one SHOW.
   `width` wide) and pushes the whole frame. Each entry interpolates its object from its current
   values (mid-flight if it was already animating) to the targets over
   `frames` frames, `period_ms` apart (10-250; 0 keeps the current period);
-  `frames` 0 applies the targets at once. Entries merge into the running
+  `frames` 0 applies the targets at once. From G1CFW/49 progress is elapsed
+  time over `frames x period_ms`, counted from one period before the OBJ_ANIM
+  ran: a frame that takes longer than the period skips ahead, so a glide ends
+  on time. Entries merge into the running
   set by object id, so an ANIM for one object never disturbs another's
   glide; up to 16 objects animate at a time (`0B` when the set is full).
   Easing 0 linear, 1 smoothstep, 2 ease-out, 3 ease-in, or `80` (G1CFW/40)
@@ -292,7 +311,8 @@ engine or shape records, so showing a scene again costs one SHOW.
   (kind-4 shapes have a type-aware box); a kind-3 shapes object has no box
   and forces a whole-frame push. (G1CFW/17 to /37 took fixed 8-byte glide
   entries `id, tx, ty, frames, easing`.)
-- `26` ANIM_STATE: reply `[active][period_ms][ticks:u32][full_pushes:u32]`.
+- `26` ANIM_STATE: reply `[active][period_ms][ticks:u32][full_pushes:u32][frame_ms:u16]`
+  (`frame_ms`, G1CFW/49: compose and push time of the last tween frame).
 
 All but STATE are valid stream records.
 

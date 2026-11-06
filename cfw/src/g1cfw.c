@@ -1,5 +1,5 @@
 /*
- * G1CFW/48: injected handler for the private 0xF0 command on Even G1 1.6.3.
+ * G1CFW/49: injected handler for the private 0xF0 command on Even G1 1.6.3.
  *
  * Compiled by tools/build_blob.py into a position-independent blob that is
  * appended to the stock application image. The stock BLE receive entry calls
@@ -12,7 +12,10 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 48u
+/* Command, panel and input handlers are built for size; the per-frame
+ * paths (composition, rasterizers, text, push, tweens) stay at -Os. */
+#define CFW_COLD __attribute__((minsize))
+#define CFW_PROTOCOL 49u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -100,7 +103,7 @@ typedef struct {
 _Static_assert(sizeof(cfw_ctx) + CFW_MSG_MAX + CFW_ASSET_MAX * sizeof(cfw_asset) + sizeof(cfw_journal) <= FW_CFW_RAM_SIZE,
                "first CFW RAM region: context, message buffer, asset directory and the journal");
 
-static cfw_journal *cfw_journal_state(void)
+CFW_COLD static cfw_journal *cfw_journal_state(void)
 {
     cfw_journal *j = (cfw_journal *)(FW_CFW_RAM + sizeof(cfw_ctx) + CFW_MSG_MAX + CFW_ASSET_MAX * sizeof(cfw_asset));
     if (j->magic != CFW_JOURNAL_MAGIC) {
@@ -113,7 +116,7 @@ static cfw_journal *cfw_journal_state(void)
     return j;
 }
 
-static void cfw_journal_note(uint8_t kind, uint16_t id, uint16_t version)
+CFW_COLD static void cfw_journal_note(uint8_t kind, uint16_t id, uint16_t version)
 {
     cfw_journal *j = cfw_journal_state();
     cfw_journal_entry *e = &j->items[j->head];
@@ -173,7 +176,7 @@ static uint8_t *cfw_msg_buf(void)
 }
 
 /* CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection. */
-static uint16_t cfw_crc16(const uint8_t *p, uint32_t n)
+CFW_COLD static uint16_t cfw_crc16(const uint8_t *p, uint32_t n)
 {
     uint16_t crc = 0xFFFF;
     for (uint32_t i = 0; i < n; i++) {
@@ -195,7 +198,7 @@ typedef struct {
     uint8_t  error;
 } cfw_rle;
 
-static void cfw_rle_init(cfw_rle *r, const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_rle_init(cfw_rle *r, const uint8_t *p, uint32_t n)
 {
     r->p = p;
     r->end = p + n;
@@ -205,7 +208,7 @@ static void cfw_rle_init(cfw_rle *r, const uint8_t *p, uint32_t n)
     r->error = 0;
 }
 
-static uint8_t cfw_rle_next(cfw_rle *r)
+CFW_COLD static uint8_t cfw_rle_next(cfw_rle *r)
 {
     while (r->run == 0) {
         if (r->p >= r->end) {
@@ -253,8 +256,8 @@ static uint16_t rd16(const uint8_t *p)
 }
 
 /* Parse [x0:u16][y0:u16][w:u16][h:u16]; pixel columns are pairs, so x0 and w
- * must be even. Everything must stay inside the 640x200 frame. */
-static int cfw_parse_rect(const uint8_t *p, cfw_rect *r)
+ * must be even. Rows must stay inside [y_lo, y_hi). */
+CFW_COLD static int cfw_parse_rect(const uint8_t *p, cfw_rect *r, uint32_t y_lo, uint32_t y_hi)
 {
     r->x0 = rd16(p);
     r->y0 = rd16(p + 2);
@@ -263,7 +266,7 @@ static int cfw_parse_rect(const uint8_t *p, cfw_rect *r)
     if ((r->x0 | r->w) & 1u || r->w == 0 || r->h == 0) {
         return 0;
     }
-    if (r->x0 + r->w > FW_FRAME_WIDTH || r->y0 + r->h > FW_FRAME_HEIGHT) {
+    if (r->x0 + r->w > FW_FRAME_WIDTH || r->y0 < y_lo || r->y0 + r->h > y_hi) {
         return 0;
     }
     return 1;
@@ -274,13 +277,75 @@ static uint8_t *cfw_panel(void)
     return FW_GET_STATE() + FW_PANEL_OFFSET;
 }
 
-static uint8_t *cfw_row(uint8_t *panel, uint32_t y, uint32_t x)
+/* --- canvas: 640xCFW_CANVAS_H, composed in bands through the stock buffer ---
+ * The stock heap holds one 640x200 frame (64,000 bytes) and has no room for
+ * a second, so the canvas is not stored: retained objects are re-rendered
+ * for every push, at most FW_FRAME_HEIGHT rows at a time. `band` is the
+ * canvas row held by buffer row 0 while a band is composed; outside
+ * composition it is 0 and the buffer is the window onto canvas rows 0..199
+ * that the direct-draw commands (BLIT, FILL, TEXT, SHAPES, ASSET_DRAW) use. */
+#define CFW_CANVAS_H 380u
+/* --- animation: tweens stepped on the display thread ----------------------
+ * A tween's progress is the time since its OBJ_ANIM landed over its duration
+ * (`frames` x the frame period), like g2flash's GLASSLYCFW/41: a frame that
+ * takes longer than the period drops frames instead of stretching the glide.
+ * The first step shows on the tick the OBJ_ANIM queues, the last `frames - 1`
+ * periods later.
+ * The clock is the kernel tick counter in 1/1024 s units (FW_TICKS32 >> 5);
+ * a duration is at most 255 frames of 250 ms, 65,280 units. */
+#define CFW_ANIM_MAX    16u
+#define CFW_ANIM_VALUES 13u          /* mask bits: p0..p7, level (colour), width, angle, pivot x, pivot y */
+#define CFW_ANIM_GLIDES 11u          /* values that glide; the pivot moves at once */
+#define CFW_ANIM_LEVEL_BIT 0x100u
+#define CFW_ANIM_WIDTH_BIT 0x200u
+#define CFW_ANIM_ROTATE_BITS 0x1C00u   /* angle (Q4 degrees), pivot x, pivot y */
+#define CFW_EASE_CURVE 0x80u         /* easing byte: a CSS cubic-bezier (4 bytes) follows the values */
+typedef struct {
+    uint16_t id, mask;         /* mask: one bit per animated value */
+    uint32_t start;            /* clock when the OBJ_ANIM landed */
+    uint16_t dur;              /* clock units; 0 = finished */
+    uint8_t  easing, pad;
+    uint8_t  curve[4];         /* x1 y1 x2 y2 in 0..255 when easing is CFW_EASE_CURVE */
+    int16_t  from[CFW_ANIM_GLIDES], to[CFW_ANIM_GLIDES];
+} cfw_anim;                    /* 60 bytes */
+
+typedef struct {
+    uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
+    uint8_t  active;           /* tweens in flight */
+    uint8_t  period_ms;
+    uint8_t  count;
+    uint8_t  ticking;          /* a display-thread tick is queued or running */
+    uint32_t ticks;            /* frames rendered since boot */
+    uint32_t full_pushes;      /* frames that needed a whole-canvas push */
+    uint16_t clip_y0, clip_y1; /* canvas rows the renderers may write (exclusive end) */
+    uint16_t band;             /* canvas row in buffer row 0 */
+    uint8_t  window;           /* the buffer holds canvas rows 0..199 */
+    uint8_t  repush;           /* a whole-canvas push is owed on the display thread */
+    uint16_t render_errors;    /* object renders that returned a status while presenting */
+    uint16_t frame_ms;         /* compose and push time of the last animation frame */
+    uint32_t ticked;           /* clock at the start of the last tick */
+    cfw_anim items[CFW_ANIM_MAX];
+} cfw_anims;
+#define CFW_ANIM_MAGIC 0x334d4e41u  /* "ANM3" */
+static cfw_anims *cfw_animation(void);
+
+static int32_t cfw_band(void)
 {
-    uint8_t *frame = FW_FRAME_OF(panel);
-    return frame + y * FW_FRAME_STRIDE + x / 2;
+    return cfw_animation()->band;
 }
 
-/* --- view: where the 640x200 frame lands on the panel -----------------------
+static uint32_t cfw_clock(void)
+{
+    return FW_TICKS32() >> 5;
+}
+
+static uint8_t *cfw_row(uint8_t *panel, uint32_t y, uint32_t x)
+{
+    uintptr_t frame = (uintptr_t)FW_FRAME_OF(panel);
+    return (uint8_t *)(frame + (uintptr_t)(((int32_t)y - cfw_band()) * (int32_t)FW_FRAME_STRIDE) + x / 2);
+}
+
+/* --- view: where the canvas lands on the panel -------------------------------
  * The stock UI realises the phone's height gear as the panel row origin
  * ((8 - gear) * 35 rows; both temples read 210 = gear 2) and the depth gear
  * as an opposite horizontal shift of the two lenses' content (pos_x table in
@@ -351,6 +416,9 @@ static void cfw_view_shift(uint8_t *frame, const cfw_rect *r, int dx, int *px0, 
     }
 }
 
+/* Push canvas rows of `r` from the buffer: they must lie in the band the
+ * buffer holds (clamped to it, so a push never reads or patches bytes
+ * outside the stock buffer). */
 static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
 {
     if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
@@ -358,14 +426,18 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
     }
     cfw_view *v = cfw_view_state();
     v->flushes++;
+    int band = cfw_band();
     int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
     int row = *(int *)(panel + FW_PANEL_ROW_OFFSET) + v->dy;
     /* The stock driver masks row addresses to nine bits. Clip in canvas
      * coordinates before calling it, so an off-panel VIEW cannot wrap. */
     int y0 = (int)r->y0, y1 = (int)(r->y0 + r->h - 1);
+    if (y0 < band) y0 = band;
+    if (y1 >= band + FW_FRAME_HEIGHT) y1 = band + FW_FRAME_HEIGHT - 1;
     if (y0 + row < 0) y0 = -row;
     if (y1 + row >= FW_PANEL_MEM_ROWS) y1 = FW_PANEL_MEM_ROWS - 1 - row;
     if (y0 > y1) return CFW_OK;
+    cfw_rect b = { r->x0, (uint32_t)(y0 - band), r->w, (uint32_t)(y1 - y0 + 1) };
     /* The stock routine sends (x1 - x0) / 2 bytes per row, so x1 is exclusive
      * in pixels even though y1 is inclusive. Passing x0 + w - 1 would drop the
      * last pixel pair of every row (the stock full-frame caller passes 0x27f
@@ -377,13 +449,13 @@ static uint8_t cfw_flush(uint8_t *panel, const cfw_rect *r)
     int px0 = (int)r->x0, px1 = (int)(r->x0 + r->w), rc = 0;
     FW_LCD_LOCK(-1);
     if (v->dx) {
-        cfw_view_shift(frame, r, v->dx, &px0, &px1, 0);
+        cfw_view_shift(frame, &b, v->dx, &px0, &px1, 0);
     }
     if (px1 > px0) {
-        rc = FW_REFLASH_FB(col, row, px0, y0, px1, y1);
+        rc = FW_REFLASH_FB(col, row + band, px0, (int)b.y0, px1, (int)(b.y0 + b.h - 1));
     }
     if (v->dx) {
-        cfw_view_shift(frame, r, v->dx, &px0, &px1, 1);
+        cfw_view_shift(frame, &b, v->dx, &px0, &px1, 1);
     }
     FW_LCD_UNLOCK();
     return rc < 0 ? CFW_PANEL_OFF : CFW_OK;
@@ -395,7 +467,8 @@ static uint8_t cfw_blit_from(const uint8_t *hdr, const uint8_t *px, uint32_t px_
     cfw_rect r;
     cfw_rle rle;
     uint8_t flags = hdr[0];
-    if (!cfw_parse_rect(hdr + 1, &r)) {
+    cfw_anims *an = cfw_animation();
+    if (!cfw_parse_rect(hdr + 1, &r, an->clip_y0, an->clip_y1)) {
         return CFW_BAD_RECT;
     }
     uint32_t stride = (flags & CFW_BLIT_1BPP) ? (r.w + 7) / 8 : r.w / 2;
@@ -433,7 +506,7 @@ static uint8_t cfw_blit_from(const uint8_t *hdr, const uint8_t *px, uint32_t px_
 }
 
 /* [flags][rect][pixels]: write a rectangle into the frame buffer. */
-static uint8_t cfw_blit(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_blit(const uint8_t *p, uint32_t n)
 {
     if (n < 9) {
         return CFW_BAD_LENGTH;
@@ -442,13 +515,13 @@ static uint8_t cfw_blit(const uint8_t *p, uint32_t n)
 }
 
 /* [flags][rect][nibble]: fill a rectangle with one grey level. */
-static uint8_t cfw_fill(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_fill(const uint8_t *p, uint32_t n)
 {
     cfw_rect r;
     if (n < 10) {
         return CFW_BAD_LENGTH;
     }
-    if (!cfw_parse_rect(p + 1, &r)) {
+    if (!cfw_parse_rect(p + 1, &r, 0, FW_FRAME_HEIGHT)) {
         return CFW_BAD_RECT;
     }
     uint8_t *panel = cfw_panel();
@@ -462,20 +535,23 @@ static uint8_t cfw_fill(const uint8_t *p, uint32_t n)
     return (p[0] & CFW_FLAG_FLUSH) ? cfw_flush(panel, &r) : CFW_OK;
 }
 
-/* [rect]: push a rectangle of the frame buffer to the panel. */
-static uint8_t cfw_flush_cmd(const uint8_t *p, uint32_t n)
+static uint8_t cfw_push(const cfw_rect *r);
+
+/* [rect]: push a rectangle of the canvas to the panel: rows 0..199 from the
+ * buffer as drawn, the rows below re-rendered from the shown objects. */
+CFW_COLD static uint8_t cfw_flush_cmd(const uint8_t *p, uint32_t n)
 {
     cfw_rect r;
     if (n < 8) {
         return CFW_BAD_LENGTH;
     }
-    if (!cfw_parse_rect(p, &r)) {
+    if (!cfw_parse_rect(p, &r, 0, CFW_CANVAS_H)) {
         return CFW_BAD_RECT;
     }
-    return cfw_flush(cfw_panel(), &r);
+    return cfw_push(&r);
 }
 
-static void cfw_reply(uint8_t sub, uint8_t status, const uint8_t *body, uint32_t n)
+CFW_COLD static void cfw_reply(uint8_t sub, uint8_t status, const uint8_t *body, uint32_t n)
 {
     uint8_t buf[20];
     uint32_t i;
@@ -492,10 +568,10 @@ static void cfw_reply(uint8_t sub, uint8_t status, const uint8_t *body, uint32_t
     send(buf, 3 + n);
 }
 
-static void cfw_info(void)
+CFW_COLD static void cfw_info(void)
 {
     uint8_t *panel = cfw_panel();
-    uint8_t body[12];
+    uint8_t body[14];
     uint32_t frame = *(uint32_t *)(panel + FW_PANEL_FRAME);
     int col = *(int *)(panel + FW_PANEL_COL_OFFSET);
     int row = *(int *)(panel + FW_PANEL_ROW_OFFSET);
@@ -510,17 +586,19 @@ static void cfw_info(void)
     }
     body[10] = (uint8_t)(FW_FRAME_WIDTH >> 2);
     body[11] = FW_FRAME_HEIGHT;
+    body[12] = (uint8_t)CFW_CANVAS_H;
+    body[13] = (uint8_t)(CFW_CANVAS_H >> 8);
     cfw_reply(CFW_INFO, CFW_OK, body, sizeof body);
 }
 
-static void cfw_panel_up(uint8_t *panel);
+static void cfw_panel_up(uint8_t *panel, int now);
 
 /* [mode]: 1 resumes the panel through the stock system-resume path, 0 suspends
  * it; 2 calls the panel context's own on callback (bypassing the stock
  * wear/dock policy) and 3 its off callback. The modes that bring the panel
  * up (1, 2, 5, 7) blank it outside the canvas and push the frame, like the
  * wear switch. Reply body: [power state byte][panel powered]. */
-static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
 {
     uint8_t *state = FW_GET_STATE();
     uint8_t body[2];
@@ -551,59 +629,11 @@ static void cfw_panel_cmd(const uint8_t *p, uint32_t n)
         return;
     }
     if ((0xA6u >> p[0]) & 1) {       /* modes 1, 2, 5 and 7 bring the panel up */
-        cfw_panel_up(state + FW_PANEL_OFFSET);
+        cfw_panel_up(state + FW_PANEL_OFFSET, 1);
     }
     body[0] = state[FW_STATE_POWER_OFFSET];
     body[1] = *(int *)(state + FW_PANEL_OFFSET + FW_PANEL_POWERED) != 0;
     cfw_reply(CFW_PANEL, CFW_OK, body, sizeof body);
-}
-
-/* [font][flags][x0:u16][y0:u16][x1:u16][y1:u16][max_lines][utf8...]: draw
- * text with the stock font engine. flags bit 0 clears the box first, bit 1
- * pushes it afterwards. x0/x1 must be even (the drawer truncates odd x), and
- * the box bottom must leave room for a full glyph cell. */
-#define CFW_TEXT_CLEAR 0x01u
-#define CFW_TEXT_MAX   240u
-
-static uint8_t cfw_text(const uint8_t *p, uint32_t n)
-{
-    static const uint8_t cell_rows[3] = { 27, 32, 39 };
-    char text[CFW_TEXT_MAX + 1];
-    if (n < 12) {
-        return CFW_BAD_LENGTH;
-    }
-    uint8_t font = p[0], flags = p[1];
-    uint32_t x0 = rd16(p + 2), y0 = rd16(p + 4), x1 = rd16(p + 6), y1 = rd16(p + 8);
-    uint32_t lines = p[10];
-    uint32_t len = n - 11;
-    if (font > 2) {
-        return CFW_BAD_FONT;
-    }
-    if (len == 0 || len > CFW_TEXT_MAX) {
-        return CFW_BAD_LENGTH;
-    }
-    if ((x0 | x1) & 1u || x0 >= x1 || x1 > FW_FRAME_WIDTH || y0 >= y1 || lines == 0 ||
-        y1 + cell_rows[font] > FW_FRAME_HEIGHT) {
-        return CFW_BAD_RECT;
-    }
-    for (uint32_t i = 0; i < len; i++) {
-        text[i] = (char)p[11 + i];
-    }
-    text[len] = 0;
-    uint8_t *panel = cfw_panel();
-    cfw_rect box = { x0, y0, x1 - x0, y1 - y0 + 1 };
-    if (flags & CFW_TEXT_CLEAR) {
-        for (uint32_t y = 0; y < box.h; y++) {
-            uint8_t *dst = cfw_row(panel, box.y0 + y, box.x0);
-            for (uint32_t i = 0; i < box.w / 2; i++) {
-                dst[i] = 0;
-            }
-        }
-    }
-    FW_GUI_SET_ROWS(panel + FW_PANEL_ROWS);
-    FW_GUI_MANUAL_FLUSH();
-    FW_GUI_UTF_DRAW(0, text, font, (int)x0, (int)y0, (int)x1, (int)y1, lines, 0, 0, 0, 0);
-    return (flags & CFW_FLAG_FLUSH) ? cfw_flush(panel, &box) : CFW_OK;
 }
 
 /* Path assets are flattened into the third CFW RAM region (see the vector section). */
@@ -623,13 +653,85 @@ static cfw_vwork *cfw_vector_work(void)
     return (cfw_vwork *)FW_CFW_RAM3;
 }
 
+/* [font][flags][x0:u16][y0:u16][x1:u16][y1:u16][max_lines][utf8...]: draw
+ * text with the stock font engine. flags bit 0 clears the box first, bit 1
+ * pushes it afterwards; a box that is cleared or pushed must lie in canvas
+ * rows 0..199. x0/x1 must be even (the drawer truncates odd x).
+ *
+ * The engine writes glyph rows through a row-pointer table. The CFW gives
+ * it its own (after the path workspace in the third RAM region) with the
+ * box translated to engine row 0: rows inside the band being composed point
+ * into the buffer, every other row at a scratch row. So text clips cleanly
+ * at band and canvas edges, and with the stock start-row clamp patched out
+ * (__copy_to_frame_buffer, cfw/targets) a box may be as tall as the canvas. */
+#define CFW_TEXT_CLEAR 0x01u
+#define CFW_TEXT_MAX   240u
+#define CFW_TEXT_ROWS  (CFW_CANVAS_H + 40u)   /* box rows plus the tallest glyph cell (39) */
+#define CFW_TEXT_SPARE 336u                    /* scratch row: 320 bytes and a glyph's overhang */
+/* 32-bit row pointers on the glasses; the host test supplies its own table. */
+_Static_assert(sizeof(cfw_vwork) + CFW_TEXT_ROWS * 4u + CFW_TEXT_SPARE <= FW_CFW_RAM3_SIZE,
+               "third CFW RAM region: the path workspace, then the text row table and its scratch row");
+#ifndef CFW_TEXT_TABLE
+#define CFW_TEXT_TABLE ((uint8_t **)(FW_CFW_RAM3 + sizeof(cfw_vwork)))
+#endif
+
+static uint8_t cfw_text(const uint8_t *p, uint32_t n)
+{
+    static const uint8_t cell_rows[3] = { 27, 32, 39 };
+    char text[CFW_TEXT_MAX + 1];
+    if (n < 12) {
+        return CFW_BAD_LENGTH;
+    }
+    uint8_t font = p[0], flags = p[1];
+    int32_t x0 = rd16(p + 2), y0 = (int16_t)rd16(p + 4), x1 = rd16(p + 6), y1 = (int16_t)rd16(p + 8);
+    uint32_t lines = p[10];
+    uint32_t len = n - 11;
+    if (font > 2) {
+        return CFW_BAD_FONT;
+    }
+    if (len == 0 || len > CFW_TEXT_MAX) {
+        return CFW_BAD_LENGTH;
+    }
+    if ((x0 | x1) & 1 || x0 >= x1 || x1 > FW_FRAME_WIDTH || y0 >= y1 || lines == 0 || y1 - y0 > (int32_t)CFW_CANVAS_H ||
+        ((flags & (CFW_TEXT_CLEAR | CFW_FLAG_FLUSH)) && (y0 < 0 || y1 + cell_rows[font] > FW_FRAME_HEIGHT))) {
+        return CFW_BAD_RECT;
+    }
+    for (uint32_t i = 0; i < len; i++) {
+        text[i] = (char)p[11 + i];
+    }
+    text[len] = 0;
+    uint8_t *panel = cfw_panel();
+    cfw_rect box = { (uint32_t)x0, (uint32_t)y0, (uint32_t)(x1 - x0), (uint32_t)(y1 - y0 + 1) };
+    if (flags & CFW_TEXT_CLEAR) {
+        for (uint32_t y = 0; y < box.h; y++) {
+            uint8_t *dst = cfw_row(panel, box.y0 + y, box.x0);
+            for (uint32_t i = 0; i < box.w / 2; i++) {
+                dst[i] = 0;
+            }
+        }
+    }
+    cfw_anims *an = cfw_animation();
+    uint8_t **rows = CFW_TEXT_TABLE;
+    uint8_t *spare = (uint8_t *)(rows + CFW_TEXT_ROWS);
+    uint8_t *base = cfw_row(panel, 0, 0);
+    for (uint32_t e = 0; e < CFW_TEXT_ROWS; e++) {
+        int32_t c = y0 + (int32_t)e;
+        rows[e] = (c >= an->clip_y0 && c < an->clip_y1) ? base + c * (int32_t)FW_FRAME_STRIDE : spare;
+    }
+    FW_GUI_SET_ROWS(rows);
+    FW_GUI_MANUAL_FLUSH();
+    FW_GUI_UTF_DRAW(0, text, font, (int)x0, 0, (int)x1, (int)(y1 - y0), lines, 0, 0, 0, 0);
+    FW_GUI_SET_ROWS(panel + FW_PANEL_ROWS);
+    return (flags & CFW_FLAG_FLUSH) ? cfw_flush(panel, &box) : CFW_OK;
+}
+
 static int cv_compile(cfw_vwork *w, const uint8_t *src, uint32_t len);
 
 /* [id:u16][kind][flags][w:u16][h:u16][data...]: store an asset. flags bit 0
  * appends to the open asset with this id (same kind/size), otherwise a new
  * asset replaces any entry with the same id. Only the newest asset can grow.
  * The arena comes from the stock heap on first use. */
-static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
 {
     cfw_ctx *c = cfw_context();
     if (n < 8) {
@@ -643,7 +745,7 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
     if (kind > CFW_ASSET_PATH || (kind == CFW_ASSET_PATH && ((flags & 1u) || w > 1))) {
         return CFW_BAD_ASSET;
     }
-    if (kind <= CFW_ASSET_4BPP && (w == 0 || h == 0 || (w & 1u) || w > FW_FRAME_WIDTH || h > FW_FRAME_HEIGHT)) {
+    if (kind <= CFW_ASSET_4BPP && (w == 0 || h == 0 || (w & 1u) || w > FW_FRAME_WIDTH || h > CFW_CANVAS_H)) {
         return CFW_BAD_RECT;
     }
     int edges = 0;
@@ -749,7 +851,7 @@ static uint8_t cfw_asset_put(const uint8_t *p, uint32_t n)
 
 /* [id:u16][flags][x:u16][y:u16]: blit an image asset. flags as BLIT (bit 1
  * flush, high nibble grey level for 1bpp). */
-static uint8_t cfw_asset_draw(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_asset_draw(const uint8_t *p, uint32_t n)
 {
     cfw_ctx *c = cfw_context();
     uint8_t hdr[9];
@@ -773,7 +875,7 @@ static uint8_t cfw_asset_draw(const uint8_t *p, uint32_t n)
 }
 
 /* [id:u16][font][flags][box][max_lines]: TEXT with a string asset. */
-static uint8_t cfw_asset_text(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_asset_text(const uint8_t *p, uint32_t n)
 {
     cfw_ctx *c = cfw_context();
     uint8_t packet[11 + CFW_TEXT_MAX];
@@ -797,7 +899,7 @@ static uint8_t cfw_asset_text(const uint8_t *p, uint32_t n)
     return cfw_text(packet, 11 + a->bytes);
 }
 
-static uint8_t cfw_asset_clear(void)
+CFW_COLD static uint8_t cfw_asset_clear(void)
 {
     cfw_ctx *c = cfw_context();
     c->asset_count = 0;
@@ -806,7 +908,7 @@ static uint8_t cfw_asset_clear(void)
     return CFW_OK;
 }
 
-static void cfw_asset_info(void)
+CFW_COLD static void cfw_asset_info(void)
 {
     cfw_ctx *c = cfw_context();
     uint8_t body[10];
@@ -880,6 +982,33 @@ static uint32_t cfw_asset_expected(const cfw_asset *a);
 static uint8_t cfw_blit_from(const uint8_t *hdr, const uint8_t *px, uint32_t px_len);
 static uint8_t cfw_asset_text(const uint8_t *p, uint32_t n);
 
+/* Blit a complete image asset at (x, y), limited to the rows the renderers
+ * may write (the band being composed); `level` is the 1bpp grey. */
+static uint8_t cfw_draw_image(cfw_ctx *c, const cfw_asset *a, int32_t x, int32_t y, uint8_t level)
+{
+    cfw_anims *an = cfw_animation();
+    uint8_t buf[9];
+    if (a->kind > CFW_ASSET_4BPP || a->bytes != cfw_asset_expected(a)) {
+        return CFW_BAD_ASSET;
+    }
+    if (x < 0 || y < 0) {
+        return CFW_BAD_RECT;
+    }
+    int32_t r0 = an->clip_y0 > y ? an->clip_y0 - y : 0;
+    int32_t r1 = an->clip_y1 < y + a->h ? an->clip_y1 - y : a->h;
+    if (r0 >= r1) {
+        return CFW_OK;
+    }
+    uint32_t stride = a->kind == CFW_ASSET_1BPP ? (a->w + 7u) / 8u : a->w / 2u;
+    int32_t top = y + r0, rows = r1 - r0;
+    buf[0] = (uint8_t)(((level & 0xF) << 4) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
+    buf[1] = (uint8_t)x; buf[2] = (uint8_t)(x >> 8);
+    buf[3] = (uint8_t)top; buf[4] = (uint8_t)(top >> 8);
+    buf[5] = (uint8_t)a->w; buf[6] = (uint8_t)(a->w >> 8);
+    buf[7] = (uint8_t)rows; buf[8] = (uint8_t)(rows >> 8);
+    return cfw_blit_from(buf, cfw_asset_bytes(c, a) + (uint32_t)r0 * stride, (uint32_t)rows * stride);
+}
+
 /* Image (14) and text (15) records draw assets by id, like the asset
  * commands do; an unknown or unfinished asset draws nothing. */
 static void cfw_shape_draw_asset(const cfw_shape *s)
@@ -888,15 +1017,9 @@ static void cfw_shape_draw_asset(const cfw_shape *s)
     uint8_t buf[13];
     if (s->type == CFW_SHAPE_IMAGE) {
         cfw_asset *a = c->arena ? cfw_asset_find(c, (uint16_t)s->p[2]) : 0;
-        if (!a || a->kind > CFW_ASSET_4BPP || a->bytes != cfw_asset_expected(a) || s->p[0] < 0 || s->p[1] < 0) {
-            return;
+        if (a) {
+            cfw_draw_image(c, a, s->p[0], s->p[1], s->color);
         }
-        buf[0] = (uint8_t)((s->color << 4) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
-        buf[1] = (uint8_t)s->p[0]; buf[2] = (uint8_t)(s->p[0] >> 8);
-        buf[3] = (uint8_t)s->p[1]; buf[4] = (uint8_t)(s->p[1] >> 8);
-        buf[5] = (uint8_t)a->w; buf[6] = (uint8_t)(a->w >> 8);
-        buf[7] = (uint8_t)a->h; buf[8] = (uint8_t)(a->h >> 8);
-        cfw_blit_from(buf, cfw_asset_bytes(c, a), a->bytes);
         return;
     }
     int x0 = s->p[0] & ~1, x1 = (s->p[0] + s->p[2]) & ~1, y1 = s->p[1] + s->p[3] - 1;
@@ -1384,7 +1507,7 @@ static int cfw_shape_box(const cfw_shape *s, cfw_rect *r)
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > FW_FRAME_WIDTH) x1 = FW_FRAME_WIDTH;
-    if (y1 > FW_FRAME_HEIGHT) y1 = FW_FRAME_HEIGHT;
+    if (y1 > (int32_t)CFW_CANVAS_H) y1 = CFW_CANVAS_H;
     if (x0 >= x1 || y0 >= y1) {
         r->w = 0;
         return 1;
@@ -1397,7 +1520,7 @@ static int cfw_shape_box(const cfw_shape *s, cfw_rect *r)
 
 /* SHAPES payload: [flags][count][records]. Every type is checked before a
  * pixel is written; flags bit 1 pushes the whole frame afterwards. */
-static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
 {
     if (n < 2) {
         return CFW_BAD_LENGTH;
@@ -1413,7 +1536,8 @@ static uint8_t cfw_shapes(const uint8_t *p, uint32_t n)
         }
     }
     uint8_t *panel = cfw_panel();
-    cfw_raster r = { cfw_row(panel, 0, 0), 0, FW_FRAME_HEIGHT };
+    cfw_anims *an = cfw_animation();
+    cfw_raster r = { cfw_row(panel, 0, 0), an->clip_y0, an->clip_y1 };
     for (uint32_t i = 0; i < count; i++) {
         cfw_shape s;
         cfw_shape_decode(p + 2 + i * CFW_SHAPE_RECORD, &s);
@@ -1475,7 +1599,7 @@ static void cv_quad_to_cubic(int32_t *p)
 }
 
 /* Flatten a command list into the workspace; returns the edge count or -1. */
-static int cv_compile(cfw_vwork *w, const uint8_t *src, uint32_t len)
+CFW_COLD static int cv_compile(cfw_vwork *w, const uint8_t *src, uint32_t len)
 {
     uint32_t pos = 0, n = 0;
     int open = 0;
@@ -1558,7 +1682,7 @@ static void cv_sift(cfw_vwork *w, uint32_t root, uint32_t count)
 /* Scanline fill of the workspace edges, nonzero (rule 0) or even-odd. */
 static void cv_fill(const cfw_raster *r, cfw_vwork *w, uint32_t n, uint8_t rule, uint8_t color)
 {
-    int32_t ymin = FW_FRAME_HEIGHT * 16, ymax = 0;
+    int32_t ymin = CFW_CANVAS_H * 16, ymax = 0;
     for (uint32_t i = 0; i < n; i++) {
         cfw_edge *e = &w->edges[i];
         for (int k = 0; k < 4; k++) {
@@ -1734,37 +1858,6 @@ static void cv_shape_draw(const cfw_raster *r, cfw_vwork *w, const cfw_shape *s,
     }
 }
 
-typedef struct cfw_anims cfw_anims;
-static cfw_anims *cfw_animation(void);
-
-/* --- animation: tweens stepped on the display thread ---------------------- */
-#define CFW_ANIM_MAX    16u
-#define CFW_ANIM_VALUES 13u          /* p0..p7, level (colour), width, angle, pivot x, pivot y */
-#define CFW_ANIM_LEVEL_BIT 0x100u
-#define CFW_ANIM_WIDTH_BIT 0x200u
-#define CFW_ANIM_ROTATE_BITS 0x1C00u   /* angle (Q4 degrees), pivot x, pivot y */
-#define CFW_EASE_CURVE 0x80u         /* easing byte: a CSS cubic-bezier (4 bytes) follows the values */
-typedef struct {
-    uint16_t id, mask;         /* mask: one bit per animated value */
-    uint8_t  frames, frame, easing, pad;
-    uint8_t  curve[4];         /* x1 y1 x2 y2 in 0..255 when easing is CFW_EASE_CURVE */
-    int16_t  from[CFW_ANIM_VALUES], to[CFW_ANIM_VALUES];
-} cfw_anim;                    /* 64 bytes; finished when frame >= frames */
-
-struct cfw_anims {
-    uint32_t magic;            /* CFW_ANIM_MAGIC when valid */
-    uint8_t  active;           /* tweens in flight */
-    uint8_t  period_ms;
-    uint8_t  count;
-    uint8_t  ticking;          /* a refresh is queued or running */
-    uint32_t ticks;            /* frames rendered since boot */
-    uint32_t full_pushes;      /* frames that needed a whole-frame push */
-    uint16_t clip_y0, clip_y1; /* row clip for composition (exclusive end); 0,0 = none */
-    uint16_t render_errors;    /* object renders that returned a status while presenting */
-    uint16_t pad;
-    cfw_anim items[CFW_ANIM_MAX];
-};
-#define CFW_ANIM_MAGIC 0x324d4e41u  /* "ANM2" */
 
 
 /* --- retained objects (g2flash modes 37-41, G1-sized) --------------------
@@ -1833,7 +1926,9 @@ static cfw_anims *cfw_animation(void)
             p[i] = 0;
         }
         a->magic = CFW_ANIM_MAGIC;
-        a->period_ms = 20;   /* about 30 fps with the 12 ms per-frame floor */
+        a->period_ms = 33;
+        a->clip_y1 = FW_FRAME_HEIGHT;
+        a->window = 1;
     }
     return a;
 }
@@ -1842,7 +1937,7 @@ static cfw_anims *cfw_animation(void)
 static cfw_anim *cfw_anim_find(cfw_anims *a, uint16_t id)
 {
     for (uint32_t i = 0; i < a->count; i++) {
-        if (a->items[i].frame < a->items[i].frames && a->items[i].id == id) {
+        if (a->items[i].dur && a->items[i].id == id) {
             return &a->items[i];
         }
     }
@@ -1853,7 +1948,7 @@ static void cfw_anim_cancel(uint16_t id)
 {
     cfw_anim *g = cfw_anim_find(cfw_animation(), id);
     if (g) {
-        g->frames = 0;
+        g->dur = 0;
     }
 }
 
@@ -1917,7 +2012,7 @@ static void cfw_obj_shape(const cfw_obj *obj, cfw_shape *s)
  * [x:i16][y:i16][w:u16][h:u16][asset:u16][level][font][lines] (19 bytes in
  * all; kind 5: w is the Q8 scale) or, for kind 4, one 20-byte SHAPES record
  * (26 bytes in all). A PUT resets the rotation. */
-static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_obj_put(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
     if (n < 6) {
@@ -2009,7 +2104,7 @@ static int cfw_obj_bbox(const cfw_obj *obj, cfw_rect *r)
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > FW_FRAME_WIDTH) x1 = FW_FRAME_WIDTH;
-    if (y1 > FW_FRAME_HEIGHT) y1 = FW_FRAME_HEIGHT;
+    if (y1 > (int)CFW_CANVAS_H) y1 = CFW_CANVAS_H;
     if (x0 >= x1 || y0 >= y1) {
         r->w = 0;
         return 1;                             /* off screen: nothing to push */
@@ -2037,59 +2132,37 @@ static void cfw_rect_union(cfw_rect *acc, const cfw_rect *r)
     acc->h = y1 - acc->y0;
 }
 
-/* Draw one object into the frame (no flush). When the animation row clip is
- * set, images, rects and shapes are limited to those rows; text is drawn
- * whole when its box touches them (glyph cells are idempotent); a shapes
- * asset always whole. */
+/* Draw one object into the band being composed (no flush): every renderer
+ * writes only canvas rows [clip_y0, clip_y1). */
 static uint8_t cfw_obj_render(const cfw_obj *obj)
 {
     uint8_t buf[16];
     cfw_anims *an = cfw_animation();
-    int clip = an->clip_y1 > an->clip_y0;
-    int cy0 = clip ? an->clip_y0 : 0, cy1 = clip ? an->clip_y1 : FW_FRAME_HEIGHT;
+    int cy0 = an->clip_y0, cy1 = an->clip_y1;
     if (!(obj->flags & 1u)) {
         return CFW_OK;
     }
     switch (obj->kind) {
     case CFW_OBJ_IMAGE: {
-        if (obj->p[0] < 0 || obj->p[1] < 0) {
-            return CFW_BAD_RECT;
-        }
         cfw_ctx *c = cfw_context();
         cfw_asset *a = c->arena ? cfw_asset_find(c, obj->asset) : 0;
         if (!a) {
             return CFW_NO_ASSET;
         }
-        if (a->kind == CFW_ASSET_STRING || a->bytes != cfw_asset_expected(a)) {
-            return CFW_BAD_ASSET;
-        }
-        int r0 = 0, r1 = a->h;                /* asset rows to draw */
-        if (obj->p[1] + (int)a->h <= cy0 || obj->p[1] >= cy1) {
-            return CFW_OK;
-        }
-        if (obj->p[1] < cy0) r0 = cy0 - obj->p[1];
-        if (obj->p[1] + (int)a->h > cy1) r1 = cy1 - obj->p[1];
-        uint32_t stride = a->kind == CFW_ASSET_1BPP ? (a->w + 7u) / 8u : a->w / 2u;
-        int y = obj->p[1] + r0;
-        buf[0] = (uint8_t)(((obj->level & 0xF) << 4) | (a->kind == CFW_ASSET_1BPP ? CFW_BLIT_1BPP : 0));
-        buf[1] = (uint8_t)obj->p[0]; buf[2] = (uint8_t)(obj->p[0] >> 8);
-        buf[3] = (uint8_t)y; buf[4] = (uint8_t)(y >> 8);
-        buf[5] = (uint8_t)a->w; buf[6] = (uint8_t)(a->w >> 8);
-        buf[7] = (uint8_t)(r1 - r0); buf[8] = (uint8_t)((r1 - r0) >> 8);
-        return cfw_blit_from(buf, cfw_asset_bytes(c, a) + (uint32_t)r0 * stride, (uint32_t)(r1 - r0) * stride);
+        return cfw_draw_image(c, a, obj->p[0], obj->p[1], obj->level);
     }
     case CFW_OBJ_TEXT: {
         /* A glide interpolates the box on the glasses, so it can sit on an
          * odd column or partly off the canvas between frames: widen it to
          * whole byte columns and clip it to the frame (G1CFW/43); what is
-         * clipped away draws nothing, as the G2 clips its text. */
+         * clipped away draws nothing, as the G2 clips its text. Rows above
+         * or below the band go to the text row table's scratch row. */
         int x0 = obj->p[0] & ~1, y0 = obj->p[1];
         int x1 = (obj->p[0] + obj->p[2] + 1) & ~1, y1 = y0 + obj->p[3] - 1;
         if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
         if (x1 > FW_FRAME_WIDTH) x1 = FW_FRAME_WIDTH;
-        if (y1 >= FW_FRAME_HEIGHT) y1 = FW_FRAME_HEIGHT - 1;
-        if (x1 <= x0 || y1 < y0 || y1 < cy0 || y0 >= cy1) {
+        if (y1 > y0 + (int)CFW_CANVAS_H) y1 = y0 + (int)CFW_CANVAS_H;
+        if (x1 <= x0 || y1 <= y0 || y1 < cy0 || y0 >= cy1) {
             return CFW_OK;
         }
         buf[0] = (uint8_t)obj->asset; buf[1] = (uint8_t)(obj->asset >> 8);
@@ -2164,9 +2237,83 @@ static uint8_t cfw_obj_render(const cfw_obj *obj)
     }
 }
 
-/* [flags][count][ids:u16...]: compose the listed objects in order. flags bit 0
- * clears the frame first; bit 1 pushes the whole frame afterwards. */
-static uint8_t cfw_obj_show(const uint8_t *p, uint32_t n)
+static uint8_t cfw_obj_present(const cfw_rect *dirty);
+
+/* Compose canvas rows [y0, y1) of the SHOW list into the buffer, whose row 0
+ * holds canvas row `base` meanwhile (y0 >= base, y1 - base <= 200), and push
+ * columns `cols` of those rows when `cols` is set. Leaves band 0 with the
+ * window clip; the window is valid again only after a whole 0..199 pass.
+ * Returns the first render status, else the push status. */
+static uint8_t cfw_compose(int32_t base, int32_t y0, int32_t y1, const cfw_rect *cols)
+{
+    cfw_objs *o = cfw_objects();
+    cfw_anims *an = cfw_animation();
+    uint8_t *panel = cfw_panel();
+    uint8_t status = CFW_OK;
+    an->band = (uint16_t)base;
+    an->clip_y0 = (uint16_t)y0;
+    an->clip_y1 = (uint16_t)y1;
+    uint8_t *rows = cfw_row(panel, (uint32_t)y0, 0);
+    for (uint32_t i = 0; i < (uint32_t)(y1 - y0) * FW_FRAME_STRIDE; i++) {
+        rows[i] = 0;
+    }
+    for (uint32_t i = 0; i < o->shown_count; i++) {
+        cfw_obj *obj = cfw_obj_find(o, o->shown[i]);   /* a dropped object is skipped */
+        uint8_t s = obj ? cfw_obj_render(obj) : CFW_OK;
+        if (s != CFW_OK) {
+            an->render_errors++;
+            if (status == CFW_OK) status = s;
+        }
+    }
+    if (cols) {
+        cfw_rect r = { cols->x0, (uint32_t)y0, cols->w, (uint32_t)(y1 - y0) };
+        uint8_t s = cfw_flush(panel, &r);
+        if (status == CFW_OK) status = s;
+    }
+    if (base != 0) {
+        an->window = 0;
+    } else if (y0 == 0 && y1 == FW_FRAME_HEIGHT) {
+        an->window = 1;
+    }
+    an->band = 0;
+    an->clip_y0 = 0;
+    an->clip_y1 = FW_FRAME_HEIGHT;
+    return status;
+}
+
+/* Direct draws land in canvas rows 0..199 of the buffer: re-compose them
+ * from the objects when a lower band has been through the buffer since. */
+CFW_COLD static void cfw_window(void)
+{
+    if (!cfw_animation()->window) {
+        cfw_compose(0, 0, FW_FRAME_HEIGHT, 0);
+    }
+}
+
+/* Push canvas rows: 0..199 from the buffer as drawn, the rest re-composed. */
+CFW_COLD static uint8_t cfw_push(const cfw_rect *r)
+{
+    uint8_t status = CFW_OK;
+    if (r->y0 < FW_FRAME_HEIGHT) {
+        status = cfw_flush(cfw_panel(), r);
+    }
+    if (r->y0 + r->h > FW_FRAME_HEIGHT) {
+        cfw_rect low = *r;
+        if (low.y0 < FW_FRAME_HEIGHT) {
+            low.h -= FW_FRAME_HEIGHT - low.y0;
+            low.y0 = FW_FRAME_HEIGHT;
+        }
+        uint8_t s = cfw_obj_present(&low);
+        if (status == CFW_OK) status = s;
+    }
+    return status;
+}
+
+/* [flags][count][ids:u16...]: the listed objects, in order, become the
+ * scene. flags bit 1 composes and pushes the whole canvas; without it only
+ * the window is composed, for direct draws and a FLUSH to follow. The
+ * canvas is always composed from cleared rows (flags bit 0 is implied). */
+CFW_COLD static uint8_t cfw_obj_show(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
     if (n < 2) {
@@ -2182,52 +2329,28 @@ static uint8_t cfw_obj_show(const uint8_t *p, uint32_t n)
             return CFW_NO_OBJECT;
         }
     }
-    uint8_t *panel = cfw_panel();
-    if (flags & 1u) {
-        uint8_t *frame = cfw_row(panel, 0, 0);
-        for (uint32_t i = 0; i < FW_FRAME_STRIDE * FW_FRAME_HEIGHT; i++) {
-            frame[i] = 0;
-        }
-    }
-    o->shown_count = 0;
     for (uint32_t i = 0; i < count; i++) {
-        uint16_t id = rd16(p + 2 + 2 * i);
-        o->shown[o->shown_count++] = id;
-        uint8_t status = cfw_obj_render(cfw_obj_find(o, id));
-        if (status != CFW_OK) {
-            return status;
-        }
+        o->shown[i] = rd16(p + 2 + 2 * i);
     }
+    o->shown_count = (uint16_t)count;
     o->revision++;
-    if (flags & CFW_FLAG_FLUSH) {
-        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-        return cfw_flush(panel, &all);
-    }
-    return CFW_OK;
+    return (flags & CFW_FLAG_FLUSH) ? cfw_obj_present(0) : cfw_compose(0, 0, FW_FRAME_HEIGHT, 0);
 }
 
-/* Blank the frame, forget the SHOW list and stop every tween (objects stay). */
-static uint8_t cfw_obj_hide(const uint8_t *p, uint32_t n)
+/* Blank the canvas, forget the SHOW list and stop every tween (objects
+ * stay). flags bit 1 (the default) pushes the blank canvas. */
+CFW_COLD static uint8_t cfw_obj_hide(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
     uint8_t flags = n ? p[0] : CFW_FLAG_FLUSH;
-    uint8_t *panel = cfw_panel();
-    uint8_t *frame = cfw_row(panel, 0, 0);
-    for (uint32_t i = 0; i < FW_FRAME_STRIDE * FW_FRAME_HEIGHT; i++) {
-        frame[i] = 0;
-    }
     o->shown_count = 0;
     o->revision++;
     cfw_anim_clear();
-    if (flags & CFW_FLAG_FLUSH) {
-        cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-        return cfw_flush(panel, &all);
-    }
-    return CFW_OK;
+    return (flags & CFW_FLAG_FLUSH) ? cfw_obj_present(0) : cfw_compose(0, 0, FW_FRAME_HEIGHT, 0);
 }
 
 /* Reply body: [revision:u16][count][shown][id,version pairs of the first 4 shown]. */
-static void cfw_obj_state(const uint8_t *p, uint32_t n_in)
+CFW_COLD static void cfw_obj_state(const uint8_t *p, uint32_t n_in)
 {
     cfw_objs *o = cfw_objects();
     uint8_t body[4 + 4 * 4];
@@ -2296,7 +2419,7 @@ static uint8_t cfw_obj_present(const cfw_rect *dirty);
 /* [op][id:u16]: op 0 drops every object, op 1 drops one object; op 2 freezes
  * and op 3 finishes the tweens of one object, or of every object when the id
  * is 0xFFFF or absent. */
-static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
 {
     cfw_objs *o = cfw_objects();
     if (n < 1) {
@@ -2308,19 +2431,19 @@ static uint8_t cfw_obj_control(const uint8_t *p, uint32_t n)
         int finished = 0;
         for (uint32_t i = 0; i < a->count; i++) {
             cfw_anim *g = &a->items[i];
-            if (g->frame >= g->frames || (id != 0xFFFF && g->id != id)) {
+            if (!g->dur || (id != 0xFFFF && g->id != id)) {
                 continue;
             }
             cfw_obj *obj = cfw_obj_find(o, g->id);
             if (p[0] == 3 && obj) {
-                for (uint32_t k = 0; k < CFW_ANIM_VALUES; k++) {
+                for (uint32_t k = 0; k < CFW_ANIM_GLIDES; k++) {
                     if (g->mask & (1u << k)) {
                         cfw_obj_set_value(obj, k, g->to[k]);
                     }
                 }
                 finished = 1;
             }
-            g->frames = 0;
+            g->dur = 0;
         }
         o->revision++;
         if (finished) {
@@ -2380,14 +2503,13 @@ static int32_t cfw_ease_curve(int32_t u, const uint8_t *curve)
     return cfw_clamp(cfw_ease_axis((lo + hi) >> 1, curve[1] * 1024 / 255, curve[3] * 1024 / 255), 0, 1024);
 }
 
-/* Eased interpolation of `t` in [0, frames]; returns 0..1024. */
-static int32_t cfw_ease(const cfw_anim *g, int32_t t, int32_t frames)
+/* Eased progress at linear progress `u` (0..1024); returns 0..1024. */
+static int32_t cfw_ease(const cfw_anim *g, int32_t u)
 {
     uint8_t easing = g->easing;
-    if (frames <= 0 || t >= frames) {
+    if (u >= 1024) {
         return 1024;
     }
-    int32_t u = t * 1024 / frames;            /* linear 0..1024 */
     if (easing == CFW_EASE_CURVE) {
         return cfw_ease_curve(u, g->curve);
     }
@@ -2404,32 +2526,33 @@ static int32_t cfw_ease(const cfw_anim *g, int32_t t, int32_t frames)
     return u;
 }
 
-/* Re-render the current SHOW list into a cleared frame; push `dirty` when it
- * covers every change, otherwise the whole frame. */
+/* Re-compose and push canvas rows from the SHOW list: `dirty` (its rows,
+ * whole width, are re-rendered; its columns pushed), or the whole canvas.
+ * Up to 200 rows go through the buffer in one band; the whole canvas takes
+ * rows 200..379 first and the window last, so direct draws find it valid. */
+_Static_assert(CFW_CANVAS_H > FW_FRAME_HEIGHT && CFW_CANVAS_H <= 2 * FW_FRAME_HEIGHT, "the canvas is at most two bands");
 static uint8_t cfw_obj_present(const cfw_rect *dirty)
 {
-    cfw_objs *o = cfw_objects();
-    cfw_anims *an = cfw_animation();
-    uint8_t *panel = cfw_panel();
-    uint8_t *frame = cfw_row(panel, 0, 0);
-    if (dirty && dirty->w == 0) {
+    cfw_rect all = { 0, 0, FW_FRAME_WIDTH, CFW_CANVAS_H };
+    const cfw_rect *r = dirty ? dirty : &all;
+    int32_t y0 = (int32_t)r->y0, y1 = (int32_t)(r->y0 + r->h);
+    if (y1 > (int32_t)CFW_CANVAS_H) y1 = CFW_CANVAS_H;
+    if (r->w == 0 || y0 >= y1) {
         return CFW_OK;                        /* nothing visible changed */
     }
-    uint32_t row0 = dirty ? dirty->y0 : 0, row1 = dirty ? dirty->y0 + dirty->h : FW_FRAME_HEIGHT;
-    for (uint32_t i = row0 * FW_FRAME_STRIDE; i < row1 * FW_FRAME_STRIDE; i++) {
-        frame[i] = 0;
+    uint8_t status;
+    FW_LCD_LOCK(-1);
+    if (y1 <= (int32_t)FW_FRAME_HEIGHT) {
+        status = cfw_compose(0, y0, y1, r);
+    } else if (y1 - y0 <= (int32_t)FW_FRAME_HEIGHT) {
+        status = cfw_compose(y0, y0, y1, r);
+    } else {
+        status = cfw_compose(FW_FRAME_HEIGHT, FW_FRAME_HEIGHT, y1, r);
+        uint8_t s = cfw_compose(0, y0, FW_FRAME_HEIGHT, r);
+        if (status == CFW_OK) status = s;
     }
-    an->clip_y0 = (uint16_t)row0;
-    an->clip_y1 = dirty ? (uint16_t)row1 : 0;
-    for (uint32_t i = 0; i < o->shown_count; i++) {
-        cfw_obj *obj = cfw_obj_find(o, o->shown[i]);
-        if (obj && cfw_obj_render(obj) != CFW_OK) {
-            an->render_errors++;
-        }
-    }
-    an->clip_y0 = an->clip_y1 = 0;
-    cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-    return cfw_flush(panel, dirty ? dirty : &all);
+    FW_LCD_UNLOCK();
+    return status;
 }
 
 /* Union an object's box into `dirty`, or flag a whole-frame push. */
@@ -2443,10 +2566,10 @@ static void cfw_anim_touch(const cfw_obj *obj, cfw_rect *dirty, int *full)
     }
 }
 
-/* Advance every tween one frame; returns the number still in flight and the
- * union of the old and new boxes of what changed (w = 0 when nothing did;
- * *full set when a box is unknown). */
-static uint32_t cfw_anim_step(cfw_anims *a, cfw_rect *dirty, int *full)
+/* Move every tween to clock `now`; returns the number still in flight and
+ * the union of the old and new boxes of what changed (w = 0 when nothing
+ * did; *full set when a box is unknown). */
+static uint32_t cfw_anim_step(cfw_anims *a, uint32_t now, cfw_rect *dirty, int *full)
 {
     cfw_objs *o = cfw_objects();
     uint32_t left = 0;
@@ -2454,22 +2577,25 @@ static uint32_t cfw_anim_step(cfw_anims *a, cfw_rect *dirty, int *full)
     *full = 0;
     for (uint32_t i = 0; i < a->count; i++) {
         cfw_anim *g = &a->items[i];
-        if (g->frame >= g->frames) {
+        if (!g->dur) {
             continue;
         }
-        g->frame++;
-        int32_t k = cfw_ease(g, g->frame, g->frames);
+        int32_t el = (int32_t)(now - g->start);
+        if (el < 0) el = 0;
+        int32_t k = el >= g->dur ? 1024 : cfw_ease(g, el * 1024 / g->dur);
         cfw_obj *obj = cfw_obj_find(o, g->id);
         if (obj) {
             cfw_anim_touch(obj, dirty, full);
-            for (uint32_t v = 0; v < CFW_ANIM_VALUES; v++) {
+            for (uint32_t v = 0; v < CFW_ANIM_GLIDES; v++) {
                 if (g->mask & (1u << v)) {
                     cfw_obj_set_value(obj, v, g->from[v] + ((int32_t)(g->to[v] - g->from[v]) * k) / 1024);
                 }
             }
             cfw_anim_touch(obj, dirty, full);
         }
-        if (g->frame < g->frames) {
+        if (el >= g->dur) {
+            g->dur = 0;
+        } else {
             left++;
         }
     }
@@ -2542,7 +2668,7 @@ static cfw_input *cfw_input_state(void);
 #define CFW_CLEAR_ROWS 8u
 #define CFW_CLEAR_BYTES (5u + CFW_CLEAR_ROWS * FW_FRAME_STRIDE + 1u)
 _Static_assert(CFW_CLEAR_BYTES <= FW_CFW_RAM3_SIZE, "panel clear packet must fit scratch RAM");
-static void cfw_clear_panel_memory(void)
+CFW_COLD static void cfw_clear_panel_memory(void)
 {
     uint8_t *packet = FW_CFW_RAM3;
     for (uint32_t i = 0; i < CFW_CLEAR_BYTES; i++) packet[i] = 0;
@@ -2556,7 +2682,7 @@ static void cfw_clear_panel_memory(void)
     }
 }
 
-static void cfw_panel_sync(void)
+CFW_COLD static void cfw_panel_sync(void)
 {
     FW_PANEL_COMMAND(0x97);
     FW_PANEL_WAIT_MS(1);  /* cache must not be written during pixel-latch reload */
@@ -2565,7 +2691,7 @@ static void cfw_panel_sync(void)
 /* Replaces stock 0x80d76, called inside panel_init before its LED enable.
  * Leave output disabled; stock finishes its initialization and enables it
  * only after the entire physical cache and pixel latch contain black. */
-int cfw_panel_init_clear(void)
+CFW_COLD int cfw_panel_init_clear(void)
 {
     FW_LCD_LOCK(-1);
     FW_PANEL_COMMAND(0xa9);
@@ -2577,8 +2703,11 @@ int cfw_panel_init_clear(void)
 
 /* Keep LEDs disabled throughout clear + redraw. The old row-by-row margin
  * clear ran after enable and used the shifted viewport origin, exposing
- * uninitialized memory and leaving physical edge strips untouched. */
-static uint8_t cfw_repush(uint8_t *panel)
+ * uninitialized memory and leaving physical edge strips untouched. The
+ * canvas is re-composed from the shown objects (direct draws are not kept
+ * across a power cycle), so this runs on the BLE worker or the display
+ * thread only: other threads ask for it with cfw_repush_later. */
+CFW_COLD static uint8_t cfw_repush(uint8_t *panel)
 {
     FW_LCD_LOCK(-1);
     if (*(int *)(panel + FW_PANEL_POWERED) == 0) {
@@ -2587,12 +2716,12 @@ static uint8_t cfw_repush(uint8_t *panel)
     }
     FW_PANEL_COMMAND(0xa9);
     cfw_clear_panel_memory();
-    cfw_rect all = { 0, 0, FW_FRAME_WIDTH, FW_FRAME_HEIGHT };
-    uint8_t status = cfw_flush(panel, &all);
+    uint8_t status = cfw_obj_present(0);
     /* Includes the completely clipped viewport case: latch the black cache
-     * before enabling output, even when cfw_flush performed no transfers. */
+     * before enabling output, even when nothing was transferred. A render
+     * error still shows the rest of the canvas. */
     cfw_panel_sync();
-    if (status == CFW_OK) {
+    if (status != CFW_PANEL_OFF) {
         FW_PANEL_COMMAND(0xa3);
         cfw_panel_sync();
     }
@@ -2600,15 +2729,43 @@ static uint8_t cfw_repush(uint8_t *panel)
     return status;
 }
 
+/* Start the display-thread tick unless one is running; a tick that has not
+ * run for a second lost its message (the stock queue drops when full) and
+ * is restarted. Call with the LCD lock held. */
+CFW_COLD static void cfw_kick(cfw_anims *a)
+{
+    uint32_t now = cfw_clock();
+    if (!a->ticking || now - a->ticked > 1024u) {
+        a->ticking = 1;
+        a->ticked = now;
+        FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
+    }
+}
+
+/* A whole-canvas push from a thread whose stack is not known to take the
+ * font engine (wear and work-mode threads): the display thread does it. */
+CFW_COLD static void cfw_repush_later(void)
+{
+    cfw_anims *a = cfw_animation();
+    FW_LCD_LOCK(-1);
+    a->repush = 1;
+    cfw_kick(a);
+    FW_LCD_UNLOCK();
+}
+
 /* Retry the retained frame on the 600 ms and 1.2 s ticks for units that do
  * not accept the first post-wake draw. Each retry stays dark until complete. */
-static void cfw_panel_up(uint8_t *panel)
+CFW_COLD static void cfw_panel_up(uint8_t *panel, int now)
 {
-    cfw_repush(panel);
+    if (now) {
+        cfw_repush(panel);
+    } else {
+        cfw_repush_later();
+    }
     cfw_input_state()->push_ticks = CFW_PUSH_TICKS;
 }
 
-static void cfw_auto_panel(cfw_input *in, int on)
+CFW_COLD static void cfw_auto_panel(cfw_input *in, int on)
 {
     uint8_t *panel = cfw_panel();
     int powered = *(int *)(panel + FW_PANEL_POWERED) != 0;
@@ -2625,7 +2782,7 @@ static void cfw_auto_panel(cfw_input *in, int on)
             FW_PANEL_WRITE_BRIGHTNESS(panel[FW_PANEL_BRIGHTNESS_LEVEL]);
         }
         in->panel_autos++;
-        cfw_panel_up(panel);
+        cfw_panel_up(panel, 0);
     } else if (!on && powered) {
         FW_PANEL_CB_OF(panel, FW_PANEL_CB_SUSPEND)(panel);
         if (*(int *)(panel + FW_PANEL_POWERED) != 0) {
@@ -2637,7 +2794,7 @@ static void cfw_auto_panel(cfw_input *in, int on)
 }
 
 
-static cfw_input *cfw_input_state(void)
+CFW_COLD static cfw_input *cfw_input_state(void)
 {
     cfw_input *in = (cfw_input *)(FW_CFW_RAM2 + sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_anims));
     if (in->magic != CFW_INPUT_MAGIC) {
@@ -2653,7 +2810,7 @@ static cfw_input *cfw_input_state(void)
 }
 
 /* Runs on touch_key_thread in place of the stock signal helper. */
-int cfw_touch_event(void)
+CFW_COLD int cfw_touch_event(void)
 {
     cfw_input *in = cfw_input_state();
     uint8_t code = (uint8_t)*FW_TOUCH_EVENT;
@@ -2674,7 +2831,7 @@ int cfw_touch_event(void)
  * stock event; the two other register arguments are unused by the stock
  * body except as scratch. Re-implements the stock behaviour after noting
  * the event, unless the host asked for stock events to be swallowed. */
-int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
+CFW_COLD int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
 {
     (void)p2; (void)p3;
     cfw_input *in = cfw_input_state();
@@ -2715,7 +2872,7 @@ int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
 }
 
 /* [flags] -> reply body [flags]. */
-static void cfw_input_control(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_input_control(const uint8_t *p, uint32_t n)
 {
     cfw_input *in = cfw_input_state();
     if ((n != 1 && n != 3) || (p[0] & ~CFW_INPUT_FLAGS) || (n == 3 && p[1] <= p[2])) {
@@ -2735,7 +2892,7 @@ static void cfw_input_control(const uint8_t *p, uint32_t n)
 /* Reply body: [flags][last_code][count:u16][stock_passed:u16][last_event][events:u16][events_sent:u16]
  * [panel_autos][work_mode][last_mode][mode_changes][checks][suspends_skipped] (low bytes of
  * the three counters: replies are capped at 20 bytes). */
-static void cfw_input_report(void)
+CFW_COLD static void cfw_input_report(void)
 {
     cfw_input *in = cfw_input_state();
     uint8_t *state = FW_GET_STATE();
@@ -2758,7 +2915,7 @@ static void cfw_input_report(void)
  * word, off at once for 5 and 6 (in the case) and 8 (deep sleep). 0, 1, 7
  * and 9 are left to the stock body. Only the passes count towards the
  * wait; anything but taken off starts it over. */
-static void cfw_panel_for_mode(cfw_input *in, uint32_t mode, int tick)
+CFW_COLD static void cfw_panel_for_mode(cfw_input *in, uint32_t mode, int tick)
 {
     if (in->flags & CFW_INPUT_NO_AUTO_PANEL) {
         in->off_ticks = 0;
@@ -2785,7 +2942,7 @@ static void cfw_panel_for_mode(cfw_input *in, uint32_t mode, int tick)
     }
 }
 
-int cfw_work_mode(uint32_t mode)
+CFW_COLD int cfw_work_mode(uint32_t mode)
 {
     cfw_input *in = cfw_input_state();
     in->mode_changes++;
@@ -2799,7 +2956,7 @@ int cfw_work_mode(uint32_t mode)
  * panel power with the current mode: the stock firmware also switches the
  * panel without a mode change (its display-off path suspends it in normal
  * standby), and this puts it back. */
-int cfw_work_mode_tick(void)
+CFW_COLD int cfw_work_mode_tick(void)
 {
     cfw_input *in = cfw_input_state();
     uint8_t *state = FW_GET_STATE();
@@ -2814,7 +2971,7 @@ int cfw_work_mode_tick(void)
     if (in->push_ticks) {
         in->push_ticks--;
         if (in->push_ticks == CFW_PUSH_TICKS / 2 || in->push_ticks == 0) {
-            cfw_repush(cfw_panel());
+            cfw_repush_later();
         }
     }
     return 0;
@@ -2825,7 +2982,7 @@ int cfw_work_mode_tick(void)
  * detour then returns 0 to the caller): the stock display-off path would
  * otherwise cut the panel in normal standby, and the resume that pairs
  * with it is a no-op when nothing was suspended. */
-int cfw_suspend_gate(uint8_t *state)
+CFW_COLD int cfw_suspend_gate(uint8_t *state)
 {
     (void)state;
     cfw_input *in = cfw_input_state();
@@ -2888,7 +3045,7 @@ __attribute__((naked)) void cfw_suspend_entry(void)
 }
 #endif
 
-static cfw_view *cfw_view_state(void)
+CFW_COLD static cfw_view *cfw_view_state(void)
 {
     cfw_view *v = (cfw_view *)((uint8_t *)cfw_input_state() + sizeof(cfw_input));
     if (v->magic != CFW_VIEW_MAGIC) {
@@ -2905,7 +3062,7 @@ static cfw_view *cfw_view_state(void)
  * new canvas and pushes the whole frame (bit 1, the old explicit push, is
  * accepted); op 1 queries. Reply body:
  * [dx:i16][dy:i16][stock_col:i16][stock_row:i16][height_gear][depth_gear][flushes:u16]. */
-static void cfw_view_cmd(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_view_cmd(const uint8_t *p, uint32_t n)
 {
     cfw_view *v = cfw_view_state();
     uint8_t *panel = cfw_panel();
@@ -2949,7 +3106,7 @@ typedef struct {
 } cfw_imu;
 #define CFW_IMU_MAGIC 0x31554d49u  /* "IMU1" */
 
-static cfw_imu *cfw_imu_state(void)
+CFW_COLD static cfw_imu *cfw_imu_state(void)
 {
     cfw_imu *m = (cfw_imu *)((uint8_t *)cfw_view_state() + sizeof(cfw_view));
     if (m->magic != CFW_IMU_MAGIC) {
@@ -2964,7 +3121,7 @@ static cfw_imu *cfw_imu_state(void)
 }
 
 /* One IMU_SAMPLE notification: [seq:u16][word0:i32][word1:i32][pitch:i32]. */
-static void cfw_imu_sample(cfw_imu *m)
+CFW_COLD static void cfw_imu_sample(cfw_imu *m)
 {
     uint8_t body[14];
     body[0] = (uint8_t)m->seq;
@@ -2987,7 +3144,7 @@ static void cfw_imu_sample(cfw_imu *m)
 /* [period_ms][count:u16]: start streaming `count` samples (0 stops, 0xFFFF
  * runs until stopped) every `period_ms` (10-250) on the display-thread tick.
  * Reply body: [active][period_ms][remaining:u16][sent:u32]. */
-static void cfw_imu_control(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_imu_control(const uint8_t *p, uint32_t n)
 {
     cfw_imu *m = cfw_imu_state();
     if (n != 3) {
@@ -3006,11 +3163,9 @@ static void cfw_imu_control(const uint8_t *p, uint32_t n)
         m->period_ms = p[0];
         m->remaining = count;
         m->active = 1;
-        cfw_anims *a = cfw_animation();
-        if (!a->ticking) {
-            a->ticking = 1;
-            FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
-        }
+        FW_LCD_LOCK(-1);
+        cfw_kick(cfw_animation());
+        FW_LCD_UNLOCK();
     }
     uint8_t body[8] = { m->active, m->period_ms, (uint8_t)m->remaining, (uint8_t)(m->remaining >> 8),
                         (uint8_t)m->sent, (uint8_t)(m->sent >> 8), (uint8_t)(m->sent >> 16), (uint8_t)(m->sent >> 24) };
@@ -3037,7 +3192,7 @@ _Static_assert(sizeof(cfw_objs) + CFW_OBJ_MAX * sizeof(cfw_obj) + sizeof(cfw_ani
                + sizeof(cfw_imu) + sizeof(cfw_mic) <= FW_CFW_RAM2_SIZE,
                "second CFW RAM region: objects, animations, input, view, IMU and mic state");
 
-static cfw_mic *cfw_mic_state(void)
+CFW_COLD static cfw_mic *cfw_mic_state(void)
 {
     cfw_mic *m = (cfw_mic *)((uint8_t *)cfw_imu_state() + sizeof(cfw_imu));
     if (m->magic != CFW_MIC_MAGIC) {
@@ -3050,7 +3205,7 @@ static cfw_mic *cfw_mic_state(void)
     return m;
 }
 
-static void cfw_mic_control(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_mic_control(const uint8_t *p, uint32_t n)
 {
     cfw_mic *m = cfw_mic_state();
     uint8_t *state = FW_GET_STATE();
@@ -3078,58 +3233,78 @@ static void cfw_mic_control(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_MIC_CONTROL, CFW_OK, body, sizeof body);
 }
 
-/* Called on the display thread in place of the stock refresh handler. */
+/* Called on the display thread in place of the stock refresh handler. One
+ * tick: an owed whole-canvas push, an IMU sample, the tweens moved to the
+ * current clock and the changed rows pushed. The tick then sleeps what is
+ * left of the period (at least CFW_TICK_REST ms, so the threads below run)
+ * and queues the next one; a slow frame skips ahead instead of slowing the
+ * glide. */
+#define CFW_TICK_REST 2u
 int cfw_display_tick(uint8_t *state, uint32_t screen, uint32_t p3, uint32_t mode)
 {
     (void)state; (void)p3; (void)mode;
-    cfw_anims *a = cfw_animation();
-    cfw_imu *m = cfw_imu_state();
-    if (screen != FW_SCREEN_CFW || (!a->active && !m->active)) {
-        a->ticking = 0;
+    if (screen != FW_SCREEN_CFW) {
         return 0;
     }
+    cfw_anims *a = cfw_animation();
+    cfw_imu *m = cfw_imu_state();
     if (m->active) {
         cfw_imu_sample(m);
+    }
+    FW_LCD_LOCK(-1);
+    uint32_t t0 = cfw_clock();
+    a->ticked = t0;
+    if (a->repush) {
+        a->repush = 0;
+        cfw_repush(cfw_panel());
     }
     uint32_t period = m->period_ms;
     if (a->active) {
         cfw_rect dirty;
         int full;
-        uint32_t left = cfw_anim_step(a, &dirty, &full);
+        uint32_t left = cfw_anim_step(a, t0, &dirty, &full);
         if (full) {
             a->full_pushes++;
         }
         cfw_obj_present(full ? 0 : &dirty);
         a->ticks++;
+        a->frame_ms = (uint16_t)((cfw_clock() - t0) * 125u / 128u);
         if (left == 0) {
             a->active = 0;
         }
-        period = a->period_ms;   /* animation sets the pace while it runs */
+        period = a->period_ms;
     }
-    if (!a->active && !m->active) {
+    uint32_t spent = (cfw_clock() - t0) * 125u / 128u;
+    int more = a->active || m->active || a->repush;
+    if (!more) {
         a->ticking = 0;
+    }
+    FW_LCD_UNLOCK();
+    if (!more) {
         return 0;
     }
-    FW_K_MSLEEP((int)period);
+    FW_K_MSLEEP((int)(spent + CFW_TICK_REST < period ? period - spent : CFW_TICK_REST));
     FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
     return 0;
 }
 
-/* Reply body: [active][period_ms][ticks:u32][full_pushes:u32]. */
-static void cfw_anim_state(void)
+/* Reply body: [active][period_ms][ticks:u32][full_pushes:u32][frame_ms:u16]. */
+CFW_COLD static void cfw_anim_state(void)
 {
     cfw_anims *a = cfw_animation();
-    uint8_t body[10];
+    uint8_t body[12];
     body[0] = a->active;
     body[1] = a->period_ms;
     for (int i = 0; i < 4; i++) {
         body[2 + i] = (uint8_t)(a->ticks >> (8 * i));
         body[6 + i] = (uint8_t)(a->full_pushes >> (8 * i));
     }
+    body[10] = (uint8_t)a->frame_ms;
+    body[11] = (uint8_t)(a->frame_ms >> 8);
     cfw_reply(CFW_ANIM_STATE, CFW_OK, body, sizeof body);
 }
 
-static uint32_t cfw_popcount(uint32_t v)
+CFW_COLD static uint32_t cfw_popcount(uint32_t v)
 {
     uint32_t n = 0;
     while (v) {
@@ -3141,7 +3316,7 @@ static uint32_t cfw_popcount(uint32_t v)
 
 /* Bytes of one entry: header, one i16 per mask bit, a 4-byte curve when the
  * easing byte asks for one. */
-static uint32_t cfw_anim_entry_len(const uint8_t *e)
+CFW_COLD static uint32_t cfw_anim_entry_len(const uint8_t *e)
 {
     return 6 + 2 * cfw_popcount(rd16(e + 2)) + (e[5] == CFW_EASE_CURVE ? 4u : 0u);
 }
@@ -3152,7 +3327,7 @@ static uint32_t cfw_anim_entry_len(const uint8_t *e)
  * Tweens start from the object's current values and merge into the running
  * set by id; frames 0 applies the targets at once. The display thread
  * renders the frames. */
-static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
+CFW_COLD static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
 {
     cfw_anims *a = cfw_animation();
     cfw_objs *o = cfw_objects();
@@ -3161,7 +3336,7 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
     }
     uint32_t count = p[1], pos = 2, fresh = 0, slots = CFW_ANIM_MAX - a->count;
     for (uint32_t i = 0; i < a->count; i++) {
-        if (a->items[i].frame >= a->items[i].frames) {
+        if (!a->items[i].dur) {
             slots++;
         }
     }
@@ -3191,6 +3366,11 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
     if (p[0] >= 1) {
         a->period_ms = p[0];
     }
+    /* One frame period in clock units. A glide is `frames` of them and is
+     * taken to have started one period ago, so the tick this OBJ_ANIM
+     * queues shows the first step at once rather than an unchanged frame. */
+    uint32_t unit = a->period_ms * 128u / 125u, now = cfw_clock();
+    if (!unit) unit = 1;
     cfw_rect snapped = { 0, 0, 0, 0 };
     int full = 0, started = 0;
     pos = 2;
@@ -3211,12 +3391,12 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
             }
             cfw_anim_touch(obj, &snapped, &full);
             if (g) {
-                g->frames = 0;
+                g->dur = 0;
             }
         } else {
             if (!g) {
                 for (uint32_t j = 0; j < a->count && !g; j++) {
-                    if (a->items[j].frame >= a->items[j].frames) {
+                    if (!a->items[j].dur) {
                         g = &a->items[j];
                     }
                 }
@@ -3226,20 +3406,22 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
             }
             for (uint32_t k = 0; k < CFW_ANIM_VALUES; k++) {
                 if (mask & (1u << k)) {
-                    g->to[k] = rd16s(v);
+                    int16_t to = rd16s(v);
                     v += 2;
-                    if (k >= 11) {
+                    if (k >= CFW_ANIM_GLIDES) {
                         /* The pivot is where the object turns, not a value
                          * to glide: it moves at once. */
-                        cfw_obj_set_value(obj, k, g->to[k]);
+                        cfw_obj_set_value(obj, k, to);
+                    } else {
+                        g->to[k] = to;
+                        g->from[k] = cfw_obj_value(obj, k);
                     }
-                    g->from[k] = cfw_obj_value(obj, k);
                 }
             }
             g->id = obj->id;
             g->mask = (uint16_t)mask;
-            g->frames = frames;
-            g->frame = 0;
+            g->start = now - unit;
+            g->dur = (uint16_t)(frames * unit);
             g->easing = e[5];
             if (e[5] == CFW_EASE_CURVE) {
                 for (int k = 0; k < 4; k++) g->curve[k] = v[k];
@@ -3254,17 +3436,22 @@ static uint8_t cfw_obj_anim(const uint8_t *p, uint32_t n)
     }
     if (started) {
         a->active = 1;
-        if (!a->ticking) {
-            a->ticking = 1;
-            FW_DISPLAY_POST(FW_SCREEN_CFW, 0, 0);
-        }
+        cfw_kick(a);
     }
     return CFW_OK;
 }
 
-/* Run one command record (same bodies as the packet commands). */
-static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
+/* Commands that draw straight into the buffer's canvas rows 0..199. */
+#define CFW_DIRECT_CMDS ((1u << CFW_BLIT) | (1u << CFW_FILL) | (1u << CFW_FLUSH) | (1u << CFW_TEXT) | \
+                         (1u << CFW_ASSET_DRAW) | (1u << CFW_ASSET_TEXT) | (1u << CFW_SHAPES))
+
+/* Run one command record (same bodies as the packet commands). Callers hold
+ * the LCD lock, which keeps the display-thread tick out of the scene. */
+CFW_COLD static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 {
+    if (cmd < 32 && ((CFW_DIRECT_CMDS >> cmd) & 1u)) {
+        cfw_window();
+    }
     switch (cmd) {
     case CFW_BLIT:  return cfw_blit(p, n);
     case CFW_FILL:  return cfw_fill(p, n);
@@ -3286,7 +3473,7 @@ static uint8_t cfw_run_record(uint8_t cmd, const uint8_t *p, uint32_t n)
 
 /* A message is a list of records: [cmd:u8][len:u16][payload]. Returns the
  * status of the first failing record and its index in *done. */
-static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *done)
+CFW_COLD static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *done)
 {
     uint32_t pos = 0;
     uint8_t deferred = 0;
@@ -3321,7 +3508,7 @@ static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *done)
 
 /* STREAM packet: [seq][flags][data]. FIRST data starts with [total:u16][crc:u16].
  * Only the LAST packet (or an error) is answered: [status][seq][records done]. */
-static void cfw_stream(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_stream(const uint8_t *p, uint32_t n)
 {
     cfw_ctx *c = cfw_context();
     uint8_t *buf = cfw_msg_buf();
@@ -3380,7 +3567,9 @@ static void cfw_stream(const uint8_t *p, uint32_t n)
             status = c->done_status;
             body[1] = c->done_records;
         } else {
+            FW_LCD_LOCK(-1);
             status = cfw_run_message(buf, c->msg_len, &body[1]);
+            FW_LCD_UNLOCK();
             c->stream_msgs++;
             c->done_total = c->msg_total;
             c->done_crc = c->msg_crc;
@@ -3399,7 +3588,7 @@ static void cfw_stream(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_STREAM, status, body, sizeof body);
 }
 
-static void cfw_stats(void)
+CFW_COLD static void cfw_stats(void)
 {
     cfw_ctx *c = cfw_context();
     uint8_t body[12];
@@ -3420,7 +3609,7 @@ static void cfw_stats(void)
 
 /* [addr:u32][len]: read up to 16 bytes of memory (diagnostics for RAM
  * reclaim decisions). Reply body: the bytes. */
-static void cfw_peek(const uint8_t *p, uint32_t n)
+CFW_COLD static void cfw_peek(const uint8_t *p, uint32_t n)
 {
     if (n < 5) {
         cfw_reply(CFW_PEEK, CFW_BAD_LENGTH, 0, 0);
@@ -3431,7 +3620,7 @@ static void cfw_peek(const uint8_t *p, uint32_t n)
     cfw_reply(CFW_PEEK, CFW_OK, FW_PEEK_PTR(addr), len);
 }
 
-static void cfw_ping(void)
+CFW_COLD static void cfw_ping(void)
 {
     uint8_t id[16];
     uint32_t n = 0, rev = CFW_PROTOCOL;
@@ -3450,7 +3639,7 @@ static void cfw_ping(void)
     cfw_reply(CFW_PING, CFW_OK, id, n);
 }
 
-int cfw_rx(const uint8_t *data, uint32_t len)
+CFW_COLD int cfw_rx(const uint8_t *data, uint32_t len)
 {
     if (len >= 1 && (data[0] == STOCK_BMP_DATA || data[0] == STOCK_BMP_CRC || data[0] == STOCK_BMP_END)) {
         cfw_context()->stock_swallowed++;  /* the stock flow would write our RAM */
@@ -3471,17 +3660,9 @@ int cfw_rx(const uint8_t *data, uint32_t len)
         cfw_info();
         break;
     case CFW_BLIT:
-        cfw_reply(CFW_BLIT, cfw_blit(data + 2, len - 2), 0, 0);
-        break;
     case CFW_FILL:
-        cfw_reply(CFW_FILL, cfw_fill(data + 2, len - 2), 0, 0);
-        break;
     case CFW_FLUSH:
-        cfw_reply(CFW_FLUSH, cfw_flush_cmd(data + 2, len - 2), 0, 0);
-        break;
     case CFW_TEXT:
-        cfw_reply(CFW_TEXT, cfw_text(data + 2, len - 2), 0, 0);
-        break;
     case CFW_ASSET_PUT:
     case CFW_ASSET_DRAW:
     case CFW_ASSET_TEXT:
@@ -3491,9 +3672,13 @@ int cfw_rx(const uint8_t *data, uint32_t len)
     case CFW_OBJ_SHOW:
     case CFW_OBJ_HIDE:
     case CFW_OBJ_CONTROL:
-    case CFW_OBJ_ANIM:
-        cfw_reply(data[1], cfw_run_record(data[1], data + 2, len - 2), 0, 0);
+    case CFW_OBJ_ANIM: {
+        FW_LCD_LOCK(-1);
+        uint8_t status = cfw_run_record(data[1], data + 2, len - 2);
+        FW_LCD_UNLOCK();
+        cfw_reply(data[1], status, 0, 0);
         break;
+    }
     case CFW_OBJ_STATE:
         cfw_obj_state(data + 2, len - 2);
         break;

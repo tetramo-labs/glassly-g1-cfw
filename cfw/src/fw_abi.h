@@ -32,7 +32,16 @@ typedef uint8_t *(*fw_get_state_fn)(void);
 #define FW_GET_STATE ((fw_get_state_fn)0x0001681d)
 #endif
 
-/* Panel context inside GlassesState; 640x200 canvas on a 640x480 panel. */
+/* sys_clock_tick_get_32: kernel ticks at 32768 Hz (k_msleep at 0x7fef6
+ * converts ms << 15 / 1000). Wraps after 36 hours. */
+typedef uint32_t (*fw_ticks_fn)(void);
+#ifndef FW_TICKS32
+#define FW_TICKS32 ((fw_ticks_fn)0x00089e41)
+#endif
+
+/* Panel context inside GlassesState; a 640x200 frame buffer on a 640x480
+ * panel. The CFW canvas is taller and is composed through the buffer in
+ * bands of at most FW_FRAME_HEIGHT rows. */
 #define FW_PANEL_OFFSET      0xb6c
 #define FW_PANEL_FRAME       0x344
 #define FW_PANEL_COL_OFFSET  0x348
