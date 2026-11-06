@@ -1,5 +1,5 @@
 /*
- * G1CFW/47: injected handler for the private 0xF0 command on Even G1 1.6.3.
+ * G1CFW/48: injected handler for the private 0xF0 command on Even G1 1.6.3.
  *
  * Compiled by tools/build_blob.py into a position-independent blob that is
  * appended to the stock application image. The stock BLE receive entry calls
@@ -12,7 +12,7 @@
 #include "fw_abi.h"
 
 #define CFW_SID 0xF0u
-#define CFW_PROTOCOL 47u
+#define CFW_PROTOCOL 48u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -2501,9 +2501,14 @@ typedef struct {
     uint16_t suspends_skipped; /* stock display suspends the CFW refused */
     uint8_t  wear_off;      /* wear word at or below this: not worn, panel off */
     uint8_t  push_ticks;    /* 200 ms passes left until the frame is pushed again after power-up */
+    uint8_t  off_ticks;     /* consecutive 200 ms passes that said taken off */
 } cfw_input;
 #define CFW_PUSH_TICKS 6u       /* pushes again 600 ms and 1.2 s after power-up */
-#define CFW_INPUT_MAGIC 0x36504e49u  /* "INP6" */
+/* Taken off needs 20 s of unbroken passes before the panel goes off: the
+ * wear word dips under wear_off on a head now and then. Case and deep
+ * sleep switch it off at once. */
+#define CFW_OFF_TICKS 100u
+#define CFW_INPUT_MAGIC 0x37504e49u  /* "INP7" */
 /* The stock classification (>= 0x33 worn, < 0x28 not worn) leaves a pair
  * lying unfolded on a table (47-50 here) in its dead band for ever; on a
  * head the word read 62-74, folded in the case 25. Defaults sit between
@@ -2523,8 +2528,9 @@ enum { CFW_STOCK_WORN = 6, CFW_STOCK_TAKEN_OFF = 7, CFW_STOCK_IN_CASE_OPEN = 8, 
  * the glasses are put on, so the CFW switches it: on through the panel's
  * own callback (the stock resume path refuses while docked) followed by a
  * push of the frame buffer, which survives the power cycle while the panel
- * comes up blank; off again when taken off or cased. Fed by the stock
- * events while a central is connected and by every work-mode change. */
+ * comes up blank; off again 20 s after it is taken off, or at once when
+ * cased. Fed by the stock events while a central is connected, by every
+ * work-mode change and by the 200 ms checker passes. */
 static cfw_input *cfw_input_state(void);
 
 /* Restore the stock init-time clear without erasing the retained host frame.
@@ -2675,9 +2681,12 @@ int cfw_stock_event(uint32_t code, uint32_t p2, uint32_t p3)
     in->events++;
     in->last_event = (uint8_t)code;
     if (!(in->flags & CFW_INPUT_NO_AUTO_PANEL)) {
+        /* Taken off is left to the 200 ms passes, which see the low word
+         * or mode 4 behind it and wait out CFW_OFF_TICKS. */
         if (code == CFW_STOCK_WORN) {
+            in->off_ticks = 0;
             cfw_auto_panel(in, 1);
-        } else if (code == CFW_STOCK_TAKEN_OFF || code == CFW_STOCK_IN_CASE_OPEN || code == CFW_STOCK_IN_CASE_CLOSED) {
+        } else if (code == CFW_STOCK_IN_CASE_OPEN || code == CFW_STOCK_IN_CASE_CLOSED) {
             cfw_auto_panel(in, 0);
         }
     }
@@ -2740,28 +2749,38 @@ static void cfw_input_report(void)
 }
 
 /* Runs at the entry of the stock change_work_mode (fw_abi.h) with the
- * requested mode, on whichever thread asked for the change. The work mode
- * follows the wear sensor whether or not a central is connected, while the
- * event poster above is only fed while one is, so this is what keeps the
- * panel in step with wearing: on for 2 (normal run) and 3 (normal standby,
- * worn without a stock page), off for 4 (taken off), 5 and 6 (in the case)
- * and 8 (deep sleep). 0, 1, 7 and 9 are left to the stock body. */
-static void cfw_panel_for_mode(cfw_input *in, uint32_t mode)
+ * requested mode, on whichever thread asked for the change, and on every
+ * 200 ms checker pass (`tick`). The work mode follows the wear sensor
+ * whether or not a central is connected, while the event poster above is
+ * only fed while one is, so this is what keeps the panel in step with
+ * wearing: on for 2 (normal run) and 3 (normal standby, worn without a
+ * stock page), off after CFW_OFF_TICKS passes of 4 (taken off) or a low
+ * word, off at once for 5 and 6 (in the case) and 8 (deep sleep). 0, 1, 7
+ * and 9 are left to the stock body. Only the passes count towards the
+ * wait; anything but taken off starts it over. */
+static void cfw_panel_for_mode(cfw_input *in, uint32_t mode, int tick)
 {
     if (in->flags & CFW_INPUT_NO_AUTO_PANEL) {
+        in->off_ticks = 0;
         return;
     }
+    int off = mode == 4;
     if (mode == 2 || mode == 3) {
         /* Stock says worn, but its dead band is wide (fw_abi.h): classify
          * the radio-link word with the CFW thresholds. 0 means no
          * statistics yet (first seconds after boot): trust the mode. */
         uint32_t word = FW_WEAR_WORD();
+        off = word != 0 && word <= in->wear_off;
         if (word == 0 || word >= in->wear_on) {
             cfw_auto_panel(in, 1);
-        } else if (word <= in->wear_off) {
-            cfw_auto_panel(in, 0);
         }
-    } else if ((mode >= 4 && mode <= 6) || mode == 8) {
+    } else if (mode == 5 || mode == 6 || mode == 8) {
+        cfw_auto_panel(in, 0);
+    }
+    if (!off) {
+        in->off_ticks = 0;
+    } else if (tick && ++in->off_ticks >= CFW_OFF_TICKS) {
+        in->off_ticks = CFW_OFF_TICKS;
         cfw_auto_panel(in, 0);
     }
 }
@@ -2771,7 +2790,7 @@ int cfw_work_mode(uint32_t mode)
     cfw_input *in = cfw_input_state();
     in->mode_changes++;
     in->last_mode = (uint8_t)mode;
-    cfw_panel_for_mode(in, mode);
+    cfw_panel_for_mode(in, mode, 0);
     return 0;
 }
 
@@ -2791,7 +2810,7 @@ int cfw_work_mode_tick(void)
          * only follow the wearer while it is on. */
         state[FW_STATE_WEAR_DETECT] = 1;
     }
-    cfw_panel_for_mode(in, state[FW_STATE_WORK_MODE]);
+    cfw_panel_for_mode(in, state[FW_STATE_WORK_MODE], 1);
     if (in->push_ticks) {
         in->push_ticks--;
         if (in->push_ticks == CFW_PUSH_TICKS / 2 || in->push_ticks == 0) {

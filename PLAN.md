@@ -2,8 +2,10 @@
 
 Updated: 2026-11-05
 
-Current build: **G1CFW/47, stock 1.6.3**. Revision 47 fixes visible panel
-clearing during wear-triggered wake; see [wake fix](docs/G1_CFW_47_PANEL_WAKE.md). The ABI and memory port is complete
+Current build: **G1CFW/48, stock 1.6.3**. Revision 48 waits 20 s of
+off-head readings before the panel turns off; see [wear-off grace](docs/G1_CFW_48_WEAR_GRACE.md).
+Revision 47 fixed visible panel clearing during wear-triggered wake; see
+[wake fix](docs/G1_CFW_47_PANEL_WAKE.md). The ABI and memory port is complete
 and passes offline tests; it has not been hardware-tested. See
 [port evidence and reproduction](docs/G1_CFW_163_PORT.md). Earlier sessions
 below refer to 1.5.60 unless explicitly stated otherwise.

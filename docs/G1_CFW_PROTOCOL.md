@@ -1,6 +1,6 @@
 # G1CFW private protocol (command byte `0xF0`)
 
-G1CFW/47 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
+G1CFW/48 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
 revisions through 45 used 1.5.60. See the [port evidence](G1_CFW_163_PORT.md).
 The stock BLE receive hook call at `0x23d4e` calls `spec_ble_command_hook(data, len)` and only
 forwards a packet to the request dispatcher when that hook returns non-zero;
@@ -471,7 +471,16 @@ from G1CFW/31 the CFW classifies the word itself while the stock mode says
 worn: panel on at or above `wear_on`, off at or below `wear_off`, unchanged
 in between, and a word of 0 (no statistics yet after boot) trusts the
 mode. `g1flash.py touch control --wear-on N --wear-off M` sets the pair.
-With bit 4 set everything stands down and the stock suspend works again.
+From G1CFW/48 taken off waits: the panel goes off only after 100
+consecutive 200 ms checker passes (20 s) that each say taken off (mode 4,
+or mode 2/3 with a nonzero word at or below `wear_off`). Any other pass
+(worn, the dead band, any other mode) starts the wait over, as does the
+`worn` event; mode changes and the `taken off` event switch nothing
+themselves. Case open/closed (events 8, `0b`; modes 5, 6) and deep sleep
+(mode 8) still switch off at once, and putting the glasses on is still
+immediate. The wait is fixed; INPUT_CONTROL is unchanged.
+With bit 4 set everything stands down (the wait is dropped) and the stock
+suspend works again.
 PANEL (`05`) still works for manual control.
 - `32` INPUT_EVENT: unsolicited `F0 32 00 [class][code][count:u16]`, class 0
   gesture, class 1 stock event, from the temple that produced it. The host

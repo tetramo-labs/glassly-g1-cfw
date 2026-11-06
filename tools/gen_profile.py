@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--stock', type=Path, default=ROOT / 'build/even-g1-1.6.3.zip')
     parser.add_argument('--key', type=Path, default=ROOT / 'build/keys/root-rsa-2048.pem')
     parser.add_argument('--source', type=Path, default=ROOT / 'cfw/src/g1cfw.c')
-    parser.add_argument('--protocol', type=int, default=47)
+    parser.add_argument('--protocol', type=int, default=48)
     parser.add_argument('--out', type=Path, default=ROOT / 'profiles/g1-1.6.3-cfw.json')
     parser.add_argument('--upgrade-from', type=Path, action='append', default=[],
                         help='Older profile whose installed image may be upgraded in place')
