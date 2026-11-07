@@ -2,7 +2,8 @@
 
 Updated: 2026-11-06
 
-Current build: **G1CFW/49, stock 1.6.3**. Revision 49 times tweens by the
+Current build: **G1CFW/50, stock 1.6.3**. Revision 50 takes STREAM messages
+as LZ4 blocks decoded in place (protocol doc, STREAM). Revision 49 times tweens by the
 clock instead of counting frames, and composes a 640x380 canvas through the
 200-row buffer; see [canvas and timing](docs/G1_CFW_49_CANVAS_AND_TIMING.md).
 Revision 48 waits 20 s of off-head readings before the panel turns off; see

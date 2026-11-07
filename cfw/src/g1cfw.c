@@ -1,5 +1,5 @@
 /*
- * G1CFW/49: injected handler for the private 0xF0 command on Even G1 1.6.3.
+ * G1CFW/50: injected handler for the private 0xF0 command on Even G1 1.6.3.
  *
  * Compiled by tools/build_blob.py into a position-independent blob that is
  * appended to the stock application image. The stock BLE receive entry calls
@@ -15,7 +15,7 @@
 /* Command, panel and input handlers are built for size; the per-frame
  * paths (composition, rasterizers, text, push, tweens) stay at -Os. */
 #define CFW_COLD __attribute__((minsize))
-#define CFW_PROTOCOL 49u
+#define CFW_PROTOCOL 50u
 
 enum { CFW_PING = 0x00, CFW_BLIT = 0x01, CFW_FILL = 0x02, CFW_FLUSH = 0x03, CFW_INFO = 0x04,
        CFW_PANEL = 0x05, CFW_TEXT = 0x06, CFW_COPY = 0x07, CFW_ASSET_PUT = 0x08,
@@ -35,6 +35,27 @@ enum { CFW_OK = 0x00, CFW_BAD_LENGTH = 0x01, CFW_BAD_COMMAND = 0x02, CFW_BAD_REC
 #define STOCK_BMP_DATA 0x15u
 #define STOCK_BMP_CRC  0x16u
 #define STOCK_BMP_END  0x20u
+/* Stock commands that feed screens the CFW replaced and write the RAM those
+ * screens read, 0x20010dbc..0x20017d2f, which holds the CFW's third region
+ * (0x0A navigation clears 0x20012a4f + 0x40d0; 0x06 subcommand 7 copies to
+ * 0x200143cb): dashboard 0x06 subcommands 3-7 (1 and 2, time and weather,
+ * stay stock), 0x09, navigation 0x0A, quick notes 0x1E subcommands 3 and 8. */
+#define STOCK_DASHBOARD 0x06u
+#define STOCK_TELEPROMPTER 0x09u
+#define STOCK_NAVIGATION 0x0Au
+#define STOCK_QUICK_NOTE 0x1Eu
+
+static int cfw_stock_writes_our_ram(const uint8_t *data, uint32_t len)
+{
+    uint8_t cmd = data[0];
+    if (cmd == STOCK_BMP_DATA || cmd == STOCK_BMP_CRC || cmd == STOCK_BMP_END || cmd == STOCK_TELEPROMPTER || cmd == STOCK_NAVIGATION) {
+        return 1;
+    }
+    if (len < 5) {
+        return 0;
+    }
+    return (cmd == STOCK_DASHBOARD && data[4] >= 3 && data[4] <= 7) || (cmd == STOCK_QUICK_NOTE && (data[4] == 3 || data[4] == 8));
+}
 
 /* --- CFW context in the reclaimed staging buffer ---------------------- */
 #define CFW_CTX_MAGIC 0x31574643u  /* "CFW1" */
@@ -60,7 +81,7 @@ typedef struct {
     uint8_t  done_records; /* its records-done count */
     uint8_t  done_valid;
     uint8_t  done_status;  /* result of the last executed message, independent of transport errors */
-    uint8_t  pad;
+    uint8_t  msg_lz4;      /* the message in flight is one LZ4 block, assembled at the buffer's end */
 } cfw_ctx;                 /* 40 bytes, then the message buffer, then the directory */
 
 /* --- asset store: directory in the reclaimed RAM, bytes in a heap arena --- */
@@ -3505,6 +3526,45 @@ CFW_COLD static uint8_t cfw_run_message(const uint8_t *m, uint32_t n, uint8_t *d
 #define CFW_STREAM_FIRST 0x01u
 #define CFW_STREAM_LAST  0x02u
 #define CFW_STREAM_ONCE  0x04u   /* on the LAST packet: a repeat of the message that ran last is acknowledged, not re-run */
+#define CFW_STREAM_LZ4   0x08u   /* on the FIRST packet: the message is [raw:u16] and one LZ4 block of the records */
+
+/* Decode one LZ4 block from [ip, iend) into out[0, cap): every read and
+ * write is bounds checked and a match may only reach back into what was
+ * written. The caller places the block at the end of the buffer it decodes
+ * into, so the output runs up behind the input (LZ4's in-place margin).
+ * Returns the bytes written, or -1 for a malformed block. */
+static int32_t cfw_lz4(const uint8_t *ip, const uint8_t *iend, uint8_t *out, uint32_t cap)
+{
+    uint8_t *op = out, *oend = out + cap;
+    for (;;) {
+        if (ip >= iend) return -1;
+        uint32_t token = *ip++, lit = token >> 4, b;
+        if (lit == 15) {
+            do {
+                if (ip >= iend) return -1;
+                b = *ip++;
+                lit += b;
+            } while (b == 255);
+        }
+        if (lit > (uint32_t)(iend - ip) || lit > (uint32_t)(oend - op)) return -1;
+        while (lit--) *op++ = *ip++;
+        if (ip == iend) return (int32_t)(op - out);   /* the last sequence is literals only */
+        if (iend - ip < 2) return -1;
+        uint32_t off = ip[0] | (uint32_t)ip[1] << 8, len = (token & 15u) + 4u;
+        ip += 2;
+        if (off == 0 || off > (uint32_t)(op - out)) return -1;
+        if ((token & 15u) == 15u) {
+            do {
+                if (ip >= iend) return -1;
+                b = *ip++;
+                len += b;
+            } while (b == 255);
+        }
+        if (len > (uint32_t)(oend - op)) return -1;
+        const uint8_t *m = op - off;
+        while (len--) *op++ = *m++;
+    }
+}
 
 /* STREAM packet: [seq][flags][data]. FIRST data starts with [total:u16][crc:u16].
  * Only the LAST packet (or an error) is answered: [status][seq][records done]. */
@@ -3530,6 +3590,7 @@ CFW_COLD static void cfw_stream(const uint8_t *p, uint32_t n)
             c->msg_crc = rd16(data + 2);
             c->msg_len = 0;
             c->msg_active = 1;
+            c->msg_lz4 = (flags & CFW_STREAM_LZ4) != 0;
             data += 4;
             len -= 4;
             if (c->msg_total > CFW_MSG_MAX) {
@@ -3545,8 +3606,10 @@ CFW_COLD static void cfw_stream(const uint8_t *p, uint32_t n)
         if (len > (uint32_t)(c->msg_total - c->msg_len)) {
             status = CFW_TOO_BIG;
         } else {
+            /* A compressed message is assembled at the end of the buffer so it can be decoded in place. */
+            uint8_t *dst = buf + (c->msg_lz4 ? CFW_MSG_MAX - c->msg_total : 0) + c->msg_len;
             for (uint32_t i = 0; i < len; i++) {
-                buf[c->msg_len + i] = data[i];
+                dst[i] = data[i];
             }
             c->msg_len = (uint16_t)(c->msg_len + len);
             c->msg_seq = seq;
@@ -3559,7 +3622,7 @@ CFW_COLD static void cfw_stream(const uint8_t *p, uint32_t n)
         c->msg_active = 0;
         if (c->msg_len != c->msg_total) {
             status = CFW_BAD_LENGTH;
-        } else if (cfw_crc16(buf, c->msg_len) != c->msg_crc) {
+        } else if (cfw_crc16(buf + (c->msg_lz4 ? CFW_MSG_MAX - c->msg_total : 0), c->msg_len) != c->msg_crc) {
             status = CFW_BAD_CRC;
         } else if ((flags & CFW_STREAM_ONCE) && c->done_valid && c->done_total == c->msg_total && c->done_crc == c->msg_crc) {
             /* The host lost our reply and sent the message again: answer as
@@ -3567,9 +3630,24 @@ CFW_COLD static void cfw_stream(const uint8_t *p, uint32_t n)
             status = c->done_status;
             body[1] = c->done_records;
         } else {
-            FW_LCD_LOCK(-1);
-            status = cfw_run_message(buf, c->msg_len, &body[1]);
-            FW_LCD_UNLOCK();
+            uint32_t run = c->msg_len;
+            if (c->msg_lz4) {
+                /* [raw:u16][block]: the decoded records must leave LZ4's in-place
+                 * margin, (block >> 8) + 32 bytes, below the block's start. */
+                const uint8_t *m = buf + CFW_MSG_MAX - c->msg_total;
+                uint32_t block = c->msg_total >= 2 ? c->msg_total - 2u : 0u;
+                run = c->msg_total >= 3 ? rd16(m) : 0u;
+                if (!run || run + (block >> 8) + 32u > CFW_MSG_MAX ||
+                    cfw_lz4(m + 2, buf + CFW_MSG_MAX, buf, run) != (int32_t)run) {
+                    status = CFW_BAD_RLE;
+                    run = 0;
+                }
+            }
+            if (status == CFW_OK) {
+                FW_LCD_LOCK(-1);
+                status = cfw_run_message(buf, run, &body[1]);
+                FW_LCD_UNLOCK();
+            }
             c->stream_msgs++;
             c->done_total = c->msg_total;
             c->done_crc = c->msg_crc;
@@ -3641,7 +3719,7 @@ CFW_COLD static void cfw_ping(void)
 
 CFW_COLD int cfw_rx(const uint8_t *data, uint32_t len)
 {
-    if (len >= 1 && (data[0] == STOCK_BMP_DATA || data[0] == STOCK_BMP_CRC || data[0] == STOCK_BMP_END)) {
+    if (len >= 1 && cfw_stock_writes_our_ram(data, len)) {
         cfw_context()->stock_swallowed++;  /* the stock flow would write our RAM */
         return 0;
     }

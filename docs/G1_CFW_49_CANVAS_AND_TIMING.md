@@ -1,5 +1,8 @@
 # G1CFW/49: timed tweens and a 640x380 canvas
 
+G1CFW/50 adds LZ4-compressed STREAM messages on top of this (see the protocol
+document's STREAM section); everything below still applies.
+
 Revision 49 is stock 1.6.3 with two changes. It passes the offline suite
 (90 tests, the ASan/UBSan host test and the shapes-suite replay) and has not
 been flashed.

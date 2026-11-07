@@ -1,6 +1,6 @@
 # G1CFW private protocol (command byte `0xF0`)
 
-G1CFW/49 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
+G1CFW/50 is injected by `cfw/src/g1cfw.c` on Even G1 application **1.6.3**;
 revisions through 45 used 1.5.60. See the [port evidence](G1_CFW_163_PORT.md)
 and, for the 640x380 canvas and timed tweens, [G1CFW/49](G1_CFW_49_CANVAS_AND_TIMING.md).
 The stock BLE receive hook call at `0x23d4e` calls `spec_ble_command_hook(data, len)` and only
@@ -338,6 +338,16 @@ The host matches replies to the current message's packet sequence range
 packet, and uses one acknowledgement deadline even when stale replies arrive.
 This remains a length/CRC-based replay cache, not a unique request ID.
 
+From G1CFW/50, flag bit 3 on the first packet marks a **compressed** message:
+the declared length and CRC cover `[raw:u16]` followed by one LZ4 block (the
+standard block format) that decodes to the `raw` bytes of records. The packets
+are assembled at the end of the 4 KB buffer and decoded in place, so `raw` plus
+LZ4's in-place margin, `(block >> 8) + 32`, must fit in 4096 bytes. A block
+that is malformed, decodes to a different length, or leaves no margin is
+refused with `09` (bad RLE) before any record runs. ONCE compares the
+compressed bytes. G1CFW/50 has no persistent compression context: every
+message is a block of its own.
+
 A message is a list of records `[cmd:u8][len:u16][payload]` using the BLIT,
 FILL, FLUSH and TEXT payloads above, so one message can carry a clear, several
 compressed bands and a single flush. The first failing record stops the
@@ -522,6 +532,14 @@ development firmware.
 `0x15` (BMP data), `0x16` (BMP CRC) and `0x20` (BMP end) are consumed without
 reply: their staging RAM at `0x20017d30` on 1.6.3 (5,120 bytes) now holds the CFW
 context and the 4 KB message buffer.
+
+From G1CFW/50 the CFW also consumes the stock data of screens it replaced, whose
+buffers (`0x20010dbc..0x20017d2f`) contain the CFW's third RAM region: `0x09`,
+`0x0A` (navigation, which clears `0x20012a4f` + 16,592 bytes), dashboard `0x06`
+subcommands 3-7 (byte 4; 7 copies to `0x200143cb`) and quick-note `0x1E`
+subcommands 3 and 8. `0x06` subcommands 1 and 2 (time and weather) still reach
+the stock handler. The stock `#cmd@...` string path, which synthesizes binary
+commands inside `spec_ble_command_hook`, is not filtered.
 
 ## Caveats
 

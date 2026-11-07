@@ -457,7 +457,7 @@ int main(int argc, char **argv)
     const uint8_t ping[] = { 0xF0, 0x00 };
     CHECK(send_packet(ping, sizeof ping) == 0 && hook_calls == 3);
     CHECK(last_reply_len == 15 && last_reply[0] == 0xF0 && last_reply[1] == 0 && last_reply[2] == 0);
-    CHECK(memcmp(last_reply + 3, "G1CFW/49", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
+    CHECK(memcmp(last_reply + 3, "G1CFW/50", 9) == 0 && last_reply[12] == 1 && last_reply[13] == 6 && last_reply[14] == 3);
 
     /* Short and unknown commands are answered, never dispatched. */
     const uint8_t only_sid[] = { 0xF0 };
@@ -550,6 +550,24 @@ int main(int argc, char **argv)
     CHECK(send_packet(bmp, sizeof bmp) == 0 && hook_calls == 0 && last_reply_len == 0);
     const uint8_t bmp_end[] = { 0x20, 0x0D, 0x0E };
     CHECK(send_packet(bmp_end, sizeof bmp_end) == 0 && hook_calls == 0);
+    /* Navigation, teleprompter, and the dashboard and quick-note subcommands whose
+     * data lands in the CFW's third region are swallowed too; time and weather
+     * sync (0x06 subcommands 1 and 2) and the rest still reach the stock hook. */
+    const uint8_t nav[] = { 0x0A, 0x01, 0x00, 0x00, 0x01 };
+    const uint8_t prompter[] = { 0x09, 0x05, 0x00 };
+    const uint8_t dash7[] = { 0x06, 0x10, 0x00, 0x00, 0x07, 0x01 };
+    const uint8_t dash3[] = { 0x06, 0x10, 0x00, 0x00, 0x03, 0x01 };
+    const uint8_t note8[] = { 0x1E, 0x10, 0x00, 0x00, 0x08 };
+    CHECK(send_packet(nav, sizeof nav) == 0 && send_packet(prompter, sizeof prompter) == 0 && hook_calls == 0);
+    CHECK(send_packet(dash7, sizeof dash7) == 0 && send_packet(dash3, sizeof dash3) == 0 && send_packet(note8, sizeof note8) == 0);
+    CHECK(hook_calls == 0 && last_reply_len == 0);
+    const uint8_t weather[] = { 0x06, 0x15, 0x00, 0x00, 0x01, 0x00 };
+    const uint8_t layout[] = { 0x26, 0x08, 0x00, 0x01, 0x02, 0x01 };
+    const uint8_t note1[] = { 0x1E, 0x10, 0x00, 0x00, 0x01 };
+    const uint8_t dash_short[] = { 0x06, 0x04 };
+    CHECK(send_packet(weather, sizeof weather) == 1 && send_packet(layout, sizeof layout) == 1);
+    CHECK(send_packet(note1, sizeof note1) == 1 && send_packet(dash_short, sizeof dash_short) == 1 && hook_calls == 4);
+    hook_calls = 0;
     CHECK(memcmp(host_ram + 32, "CFW1", 4) == 0);  /* context initialised lazily with its magic */
     CHECK(host_ram[0] == 0 && host_ram[sizeof host_ram - 1] == 0);  /* guards around the arena */
 
@@ -601,6 +619,55 @@ int main(int argc, char **argv)
     s1_next[2] = 13; s2_next[2] = 14; s3_once[2] = 15; s3_once[3] = 0x02;
     CHECK(send_packet(s1_next, sizeof s1_next) == 0 && send_packet(s2_next, sizeof s2_next) == 0 && send_packet(s3_once, sizeof s3_once) == 0);
     CHECK(last_reply[2] == CFW_OK && reflash_calls == 2);                                                  /* without the flag it runs */
+    /* LZ4 (G1CFW/50): a block decodes with bounds checks; a match reaches back
+     * only into what was written. "abc", a 12-byte match at offset 3, "xyz12". */
+    {
+        const uint8_t block[] = { 0x38, 'a', 'b', 'c', 3, 0, 0x50, 'x', 'y', 'z', '1', '2' };
+        uint8_t out[32];
+        CHECK(cfw_lz4(block, block + sizeof block, out, sizeof out) == 20 && memcmp(out, "abcabcabcabcabcxyz12", 20) == 0);
+        CHECK(cfw_lz4(block, block + sizeof block, out, 19) == -1);              /* output would overflow */
+        CHECK(cfw_lz4(block, block + 5, out, sizeof out) == -1);                 /* offset cut short */
+        const uint8_t far[] = { 0x38, 'a', 'b', 'c', 4, 0, 0x50, 'x', 'y', 'z', '1', '2' };
+        CHECK(cfw_lz4(far, far + sizeof far, out, sizeof out) == -1);            /* reaches before the output */
+        const uint8_t zero[] = { 0x38, 'a', 'b', 'c', 0, 0, 0x50, 'x', 'y', 'z', '1', '2' };
+        CHECK(cfw_lz4(zero, zero + sizeof zero, out, sizeof out) == -1);         /* offset 0 */
+        /* The phones' compressor output (G1CfwProtocol.lz4Compress reference vector). */
+        const uint8_t phone[] = { 0xff, 0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x00, 0x1d, 0xf0, 0x04, 0x74, 0x61, 0x69, 0x6c, 0x20, 0x6f, 0x66, 0x20, 0x74, 0x68, 0x65, 0x20, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65 };
+        uint8_t big[96];
+        CHECK(cfw_lz4(phone, phone + sizeof phone, big, sizeof big) == 83 && memcmp(big + 64, "tail of the message", 19) == 0);
+        for (int i = 0; i < 64; i++) CHECK(big[i] == i % 16);
+    }
+    /* A compressed STREAM message: [raw:u16] and the block (here literals only)
+     * are assembled at the buffer's end and decoded in place before running. */
+    {
+        memset(frame, 0, 200 * 320);
+        reflash_calls = 0;
+        uint8_t z[2 + 2 + 24];
+        z[0] = sizeof msg; z[1] = 0;                                             /* raw: the 24-byte FILL + FLUSH message */
+        z[2] = 0xF0; z[3] = sizeof msg - 15;                                     /* 24 literals */
+        memcpy(z + 4, msg, sizeof msg);
+        uint16_t zcrc = cfw_crc16(z, sizeof z);
+        uint8_t zp[8 + sizeof z] = { 0xF0, 0x10, 50, 0x01 | 0x02 | 0x08, (uint8_t)sizeof z, 0, (uint8_t)zcrc, (uint8_t)(zcrc >> 8) };
+        memcpy(zp + 8, z, sizeof z);
+        CHECK(send_packet(zp, sizeof zp) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 2);
+        CHECK(frame[6 * 320 + 2] == 0x77 && frame[7 * 320 + 5] == 0x77 && reflash_calls == 1);
+        /* The same bytes again with ONCE: acknowledged, not re-run. */
+        zp[2] = 51; zp[3] |= 0x04;
+        CHECK(send_packet(zp, sizeof zp) == 0 && last_reply[2] == CFW_OK && last_reply[4] == 2 && reflash_calls == 1);
+        /* A raw length that leaves no in-place margin, and a corrupt block, are refused. */
+        uint8_t big[sizeof z];
+        memcpy(big, z, sizeof z); big[0] = 0xF0; big[1] = 0x0F;                  /* raw 4080 */
+        uint16_t bcrc = cfw_crc16(big, sizeof big);
+        uint8_t bp[8 + sizeof big] = { 0xF0, 0x10, 52, 0x01 | 0x02 | 0x08, (uint8_t)sizeof big, 0, (uint8_t)bcrc, (uint8_t)(bcrc >> 8) };
+        memcpy(bp + 8, big, sizeof big);
+        CHECK(send_packet(bp, sizeof bp) == 0 && last_reply[2] == CFW_BAD_RLE);
+        memcpy(big, z, sizeof z); big[0] = sizeof msg + 1;                        /* decodes 24, declares 25 */
+        bcrc = cfw_crc16(big, sizeof big);
+        bp[2] = 53; bp[6] = (uint8_t)bcrc; bp[7] = (uint8_t)(bcrc >> 8);
+        memcpy(bp + 8, big, sizeof big);
+        CHECK(send_packet(bp, sizeof bp) == 0 && last_reply[2] == CFW_BAD_RLE && reflash_calls == 1);
+        for (int i = 0; i < 32; i++) { CHECK(host_ram[i] == 0); CHECK(host_ram[sizeof host_ram - 1 - i] == 0); }
+    }
     /* Oversized declared length is refused immediately. */
     uint8_t big[] = { 0xF0, 0x10, 1, 0x01, 0x01, 0x20, 0, 0 };
     CHECK(send_packet(big, sizeof big) == 0 && last_reply[2] == CFW_TOO_BIG);
@@ -630,7 +697,9 @@ int main(int argc, char **argv)
 
     /* Stats reflect the traffic above. */
     const uint8_t stats[] = { 0xF0, 0x11 };
-    CHECK(send_packet(stats, sizeof stats) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 5 && last_reply[5] == 5 && last_reply[7] == 2);   /* the ONCE repeat did not count */
+    /* Three compressed messages ran (two refused); the ONCE repeats did not count;
+     * seven stock packets were swallowed. */
+    CHECK(send_packet(stats, sizeof stats) == 0 && last_reply[2] == CFW_OK && last_reply[3] == 8 && last_reply[5] == 7 && last_reply[7] == 7);
 
     /* TEXT: clear box, draw "Hi" with font 0 at (32,32)-(608,59), flush. */
     memset(frame, 0xAA, 200 * 320);
