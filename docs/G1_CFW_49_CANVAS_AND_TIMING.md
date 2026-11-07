@@ -68,10 +68,14 @@ The stock height gear puts the canvas top at `(8 - gear) * 35` (row 210 at
 gear 2), so the bottom 110 rows of the canvas are off the panel until the
 host moves it with VIEW. `g1flash.py view --height` spreads the gears over
 the 100 rows a 380-row canvas can move: `(8 - gear) * 100 / 8`, giving row 75
-at gear 2. **How much of the 480-row panel the optics show is not
-measured.** The /44 report saw lit strips only about 5 rows past the 200-row
-canvas at gear 2, so check by eye before laying out content near the canvas
-edges.
+at gear 2. The /44 report saw lit strips only about 5 rows past the 200-row
+canvas at gear 2, so the visible extent was in doubt.
+
+**Hardware (2026-11-07).** G1CFW/50 was installed on both temples over /48
+from the Mac (`stage`, `activate`, `verify`; one upload pass each, both
+images active and confirmed, `#t` reporting `G1CFW/50`), and the 380-row
+canvas shows on the glasses as built. Clock-timed tweens and the /50 LZ4
+messages have not been checked on hardware yet.
 
 ## Code space
 
